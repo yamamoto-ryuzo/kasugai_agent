@@ -1,0 +1,297 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>KASUGAI Agent — チャット</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: "Segoe UI", system-ui, sans-serif; font-size: 14px;
+         color: #1f2937; background: #f3f5f8; height: 100vh; display: flex; }
+  /* ---- 左サイドバー ---- */
+  #side { width: 230px; min-width: 230px; background: #fff; border-right: 1px solid #e5e7eb;
+          display: flex; flex-direction: column; }
+  #side .brand { padding: 14px 14px 10px; font-weight: 700; font-size: 15px; }
+  #side .brand small { display: block; font-weight: 400; color: #9ca3af; font-size: 11px; }
+  #sess { flex: 1; overflow-y: auto; padding: 4px 8px; }
+  .csess { display: flex; align-items: center; gap: 6px; padding: 8px 10px; margin: 2px 0;
+           border-radius: 7px; cursor: pointer; font-size: 13px; color: #374151;
+           border: 1px solid transparent; }
+  .csess:hover { background: #f3f4f6; }
+  .csess.active { background: #eff6ff; border-color: #bfdbfe; color: #1d4ed8; }
+  .csess .lbl { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .csess .dot { color: #2563eb; }
+  .csess .x { color: #9ca3af; padding: 0 2px; border-radius: 4px; visibility: hidden; }
+  .csess:hover .x { visibility: visible; }
+  .csess .x:hover { color: #dc2626; background: #fee2e2; }
+  #newbtn { margin: 8px; padding: 8px; border: 1px dashed #cbd5e1; border-radius: 7px;
+            text-align: center; cursor: pointer; color: #475569; font-size: 13px; }
+  #newbtn:hover { background: #f8fafc; }
+  /* ---- メイン ---- */
+  #main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+  #head { display: flex; align-items: center; gap: 8px; padding: 10px 16px;
+          background: #fff; border-bottom: 1px solid #e5e7eb; flex-wrap: wrap; }
+  #head .title { font-weight: 600; }
+  #status { color: #6b7280; font-size: 12px; }
+  #head select { font-size: 12px; padding: 3px 6px; border: 1px solid #d1d5db;
+                 border-radius: 6px; background: #fff; max-width: 220px; }
+  .spacer { flex: 1; }
+  button { font-size: 12px; padding: 5px 10px; border: 1px solid #d1d5db; border-radius: 6px;
+           background: #fff; cursor: pointer; color: #374151; }
+  button:hover { background: #f3f4f6; }
+  button.primary { background: #2563eb; border-color: #2563eb; color: #fff; }
+  button.primary:hover { background: #1d4ed8; }
+  button.primary.busy { background: #f59e0b; border-color: #f59e0b; }
+  /* ---- メッセージ ---- */
+  #box { flex: 1; overflow-y: auto; padding: 16px 20px; }
+  .msg { max-width: 82%; margin: 6px 0; padding: 9px 13px; border-radius: 12px;
+         white-space: pre-wrap; word-break: break-word; line-height: 1.55; }
+  .msg.user { margin-left: auto; background: #2563eb; color: #fff; border-bottom-right-radius: 4px; }
+  .msg.agent { background: #fff; border: 1px solid #e5e7eb; border-bottom-left-radius: 4px; }
+  .msg.thought { background: #fafaf9; border: 1px dashed #e7e5e4; color: #78716c;
+                 font-size: 12.5px; }
+  .msg.thought::before { content: "💭 "; }
+  .msg.tool { background: none; border: none; padding: 2px 13px; color: #6b7280;
+              font-size: 12px; font-family: Consolas, monospace; }
+  .msg.tool::before { content: "🔧 "; }
+  .msg.plan { background: #fffbeb; border: 1px solid #fde68a; font-size: 12.5px; }
+  .msg.sys { max-width: 100%; margin: 4px auto; background: none; border: none;
+             color: #9ca3af; font-size: 12px; text-align: center; padding: 2px; }
+  .msg .time { display: block; font-size: 10px; color: #9ca3af; margin-top: 4px; }
+  .msg.user .time { color: #bfdbfe; }
+  .typing { display: inline-block; }
+  .typing span { animation: blink 1.2s infinite; display: inline-block; }
+  .typing span:nth-child(2) { animation-delay: .2s; }
+  .typing span:nth-child(3) { animation-delay: .4s; }
+  @keyframes blink { 0%,60%,100% { opacity: .2; } 30% { opacity: 1; } }
+  /* ---- 入力 ---- */
+  #input { padding: 10px 16px 14px; background: #fff; border-top: 1px solid #e5e7eb; }
+  #imgs { margin-bottom: 6px; }
+  #imgs .thumb { position: relative; display: inline-block; margin-right: 8px; }
+  #imgs img { height: 48px; border: 1px solid #cbd5e1; border-radius: 4px; }
+  #imgs .fchip { display: inline-block; height: 48px; line-height: 48px; padding: 0 10px;
+                 font-size: 12px; border: 1px solid #cbd5e1; border-radius: 4px; }
+  #imgs .del { position: absolute; top: -6px; right: -6px; background: #dc2626; color: #fff;
+               border-radius: 50%; width: 16px; height: 16px; font-size: 12px;
+               line-height: 16px; text-align: center; cursor: pointer; }
+  #row { display: flex; gap: 8px; align-items: flex-end; }
+  #text { flex: 1; resize: none; border: 1px solid #d1d5db; border-radius: 8px;
+          padding: 9px 12px; font-family: inherit; font-size: 14px; max-height: 140px; }
+  #text:focus { outline: 2px solid #bfdbfe; border-color: #93c5fd; }
+  #hint { font-size: 11px; color: #9ca3af; margin-top: 4px; }
+</style>
+</head>
+<body>
+<div id="side">
+  <div class="brand">KASUGAI Agent<small>AI チャット</small></div>
+  <div id="newbtn" onclick="newChat()">＋ 新規チャット</div>
+  <div id="sess"></div>
+</div>
+<div id="main">
+  <div id="head">
+    <span class="title" id="ctitle">チャット</span>
+    <span id="status"></span>
+    <select id="repo-sel" onchange="repoChanged()"></select>
+    <span id="opts"></span>
+    <span class="spacer"></span>
+    <button onclick="toIssue()" title="この会話を課題候補として登録">課題化</button>
+    <button onclick="renameChat()" title="ラベルを変更">改名</button>
+    <button onclick="chatCancel()">中断</button>
+    <button onclick="chatClear()">クリア</button>
+    <button onclick="chatReset()" title="セッションを畳んで次の送信で新規開始">リセット</button>
+  </div>
+  <div id="box"><div class="msg sys">指示を入力すると devin セッションを開始します</div></div>
+  <div id="input">
+    <div id="imgs"></div>
+    <div id="row">
+      <input type="file" id="file" multiple style="display:none" onchange="onFiles(this)">
+      <button title="ファイルを添付" onclick="document.getElementById('file').click()">📎</button>
+      <textarea id="text" rows="1" placeholder="指示を入力（Enter で送信 / Shift+Enter で改行 / 実行中の追加指示も可）"
+        onkeydown="onKey(event)" onpaste="onPaste(event)" oninput="autoGrow(this)"></textarea>
+      <button class="primary" id="send" onclick="send()">送信</button>
+    </div>
+    <div id="hint">添付は貼り付け・選択どちらも可。実行中の送信は追加指示（steer）になります。</div>
+  </div>
+</div>
+<script>
+const API = '';
+let sel = null;            // 選択中チャット id（null = 新規）
+let repos = [];
+let files = [];
+let busySince = 0;
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g,
+  (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const J = (m, p, body) => fetch(API + p, {
+  method: m, headers: { 'content-type': 'application/json' },
+  body: body ? JSON.stringify(body) : undefined }).then((r) => r.json());
+
+// ---------- セッション一覧 ----------
+async function loadSessions() {
+  const j = await J('GET', '/api/chat/sessions');
+  const list = j.sessions || [];
+  document.getElementById('sess').innerHTML = list.map((s) =>
+    `<div class="csess${s.id === sel ? ' active' : ''}" onclick="chatSelect(${s.id})"
+      ${s.resumable ? 'title="ACP切断・次の送信で再開"' : ''}>
+      <span class="dot">${s.busy ? '●' : (s.resumable ? '↺' : '○')}</span>
+      <span class="lbl">${esc(s.label)}${s.repo ? ' <span style="color:#9ca3af">(' + esc(shortRepo(s.repo)) + ')</span>' : ''}</span>
+      <span class="x" onclick="event.stopPropagation();closeChat(${s.id})">✕</span>
+    </div>`).join('');
+  if (sel == null && list.length) { /* 新規画面のまま */ }
+}
+const shortRepo = (r) => String(r).split('/').pop();
+function chatSelect(id) { sel = id; loadSessions(); loadChat(); }
+function newChat() { sel = null; loadSessions(); renderEmpty(); }
+async function closeChat(id) {
+  await J('POST', '/api/chat/close', { id });
+  if (sel === id) sel = null;
+  loadSessions(); loadChat();
+}
+async function renameChat() {
+  if (sel == null) return;
+  const cur = document.getElementById('ctitle').textContent;
+  const label = prompt('チャット名', cur);
+  if (!label) return;
+  await J('POST', '/api/chat/rename', { id: sel, label });
+  loadSessions(); loadChat();
+}
+
+// ---------- チャット本体 ----------
+function renderEmpty() {
+  document.getElementById('ctitle').textContent = '新規チャット';
+  document.getElementById('status').textContent = '（未送信）';
+  document.getElementById('box').innerHTML =
+    '<div class="msg sys">指示を入力すると devin セッションを開始します</div>';
+}
+async function loadChat() {
+  if (sel == null) { renderEmpty(); return; }
+  const j = await J('GET', '/api/chat?id=' + sel);
+  document.getElementById('ctitle').textContent = j.label || ('chat ' + sel);
+  document.getElementById('status').textContent =
+    j.busy ? '（実行中…）' :
+    j.sessionId ? (j.live ? '（接続中）' : '（切断・次の送信で再開）') : '（未起動）';
+  setSendBusy(!!j.busy);
+  renderOpts(j);
+  const box = document.getElementById('box');
+  const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 60;
+  box.innerHTML = (j.messages || []).map((m) =>
+    `<div class="msg ${m.role}">${esc(m.text)}<span class="time">${(m.ts || '').slice(11, 19)}</span></div>`
+  ).join('') || '<div class="msg sys">(メッセージなし)</div>';
+  if (j.busy) {
+    box.innerHTML += '<div class="msg agent"><span class="typing"><span>●</span><span>●</span><span>●</span></span></div>';
+  }
+  if (atBottom) box.scrollTop = box.scrollHeight;
+}
+function renderOpts(j) {
+  // ACP configOptions（モデル/モード等の select 型）を常時表示
+  const opts = (j.options || []).filter((o) => o.type === 'select' && (o.options || []).length);
+  document.getElementById('opts').innerHTML = opts.map((o) =>
+    `<select title="${esc(o.name || o.id)}" onchange="setOpt('${esc(o.id)}', this.value)">` +
+    o.options.map((v) =>
+      `<option value="${esc(v.value)}"${v.value === o.currentValue ? ' selected' : ''}>${esc(o.name || o.id)}: ${esc(v.name || v.value)}</option>`
+    ).join('') + '</select>').join('');
+}
+async function setOpt(id, value) {
+  await J('POST', '/api/chat/option', { sid: sel, id, value });
+}
+function setSendBusy(busy) {
+  const b = document.getElementById('send');
+  if (busy) {
+    if (!busySince) busySince = Date.now();
+    b.classList.add('busy');
+    b.textContent = Date.now() - busySince < 15000 ? '考えています…' : '動作中…';
+  } else { busySince = 0; b.classList.remove('busy'); b.textContent = '送信'; }
+}
+
+// ---------- 入力・添付 ----------
+function autoGrow(el) { el.style.height = 'auto'; el.style.height = Math.min(el.scrollHeight, 140) + 'px'; }
+function onKey(e) {
+  if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); send(); }
+}
+function addFiles(fs) {
+  for (const f of fs || []) {
+    const fr = new FileReader();
+    fr.onload = () => { files.push({ name: f.name || '', data: fr.result }); renderImgs(); };
+    fr.readAsDataURL(f);
+  }
+}
+function onPaste(e) {
+  const fs = [];
+  for (const it of e.clipboardData?.items || []) {
+    if (it.kind !== 'file') continue;
+    const f = it.getAsFile(); if (f) fs.push(f);
+  }
+  if (fs.length) { e.preventDefault(); addFiles(fs); }
+}
+function onFiles(inp) { addFiles(inp.files); inp.value = ''; }
+function renderImgs() {
+  document.getElementById('imgs').innerHTML = files.map((a, i) =>
+    `<span class="thumb">` +
+    (String(a.data).startsWith('data:image/')
+      ? `<img src="${a.data}">`
+      : `<span class="fchip">${esc(a.name || 'file')}</span>`) +
+    `<span class="del" onclick="files.splice(${i},1);renderImgs()">×</span></span>`).join('');
+}
+async function send() {
+  const el = document.getElementById('text');
+  let text = el.value.trim();
+  if (!text && !files.length) return;
+  if (files.length) {
+    const aj = await J('POST', '/api/chat/attach', { attachments: files });
+    if (!aj.ok) { alert('添付失敗'); return; }
+    text += (text ? '\n' : '') +
+      (aj.files || []).map((f) => '[添付] ' + f.name + ' → ' + f.path).join('\n');
+    files = []; renderImgs();
+  }
+  el.value = ''; autoGrow(el);
+  const repo = document.getElementById('repo-sel').value || undefined;
+  const j = await J('POST', '/api/chat/send', { id: sel, text, repo });
+  if (j.error) { alert('送信失敗: ' + j.error); return; }
+  if (j.id != null && sel !== j.id) sel = j.id;
+  loadSessions(); loadChat();
+}
+async function chatCancel() { if (sel != null) { await J('POST', '/api/chat/cancel', { id: sel }); loadChat(); } }
+async function chatClear() { if (sel != null) { await J('POST', '/api/chat/clear', { id: sel }); loadChat(); } }
+async function chatReset() { if (sel != null) { await J('POST', '/api/chat/reset', { id: sel }); loadChat(); } }
+
+// ---------- 課題化（manual detector 入口） ----------
+async function toIssue() {
+  if (sel == null) return;
+  const j = await J('GET', '/api/chat?id=' + sel);
+  const convo = (j.messages || [])
+    .filter((m) => m.role === 'user' || m.role === 'agent')
+    .map((m) => `[${m.role}] ${m.text}`).join('\n').slice(0, 8000);
+  const title = prompt('課題タイトル', j.label || '');
+  if (!title) return;
+  const r = await J('POST', '/api/candidates', {
+    title, body: convo, repo: document.getElementById('repo-sel').value || undefined });
+  alert(r.ok ? '課題候補に登録しました' : '失敗: ' + (r.error || ''));
+}
+function repoChanged() { /* 新規チャット作成時の cwd 選択に使う */ }
+
+// ---------- 起動 ----------
+async function boot() {
+  const st = await J('GET', '/api/state');
+  repos = st.repos || [];
+  document.getElementById('repo-sel').innerHTML =
+    repos.map((r) => `<option value="${esc(r.slug)}">${esc(r.slug)}</option>`).join('');
+  // セッション未開始でもモデル/モード選択肢を出す
+  const oc = await J('GET', '/api/chat/options');
+  renderOpts(oc);
+  await loadSessions();
+  renderEmpty();
+}
+// SSE push: 状態変化の即時反映（ポーリングはしない）
+const es = new EventSource('/api/events');
+es.addEventListener('chat', (e) => {
+  const { id } = JSON.parse(e.data);
+  loadSessions();
+  if (id === sel) loadChat();
+});
+es.addEventListener('chats', () => loadSessions());
+setInterval(() => { // busy 表示の経過切替のみ時計で更新
+  if (busySince) setSendBusy(true);
+}, 5000);
+boot();
+</script>
+</body>
+</html>

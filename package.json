@@ -1,0 +1,12 @@
+{
+  "name": "kasugai-agent",
+  "version": "0.2.0",
+  "description": "課題自律ループ常駐エージェント（検出→評価→対応→実機検証→学習）",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "start": "node src/control.mjs",
+    "check": "node --check src/control.mjs && node --check src/acp-chat.mjs",
+    "test": "node --test test/"
+  }
+}

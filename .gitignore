@@ -7,6 +7,11 @@ state.json
 issues.json
 candidates.json
 work-queue.json
+chats.json
+acp-options.json
+acp-sessions.json
+steer-requests.json
+kill-requests.json
 knowledge/
 proposals/
 evidence/

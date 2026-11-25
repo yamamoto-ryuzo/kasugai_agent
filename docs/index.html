@@ -112,6 +112,20 @@ flowchart LR
     HUMAN --&gt;|却下| DROP[記録して破棄]
 </pre>
 
+<h2>7. チャット（manual detector の会話入口）</h2>
+<pre class="mermaid">
+sequenceDiagram
+    participant UI as panel (browser)
+    participant C as control.mjs
+    participant A as devin.exe acp
+    UI-&gt;&gt;C: POST /api/chat/send {id?, text}
+    C-&gt;&gt;A: session/new or session/load → session/prompt
+    A--&gt;&gt;C: session/update stream (message/tool_call/plan)
+    C--&gt;&gt;UI: SSE push (chat 更新通知)
+    UI-&gt;&gt;C: GET /api/chat?id=N
+    C--&gt;&gt;UI: messages/busy/options スナップショット
+</pre>
+
 <h2>8. 自動再起動（code drift）</h2>
 <pre class="mermaid">
 flowchart TD

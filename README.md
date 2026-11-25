@@ -226,12 +226,38 @@ flowchart LR
 - `GET /api/state` — 全体状態 / `GET /api/issues` / `GET /api/candidates`
 - `POST /api/issues/:key/dispatch` / `POST /api/issues/:key/approve` / `reject`
 - `GET /api/proposals` / `POST /api/proposals/:id/accept|decline`
-- `POST /api/chat` — 会話入口（manual detector へ流す）
+- `POST /api/candidates` — 手動課題化（manual detector 相当の入口）
 - `POST /api/control/restart` — code drift 手動再起動
-- `GET /api/events` — SSE（状態push・進行表示）
+- `GET /api/events` — SSE（状態push・チャット進行表示）
 
-パネル（`panel/index.html`）は課題ボード・チャット・proposals・設定の4面構成を
-目指す。詳細は実装時に確定する。
+### チャット（manual detector の会話入口）
+
+チャットは devin CLI の **ACP セッション**（`devin.exe acp`、stdio JSON-RPC）を
+実行体に持つ対話面。課題レコードとは独立した会話だが、「課題化」操作で
+`POST /api/candidates` へ流してパイプラインへ乗せる。
+
+```mermaid
+sequenceDiagram
+    participant UI as panel (browser)
+    participant C as control.mjs
+    participant A as devin.exe acp
+    UI->>C: POST /api/chat/send {id?, text}
+    C->>A: session/new or session/load → session/prompt
+    A-->>C: session/update stream (message/tool_call/plan)
+    C-->>UI: SSE push (chat 更新通知)
+    UI->>C: GET /api/chat?id=N
+    C-->>UI: messages/busy/options スナップショット
+```
+
+- セッションは複数並行・ラベル付きで管理し `chats.json` に永続化
+  （ACP sessionId を保持し、切断後は `session/load` で再開）
+- モデル/モードは ACP `configOptions` を `session/set_config_option` で変更し、
+  `acp-options.json` に永続化してセッション未開始時も選択肢を表示する
+- busy 中の送信は追加指示（steer）として `session/prompt` を重ねる
+- 権限要求（`session/request_permission`）は allow 系を自動選択（自律実行前提）
+
+パネル（`panel/index.html`）はチャットを主画面とし、課題ボード・proposals・
+設定は M4 で統合する。
 
 ## 8. 自動再起動（code drift）
 

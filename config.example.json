@@ -1,5 +1,8 @@
 {
   "controlPort": 8586,
+  "devinExe": "C:\\path\\to\\devin.exe",
+  "devinExtraArgs": [],
+  "chatStallMinutes": 30,
   "autoRestartOnDrift": true,
   "retryLimit": 3,
   "repos": [
