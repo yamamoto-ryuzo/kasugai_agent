@@ -224,6 +224,8 @@ flowchart LR
 `control.mjs` が `:8586` で提供（loopback のみ）。
 
 - `GET /api/state` — 全体状態 / `GET /api/issues` / `GET /api/candidates`
+- `GET /api/agents` / `GET /api/skills` — registry が収集した doc 一覧
+- `GET /api/doc?path=` — doc 本文（registry 収集済みパスのみ返す）
 - `POST /api/issues/:key/dispatch` / `POST /api/issues/:key/approve` / `reject`
 - `GET /api/proposals` / `POST /api/proposals/:id/accept|decline`
 - `POST /api/candidates` — 手動課題化（manual detector 相当の入口）
@@ -257,7 +259,91 @@ sequenceDiagram
 - 権限要求（`session/request_permission`）は allow 系を自動選択（自律実行前提）
 
 パネル（`panel/index.html`）はチャットを主画面とし、課題ボード・proposals・
-設定は M4 で統合する。
+設定は M4 で統合する。agent/thought/plan 応答は Markdown として描画し、
+raw HTML は表示時にエスケープする（XSS 防止）。
+
+画面は左・中央・右の3ペイン構成とし、左ペインを SkillOps/AgentOps の
+管理面、右ペインを chat sessions / doc browser に割り当てる。
+タイトル/ブランドは左ペインに固定する。中央ヘッダの「最新」ボタンは
+`updatedAt` 最大のチャットを選択して表示する。
+左右ペインは境界のグリップをドラッグして幅を変更でき、
+幅は localStorage に永続化して次回表示に引き継ぐ。
+
+左ペインの **AGENTS / SKILL** ボタンは右ペインを doc browser に切り替え、
+registry（`src/registry/agents.mjs` / `skills.mjs`）が収集した agent
+定義・ルール文書（`AGENTS.md`・`.devin/agents`・`.devin/rules` 等）や
+skill 定義（各種 `skills/` 配下の `SKILL.md`）をボタン一覧で表示する。
+ボタンを押すと `GET /api/doc` で本文を取得し、モーダルで内容を確認できる。
+doc browser は読み取り専用で、編集・反映は proposals 経由のみ。
+
+```mermaid
+flowchart LR
+    L[左ペイン<br/>title + 管理<br/>SkillOps/AgentOps] --> C[中央ペイン<br/>chat messages]
+    C --> R[右ペイン<br/>chat sessions /<br/>doc browser]
+    G[境界グリップ<br/>ドラッグで幅可変<br/>localStorage 永続化] --> L
+    G --> R
+    C -->|最新ボタン| NEW[updatedAt 最大の<br/>chat を選択]
+    L --> M1[loop state]
+    L --> M2[agents/sessions]
+    L --> M3[skills registry]
+    L --> M4[candidates/proposals]
+    L -->|AGENTS / SKILL<br/>ボタン| R
+    R -->|doc ボタン選択| MOD[content modal<br/>GET /api/doc]
+```
+
+### SkillOps/AgentOps（スキル/エージェント管理）
+
+スキルとエージェントは会話の話題ではなく、台帳・権限・検証・成績を持つ
+管理対象として扱う。chat UI は管理命令の入口であり、変更は proposals と
+人ゲートを経て反映する。
+
+```mermaid
+flowchart LR
+    U[管理 chat / 手動操作] --> RT[router<br/>入力→対象特定]
+    SR[skill registry<br/>src/registry/skills.mjs]
+    AR[agent registry<br/>src/registry/agents.mjs]
+    PR[proposals.mjs<br/>skills/prompts/config 差分生成]
+    HG{人の採否}
+    CONF[.devin/skills<br/>prompts/config]
+    PIPE[pipeline.mjs<br/>状態遷移]
+    RUN[runner/worker]
+    VER[verify]
+    EV[evidence/]
+    KN[knowledge/]
+    RT -->|参照/検索| SR
+    RT -->|権限/割当| AR
+    RT -->|編集要求| PR
+    SR --> PR
+    AR --> PR
+    PR --> HG
+    HG -->|採用| CONF
+    HG -->|却下| DROP[記録して破棄]
+    CONF -->|reload| SR
+    CONF -->|reload| AR
+    AR --> PIPE
+    PIPE --> RUN --> VER
+    VER --> EV --> KN --> PR
+```
+
+```mermaid
+stateDiagram-v2
+    [*] --> draft : scaffold/提案
+    draft --> active : validate+test 合格
+    draft --> rejected : 人が却下
+    active --> proposal : 改善/失敗知見
+    proposal --> active : 採用+verify
+    proposal --> draft : 差し戻し
+    active --> deprecated : 代替/失敗率悪化
+    rejected --> [*]
+    deprecated --> [*]
+```
+
+- `skill` は `id/path/version/status/triggers/permissions/verify/stats` を持つ
+- `agent` は `role/skills/model/permissions/limits(verifyLevelMax)/stats` を持つ
+- router は「どの skill/agent/verifyLevel に振るか」と理由を必ず説明する
+- 状態変更は SSE push、表示項目は API 応答へ含める
+- 現状の registry は文書スキャンの read-only index。台帳項目（権限・成績等）は
+  段階的に追加する
 
 ## 8. 自動再起動（code drift）
 
@@ -300,6 +386,9 @@ kasugai_agent/
       github-issues.mjs
       local-health.mjs
       manual.mjs
+    registry/
+      agents.mjs       # agent定義・ルール文書スキャン（read-only）
+      skills.mjs       # skills/*/SKILL.md スキャン（read-only）
   panel/
     index.html
   prompts/             # assess/dispatch/verify 等のプロンプトテンプレ

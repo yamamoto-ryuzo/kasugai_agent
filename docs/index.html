@@ -126,6 +126,64 @@ sequenceDiagram
     C--&gt;&gt;UI: messages/busy/options スナップショット
 </pre>
 
+<h2>7. パネル横3ペイン構成</h2>
+<pre class="mermaid">
+flowchart LR
+    L[左ペイン&lt;br/&gt;title + 管理&lt;br/&gt;SkillOps/AgentOps] --&gt; C[中央ペイン&lt;br/&gt;chat messages]
+    C --&gt; R[右ペイン&lt;br/&gt;chat sessions /&lt;br/&gt;doc browser]
+    G[境界グリップ&lt;br/&gt;ドラッグで幅可変&lt;br/&gt;localStorage 永続化] --&gt; L
+    G --&gt; R
+    C --&gt;|最新ボタン| NEW[updatedAt 最大の&lt;br/&gt;chat を選択]
+    L --&gt; M1[loop state]
+    L --&gt; M2[agents/sessions]
+    L --&gt; M3[skills registry]
+    L --&gt; M4[candidates/proposals]
+    L --&gt;|AGENTS / SKILL&lt;br/&gt;ボタン| R
+    R --&gt;|doc ボタン選択| MOD[content modal&lt;br/&gt;GET /api/doc]
+</pre>
+
+<h2>7. SkillOps/AgentOps（スキル/エージェント管理）</h2>
+<pre class="mermaid">
+flowchart LR
+    U[管理 chat / 手動操作] --&gt; RT[router&lt;br/&gt;入力→対象特定]
+    SR[skill registry&lt;br/&gt;src/registry/skills.mjs]
+    AR[agent registry&lt;br/&gt;src/registry/agents.mjs]
+    PR[proposals.mjs&lt;br/&gt;skills/prompts/config 差分生成]
+    HG{人の採否}
+    CONF[.devin/skills&lt;br/&gt;prompts/config]
+    PIPE[pipeline.mjs&lt;br/&gt;状態遷移]
+    RUN[runner/worker]
+    VER[verify]
+    EV[evidence/]
+    KN[knowledge/]
+    RT --&gt;|参照/検索| SR
+    RT --&gt;|権限/割当| AR
+    RT --&gt;|編集要求| PR
+    SR --&gt; PR
+    AR --&gt; PR
+    PR --&gt; HG
+    HG --&gt;|採用| CONF
+    HG --&gt;|却下| DROP[記録して破棄]
+    CONF --&gt;|reload| SR
+    CONF --&gt;|reload| AR
+    AR --&gt; PIPE
+    PIPE --&gt; RUN --&gt; VER
+    VER --&gt; EV --&gt; KN --&gt; PR
+</pre>
+
+<pre class="mermaid">
+stateDiagram-v2
+    [*] --&gt; draft : scaffold/提案
+    draft --&gt; active : validate+test 合格
+    draft --&gt; rejected : 人が却下
+    active --&gt; proposal : 改善/失敗知見
+    proposal --&gt; active : 採用+verify
+    proposal --&gt; draft : 差し戻し
+    active --&gt; deprecated : 代替/失敗率悪化
+    rejected --&gt; [*]
+    deprecated --&gt; [*]
+</pre>
+
 <h2>8. 自動再起動（code drift）</h2>
 <pre class="mermaid">
 flowchart TD
