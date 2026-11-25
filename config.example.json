@@ -1,0 +1,18 @@
+{
+  "controlPort": 8586,
+  "autoRestartOnDrift": true,
+  "retryLimit": 3,
+  "repos": [
+    {
+      "slug": "yamamoto-ryuzo/kasugai_agent",
+      "path": "C:/devin/kasugai_agent",
+      "autoTrigger": true,
+      "triggerLabel": "devin",
+      "requirePushApproval": false
+    }
+  ],
+  "pollSeconds": {
+    "issues": 120,
+    "health": 300
+  }
+}

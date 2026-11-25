@@ -1,0 +1,23 @@
+# 秘密情報
+secrets.json
+
+# 稼働状態（ローカルのみ）
+config.json
+state.json
+issues.json
+candidates.json
+work-queue.json
+knowledge/
+proposals/
+evidence/
+locks/
+logs/
+chat-uploads/
+shots/
+*.out
+*.tmp
+*.pid
+
+# OS/ツール
+Thumbs.db
+node_modules/

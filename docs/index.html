@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>KASUGAI Agent — 設計図</title>
+<script type="module">
+  import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+  mermaid.initialize({ startOnLoad: true });
+</script>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 1100px; margin: 2rem auto; padding: 0 1rem; }
+  h1 { border-bottom: 2px solid #ccc; }
+  h2 { margin-top: 3rem; }
+  .note { color: #666; font-size: .9rem; }
+</style>
+</head>
+<body>
+<h1>KASUGAI Agent — 統一モデル図</h1>
+<p class="note">正本は README.md。本ページの mermaid 図は README と常に同期させること（片方だけの変更は禁止）。</p>
+
+<h2>3. 課題ライフサイクル</h2>
+<pre class="mermaid">
+stateDiagram-v2
+    [*] --&gt; detected : detector emit
+    detected --&gt; deduped : 正規化・重複判定
+    deduped --&gt; dropped : 既知/重複
+    deduped --&gt; assessed : 新規
+    assessed --&gt; gated : 人ゲート待ち (external等)
+    assessed --&gt; queued : 自律可
+    gated --&gt; queued : 人が承認
+    gated --&gt; rejected : 人が却下
+    queued --&gt; running : runner 起動
+    running --&gt; verifying : 実装完了
+    verifying --&gt; done : 検証合格
+    verifying --&gt; retry : NG (差し戻し)
+    retry --&gt; queued : 再実行
+    retry --&gt; failed : リトライ上限
+    running --&gt; failed : 異常終了
+    done --&gt; [*]
+    failed --&gt; [*]
+    rejected --&gt; [*]
+    dropped --&gt; [*]
+</pre>
+
+<h2>4. 全体構成</h2>
+<pre class="mermaid">
+flowchart LR
+    subgraph Detect[検出層]
+        D1[github-issues]
+        D2[ci-failure]
+        D3[local-health]
+        D4[spec-drift]
+        D5[manual/chat]
+    end
+
+    subgraph Core[コア src/]
+        N[normalize + dedupe&lt;br/&gt;store.mjs]
+        A[assess&lt;br/&gt;pipeline.mjs]
+        G[gate&lt;br/&gt;人ゲート]
+        R[runner&lt;br/&gt;session.mjs]
+        V[verify&lt;br/&gt;verify.mjs]
+        K[knowledge&lt;br/&gt;knowledge.mjs]
+    end
+
+    subgraph IO[外部]
+        GH[GitHub gh CLI]
+        DV[devin CLI]
+        RP[監視対象リポジトリ]
+    end
+
+    C[control.mjs&lt;br/&gt;HTTP :8586 + SSE] --&gt; P[panel/&lt;br/&gt;ブラウザUI]
+    D1 &amp; D2 &amp; D3 &amp; D4 &amp; D5 --&gt; N --&gt; A --&gt; G --&gt; R --&gt; V --&gt; K
+    R --&gt; DV
+    A &amp; R &amp; V --&gt; GH
+    R &amp; V --&gt; RP
+    K --&gt;|proposals| G
+</pre>
+
+<h2>5.1 detect → normalize → dedupe</h2>
+<pre class="mermaid">
+flowchart TD
+    DET[detector] --&gt;|candidate&lt;br/&gt;source/repo/title/body/&lt;br/&gt;symptomHash/detectedAt| NORM[正規化]
+    NORM --&gt; HASH[issue key =&lt;br/&gt;source+repo+symptomHash]
+    HASH --&gt; EXIST{既出?}
+    EXIST --&gt;|yes| BUMP[既存課題の&lt;br/&gt;lastSeen 更新のみ]
+    EXIST --&gt;|no| NEW[課題レコード作成&lt;br/&gt;status=assessed へ]
+</pre>
+
+<h2>5.5 verify（push 統合）</h2>
+<pre class="mermaid">
+flowchart TD
+    IMPL[実装完了&lt;br/&gt;ローカルコミット] --&gt; VL{verifyLevel}
+    VL --&gt; RUN[層別検証実行&lt;br/&gt;証跡 = shots/logs/応答]
+    RUN --&gt; JUDGE{合格?}
+    JUDGE --&gt;|OK| ATTRIB[コミット帰属確認&lt;br/&gt;Issue: #N]
+    ATTRIB --&gt; CLEAN{帰属不明/&lt;br/&gt;rejected 混入?}
+    CLEAN --&gt;|yes| REVERT[git revert で除去]
+    CLEAN --&gt;|no| PUSH[git push]
+    REVERT --&gt; PUSH
+    PUSH --&gt; DONE[status=done]
+    JUDGE --&gt;|NG| BACK[差し戻し + コメント&lt;br/&gt;自分コミットは revert]
+    BACK --&gt; RETRY[status=retry]
+</pre>
+
+<h2>5.6 learn（知見の還流）</h2>
+<pre class="mermaid">
+flowchart LR
+    RUN[run 結果・証跡] --&gt; KN[knowledge/&lt;br/&gt;課題key単位で蓄積]
+    KN --&gt; PROP[proposals 生成&lt;br/&gt;skills/prompts/config/&lt;br/&gt;正本ドキュメント]
+    PROP --&gt; HUMAN{人の採否}
+    HUMAN --&gt;|採用| SELF[agent 自身へ反映&lt;br/&gt;or 正本へ課題起票]
+    HUMAN --&gt;|却下| DROP[記録して破棄]
+</pre>
+
+<h2>8. 自動再起動（code drift）</h2>
+<pre class="mermaid">
+flowchart TD
+    WATCH[src/*.mjs 変更検知] --&gt; EN{autoRestartOnDrift?}
+    EN --&gt;|off| END[何もしない]
+    EN --&gt;|on| BUSY{実行中 run あり?}
+    BUSY --&gt;|yes| DEFER[空くまで延期]
+    BUSY --&gt;|no| STOP[runner 停止]
+    DEFER --&gt; BUSY
+    STOP --&gt; START[control 再起動]
+</pre>
+
+</body>
+</html>
