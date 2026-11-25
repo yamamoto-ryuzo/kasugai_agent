@@ -16,7 +16,7 @@
   #side { width: 260px; flex: none; background: #fff; border-left: 1px solid #e5e7eb;
           display: flex; flex-direction: column; }
   .brand { padding: 14px 14px 10px; font-weight: 700; font-size: 15px; }
-  .brand small { display: block; font-weight: 400; color: #9ca3af; font-size: 11px; }
+  .brand small { display: block; font-weight: 400; color: #9ca3af; font-size: 12px; }
   #sess { flex: 1; overflow-y: auto; padding: 4px 8px; }
   .csess { display: flex; align-items: center; gap: 6px; padding: 8px 10px; margin: 2px 0;
            border-radius: 7px; cursor: pointer; font-size: 13px; color: #374151;
@@ -25,9 +25,27 @@
   .csess.active { background: #eff6ff; border-color: #bfdbfe; color: #1d4ed8; }
   .csess .lbl { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .csess .dot { color: #2563eb; }
+  /* chat 行の状態ドット（色は処理状況ボードの列に対応。idle は灰） */
+  .csess .sdot { width: 7px; height: 7px; flex: none; border-radius: 50%;
+                 background: #d1d5db; }
+  .csess .sdot.st-exec { background: #f59e0b; }
+  .csess .sdot.st-verify { background: #06b6d4; }
+  .csess .sdot.st-resume { background: #6366f1; }
+  .csess .sdot.st-live { background: #22c55e; }
   .csess .x { color: #9ca3af; padding: 0 2px; border-radius: 4px; visibility: hidden; }
   .csess:hover .x { visibility: visible; }
   .csess .x:hover { color: #dc2626; background: #fee2e2; }
+  .csess.off { opacity: .45; cursor: default; }
+  .csess.off:hover { background: none; }
+  /* ---- 省略ラベルの全文ポップアップ（data-tip をホバーで即時表示） ---- */
+  #tip { display: none; position: fixed; z-index: 70; max-width: 420px;
+         padding: 6px 9px; border-radius: 6px; background: #111827;
+         color: #f9fafb; font-size: 12px; white-space: pre-wrap;
+         word-break: break-word; box-shadow: 0 8px 24px rgba(0,0,0,.28);
+         pointer-events: none; }
+  /* 並列モードの子 chat は親の直下にインデント表示 */
+  .csess.child { margin-left: 20px; padding: 6px 10px; }
+  .csess.child .lbl { font-size: 12.5px; }
   #newbtn { margin: 8px; padding: 8px; border: 1px dashed #cbd5e1; border-radius: 7px;
             text-align: center; cursor: pointer; color: #475569; font-size: 13px; }
   #newbtn:hover { background: #f8fafc; }
@@ -36,12 +54,14 @@
           display: flex; flex-direction: column; }
   #mgmt .mhead { display: flex; align-items: center; gap: 8px; padding: 12px 14px;
                  border-bottom: 1px solid #e5e7eb; font-weight: 700; }
-  #repo-scope { margin: 0 12px 8px; font-size: 12px; padding: 4px 6px;
-                border: 1px solid #d1d5db; border-radius: 6px; background: #fff;
-                max-width: calc(100% - 24px); }
+  #repo-row { display: flex; flex-direction: column; gap: 4px; margin: 0 12px 8px; }
+  #repo-owner, #repo-name { width: 100%; font-size: 15px; padding: 5px 6px;
+                border: 1px solid #d1d5db; border-radius: 6px; background: #fff; }
+  #repo-owner { color: #6b7280; }
   #mgmt .mnav { display: flex; flex-direction: column; gap: 4px; padding: 8px 12px;
                 border-bottom: 1px solid #e5e7eb; }
   #mgmt .mnav button { text-align: left; }
+  #mgmt .mnav .nsep { border: 0; border-top: 1px solid #e5e7eb; margin: 2px 0; }
   #mgmt .mnav button.active { background: #eff6ff; border-color: #bfdbfe;
                               color: #1d4ed8; }
   #mgmtbox { flex: 1; overflow-y: auto; padding: 10px 12px; }
@@ -54,31 +74,133 @@
   .item { padding: 7px 2px; border-top: 1px dashed #eef2f7; cursor: pointer; }
   .item:first-child { border-top: 0; }
   .item:hover { background: #f8fafc; }
-  .muted { color: #9ca3af; font-size: 11px; margin-top: 2px; }
+  .muted { color: #9ca3af; font-size: 12px; margin-top: 2px; }
   .empty { color: #9ca3af; font-size: 12px; padding: 6px 0; }
   .pill { display: inline-block; min-width: 42px; margin-right: 6px; padding: 1px 6px;
-          border-radius: 999px; background: #f3f4f6; color: #6b7280; font-size: 10px;
+          border-radius: 999px; background: #f3f4f6; color: #6b7280; font-size: 12px;
           text-align: center; }
   .pill.live { background: #dcfce7; color: #166534; }
   .pill.run { background: #fef3c7; color: #92400e; }
+  .pill.wait { background: #ede9fe; color: #5b21b6; }
   .pill.resume { background: #e0e7ff; color: #3730a3; }
+  .pill.par { background: #fdf4ff; color: #a21caf; }
+  .pill.ver { background: #cffafe; color: #155e75; }
+  /* ヘッダの親子リンク（子→親 / 親→子） */
+  #plink a { color: #a21caf; font-size: 12px; margin-right: 8px; cursor: pointer; }
+  /* ---- 処理状況カンバン（中央ペイン: 状態別の横並び列） ---- */
+  #board { display: flex; gap: 10px; align-items: flex-start; }
+  .bcol { flex: 1 1 0; min-width: 170px; background: #f8fafc;
+          border: 1px solid #e5e7eb; border-radius: 8px; }
+  .bcol .bhead { display: flex; align-items: center; justify-content: space-between;
+                 padding: 7px 9px; border-bottom: 1px solid #e5e7eb; gap: 6px; }
+  .bcol .bhead .n { color: #9ca3af; font-size: 12px; margin-left: auto; }
+  .bcol .bhead .bxall { font-size: 11px; padding: 1px 6px; color: #9ca3af; }
+  .bcol .bhead .bxall:hover { color: #dc2626; border-color: #fca5a5; }
+  .bcol .bcards { padding: 6px; }
+  .bcard { position: relative; background: #fff; border: 1px solid #e5e7eb;
+           border-radius: 7px; padding: 7px 9px; margin-bottom: 6px;
+           cursor: pointer; font-size: 12px; }
+  .bcard:last-child { margin-bottom: 0; }
+  .bcard:hover { border-color: #93c5fd; }
+  .bcard .bx { position: absolute; bottom: 4px; right: 6px; color: #9ca3af;
+               padding: 0 4px; border-radius: 4px; visibility: hidden; }
+  .bcard:hover .bx { visibility: visible; }
+  .bcard .bx:hover { color: #dc2626; background: #fee2e2; }
+  .bcard .bact { position: absolute; bottom: 4px; right: 6px; font-size: 12px;
+                 padding: 1px 8px; }
+  /* ---- 設定ビュー（中央ペインの repo カード） ---- */
+  .rcard { background: #fff; border: 1px solid #e5e7eb; border-radius: 8px;
+           padding: 10px 12px; margin-bottom: 10px; font-size: 12px; max-width: 720px; }
+  /* リポジトリカードの横並びグリッド（登録フォームは従来どおり全幅） */
+  .rgrid { display: grid; gap: 10px;
+           grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); }
+  .rgrid .rcard { margin-bottom: 0; max-width: none; }
+  .rset { display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+          margin-top: 8px; }
+  .rset label { display: flex; align-items: center; gap: 4px; }
+  .rset input[type="text"] { font-size: 12px; padding: 3px 6px;
+           border: 1px solid #d1d5db; border-radius: 6px; width: 8em; }
+  .rset input.wide { width: 22em; }
+  /* ---- 設定ビューのグループタブ（接続AI / リポジトリ / システム） ---- */
+  .stabs { display: flex; gap: 4px; margin-bottom: 12px;
+           border-bottom: 1px solid #e5e7eb; max-width: 720px; }
+  .stabs .stab { border: 1px solid transparent; border-bottom: 0;
+                 border-radius: 6px 6px 0 0; margin-bottom: -1px;
+                 color: #6b7280; }
+  .stabs .stab.active { background: #eff6ff; border-color: #bfdbfe;
+                        color: #1d4ed8; }
+  /* ---- フォルダツリー（エディターナビ → 右ペイン） ---- */
+  #treebox { flex: 1; overflow-y: auto; padding: 6px 4px; font-size: 12px; }
+  .trow { display: flex; align-items: center; gap: 2px; padding: 2px 4px;
+          border-radius: 5px; cursor: pointer; white-space: nowrap; }
+  .trow:hover { background: #f3f4f6; }
+  .trow.sel { background: #eff6ff; color: #1d4ed8; }
+  .trow.off { opacity: .45; cursor: default; }
+  .trow.off:hover { background: none; }
+  .trow .tg { width: 14px; flex: none; text-align: center; color: #6b7280; }
+  .trow .tn { overflow: hidden; text-overflow: ellipsis; }
+  /* ---- 再起動バナー（延期中/再起動中は最上部に固定表示） ---- */
+  #rban { display: none; position: fixed; top: 0; left: 0; right: 0; z-index: 60;
+          background: #fef3c7; color: #92400e; text-align: center; font-size: 12px;
+          padding: 6px; border-bottom: 1px solid #fde68a; }
+  /* ---- ローカルパス選択（/api/fs/dirs の簡易ピッカー） ---- */
+  #dirmodal { display: none; position: fixed; inset: 0; z-index: 50;
+              background: rgba(15,23,42,.35); align-items: center;
+              justify-content: center; }
+  #dirpanel { background: #fff; border-radius: 10px; width: 440px;
+              max-width: 90vw; max-height: 70vh; padding: 10px 12px;
+              display: flex; flex-direction: column;
+              box-shadow: 0 12px 40px rgba(0,0,0,.25); }
+  #dirpanel .dhead { display: flex; align-items: center; }
+  .dcur { font-family: Consolas, monospace; font-size: 12px; color: #6b7280;
+          margin: 6px 0; word-break: break-all; }
+  #dirlist { flex: 1; overflow-y: auto; border: 1px solid #e5e7eb;
+             border-radius: 6px; min-height: 160px; }
+  .ditem { padding: 6px 10px; font-size: 12px; cursor: pointer;
+           border-bottom: 1px dashed #eef2f7; }
+  .ditem:last-child { border-bottom: 0; }
+  .ditem:hover { background: #eff6ff; }
+  #dirpanel .dfoot { display: flex; gap: 8px; justify-content: flex-end;
+                     margin-top: 8px; }
   /* ---- doc browser（右ペインの AGENTS/SKILL 詳細） ---- */
   #dochead { display: none; align-items: center; gap: 6px; padding: 10px 12px;
              border-bottom: 1px solid #e5e7eb; font-weight: 700; font-size: 13px; }
   #doclist { flex: 1; overflow-y: auto; padding: 4px 8px; }
-  /* ---- doc modal（doc 本文の表示） ---- */
-  #docmodal { display: none; position: fixed; inset: 0; z-index: 50;
-              background: rgba(15,23,42,.45); align-items: center; justify-content: center; }
-  #docbox { background: #fff; width: min(880px, 92vw); max-height: 84vh;
-            border-radius: 10px; display: flex; flex-direction: column;
-            overflow: hidden; box-shadow: 0 12px 40px rgba(0,0,0,.28); }
-  #dochd { display: flex; align-items: center; gap: 10px; padding: 10px 14px;
-           border-bottom: 1px solid #e5e7eb; }
-  #dochd b { font-size: 14px; white-space: nowrap; }
-  #dochd .muted { flex: 1; overflow: hidden; text-overflow: ellipsis;
-                  white-space: nowrap; margin-top: 0; }
-  #docbody { overflow-y: auto; padding: 4px 18px 16px; }
-  #docbody .msg { max-width: 100%; margin-left: 0; margin-right: 0; }
+  #reflist { flex: none; max-height: 45%; overflow-y: auto; padding: 4px 8px;
+             border-top: 1px solid #e5e7eb; }
+  .refhead { padding: 6px 4px 2px; font-size: 12px; color: #6b7280;
+             letter-spacing: .04em; text-transform: uppercase; }
+  /* ---- doc view（中央ペインの doc 本文表示。chat 用 UI を隠す） ---- */
+  #main.doc .chatonly { display: none; }
+  #head .doconly { display: none; }
+  #main.doc #head .doconly { display: inline-block; }
+  #main.doc #box .msg { max-width: 100%; margin-left: 0; margin-right: 0; }
+  /* doc viewer の原文/プレビュー切替ボタン */
+  #viewsw button.active { background: #eff6ff; border-color: #bfdbfe;
+                          color: #1d4ed8; }
+  /* HTML プレビューは sandboxed iframe を box いっぱいに敷く */
+  #box.htmlview { padding: 0; display: flex; flex-direction: column; }
+  .htmlprev { flex: 1; width: 100%; border: 0; display: block; background: #fff; }
+  /* ---- 中央ペインの chat/console タブ（chat モード時のみ表示） ---- */
+  #ctabs { display: flex; gap: 4px; padding: 8px 16px 0; background: #fff; }
+  #ctabs .ctab { border: 1px solid transparent; border-bottom: 0;
+                 border-radius: 6px 6px 0 0; color: #6b7280; }
+  #ctabs .ctab.active { background: #eff6ff; border-color: #bfdbfe;
+                        color: #1d4ed8; }
+  #condot { color: #f59e0b; }
+  /* console タブ選択中は chat の #box/#input を隠して #conbox を出す
+     （doc/処理状況/設定モード＝.doc が付く間は常に doc 側を優先） */
+  #main.contab:not(.doc) #box, #main.contab:not(.doc) #input { display: none; }
+  #main.contab:not(.doc) #conbox { display: block; }
+  #conbox { display: none; flex: 1; overflow-y: auto; margin: 0;
+            padding: 10px 14px; background: #0f172a; color: #d1d5db;
+            font-family: Consolas, monospace; font-size: 12px; }
+  .cl { white-space: pre-wrap; word-break: break-all; line-height: 1.45; }
+  .cl .t, .cl .cs { color: #475569; margin-right: 8px; }
+  .cl.err { color: #fca5a5; }
+  .cl.err .t, .cl.err .cs { color: #b91c1c; }
+  .cl.sys { color: #7dd3fc; }
+  .cl.sys .t, .cl.sys .cs { color: #0e7490; }
   /* ---- メイン ---- */
   #main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
   #head { display: flex; align-items: center; gap: 8px; padding: 10px 16px;
@@ -95,7 +217,7 @@
   button.primary:hover { background: #1d4ed8; }
   button.primary.busy { background: #f59e0b; border-color: #f59e0b; }
   /* ---- メッセージ ---- */
-  #box { flex: 1; overflow-y: auto; padding: 16px 20px; }
+  #box { flex: 1; overflow-y: auto; padding: 16px 20px; background: #fff; }
   .msg { max-width: 82%; margin: 6px 0; padding: 9px 13px; border-radius: 12px;
          white-space: pre-wrap; word-break: break-word; line-height: 1.55; }
   .msg.user { margin-left: auto; background: #2563eb; color: #fff; border-bottom-right-radius: 4px; }
@@ -109,8 +231,11 @@
   .msg.plan { background: #fffbeb; border: 1px solid #fde68a; font-size: 12.5px; }
   .msg.sys { max-width: 100%; margin: 4px auto; background: none; border: none;
              color: #9ca3af; font-size: 12px; text-align: center; padding: 2px; }
-  .msg .time { display: block; font-size: 10px; color: #9ca3af; margin-top: 4px; }
+  .msg .time { display: block; font-size: 12px; color: #9ca3af; margin-top: 4px; }
   .msg.user .time { color: #bfdbfe; }
+  .msg .edit { cursor: pointer; margin-left: 8px; font-size: 12px; color: #111;
+               background: rgba(255,255,255,.92); border-radius: 4px; padding: 1px 6px; }
+  .msg .edit:hover { background: #fff; text-decoration: underline; }
   /* Markdown（agent/thought/plan のみ。raw HTML は esc 済み） */
   .msg.md { white-space: normal; }
   .msg.md p { margin: .35em 0; }
@@ -119,23 +244,44 @@
   .msg.md h1 { font-size: 1.15em; } .msg.md h2 { font-size: 1.08em; }
   .msg.md h3, .msg.md h4, .msg.md h5, .msg.md h6 { font-size: 1em; }
   .msg.md code { background: #f3f4f6; border: 1px solid #e5e7eb; border-radius: 4px;
-                 padding: 0 .25em; font-family: Consolas, monospace; font-size: .92em; }
+                 padding: 0 .25em; font-family: Consolas, monospace; font-size: max(.92em, 12px); }
   .msg.md pre { background: #111827; color: #e5e7eb; padding: 10px 12px;
                 border-radius: 8px; overflow-x: auto; margin: .5em 0; }
   .msg.md pre code { background: none; border: 0; padding: 0; color: inherit; }
+  .msg.md pre.mermaid[data-processed] { background: #fff; color: #1f2937;
+                                        border: 1px solid #e5e7eb; }
+  .msg.md pre.mermaid svg { max-width: 100%; height: auto; }
+  /* mermaid 図は pre 内で中央配置（幅超過時は左起点スクロール）。
+     拡縮: ドラッグで視野移動（横は pre・縦は #box がスクロール） */
+  .msg.md pre.mermaid[data-processed] svg { display: block; margin: 0 auto; cursor: grab; }
+  .msg.md pre.mermaid.pan svg { cursor: grabbing; }
+  #vw-zoom { display: inline-flex; gap: 0; }
+  #vw-zoom button { border-radius: 0; margin-left: -1px; }
+  #vw-zoom button:first-child { border-radius: 6px 0 0 6px; margin-left: 0; }
+  #vw-zoom button:last-child { border-radius: 0 6px 6px 0; }
+  #vw-zv { min-width: 4.2em; }
   .msg.md ul, .msg.md ol { margin: .35em 0 .35em 1.4em; padding: 0; }
   .msg.md blockquote { margin: .5em 0; padding: .2em .8em; color: #4b5563;
                        background: #f8fafc; border-left: 3px solid #cbd5e1; }
-  .msg.md table { border-collapse: collapse; margin: .5em 0; font-size: .95em; }
+  .msg.md table { border-collapse: collapse; margin: .5em 0; font-size: max(.95em, 12px); }
   .msg.md th, .msg.md td { border: 1px solid #e5e7eb; padding: 4px 8px; }
   .msg.md th { background: #f9fafb; }
   .msg.md a { color: #2563eb; }
   .msg.md hr { border: 0; border-top: 1px solid #e5e7eb; margin: .8em 0; }
+  /* 非 md doc（json/html/mjs 等）の生テキスト表示 */
+  .rawfile { background: #fff; border: 1px solid #e5e7eb; border-radius: 8px;
+             padding: 12px 14px; font-family: Consolas, monospace; font-size: 12px;
+             white-space: pre; overflow-x: auto; margin: 6px 0; line-height: 1.5; }
   .typing { display: inline-block; }
   .typing span { animation: blink 1.2s infinite; display: inline-block; }
   .typing span:nth-child(2) { animation-delay: .2s; }
   .typing span:nth-child(3) { animation-delay: .4s; }
   @keyframes blink { 0%,60%,100% { opacity: .2; } 30% { opacity: 1; } }
+  /* ---- リポジトリ確認バー（waiting kind=repo の切替/このまま送信） ---- */
+  #repoask { display: none; align-items: center; gap: 8px; padding: 8px 16px;
+             background: #fffbeb; border-top: 1px solid #fde68a; font-size: 12px;
+             color: #92400e; }
+  #repoask .grow { flex: 1; }
   /* ---- 入力 ---- */
   #input { padding: 10px 16px 14px; background: #fff; border-top: 1px solid #e5e7eb; }
   #imgs { margin-bottom: 6px; }
@@ -147,214 +293,488 @@
                border-radius: 50%; width: 16px; height: 16px; font-size: 12px;
                line-height: 16px; text-align: center; cursor: pointer; }
   #row { display: flex; gap: 8px; align-items: flex-end; }
+  #exmode { align-self: center; font-size: 12px; padding: 6px 4px;
+            border: 1px solid #d1d5db; border-radius: 8px; background: #fff; }
   #text { flex: 1; resize: none; border: 1px solid #d1d5db; border-radius: 8px;
           padding: 9px 12px; font-family: inherit; font-size: 14px; max-height: 140px; }
   #text:focus { outline: 2px solid #bfdbfe; border-color: #93c5fd; }
-  #hint { font-size: 11px; color: #9ca3af; margin-top: 4px; }
+  #hint { font-size: 12px; color: #9ca3af; margin-top: 4px; }
 </style>
 </head>
 <body>
+<div id="rban"></div>
 <div id="mgmt">
-  <div class="brand">KASUGAI Agent<small>管理 / AI チャット</small></div>
-  <select id="repo-scope" onchange="repoScopeChanged()"
-    title="表示対象リポジトリ（全ペインのスコープ）"></select>
-  <div class="mhead">管理
+  <div class="brand">KASUGAI Agent<small data-i18n="brand.sub">管理 / AI チャット</small></div>
+  <div id="repo-row">
+    <select id="repo-owner" onchange="repoOwnerChanged()"
+      title="オーナー（repo 一覧の絞込）" data-i18n-attr="title:repo.owner.tip"></select>
+    <select id="repo-name" onchange="repoScopeChanged()"
+      title="カレントリポジトリ（全ペインのスコープ）" data-i18n-attr="title:repo.current.tip"></select>
+  </div>
+  <div class="mhead">
     <span class="spacer"></span>
-    <button onclick="loadMgmt()">再読込</button></div>
+    <button onclick="loadMgmt()" data-i18n="mgmt.reload">再読込</button></div>
   <div class="mnav">
-    <button id="nav-chats" onclick="sideView('chats')" title="右ペインをチャット一覧に戻す">AIチャット</button>
-    <button id="nav-agents" onclick="sideView('agents')" title="agent定義・ルール文書を右ペインで開く">AGENTS</button>
-    <button id="nav-skills" onclick="sideView('skills')" title="SKILL.md 一覧を右ペインで開く">SKILL</button>
+    <button id="nav-chats" onclick="sideView('chats')" title="右ペインをチャット一覧に戻す" data-i18n="nav.chats" data-i18n-attr="title:nav.chats.tip">AIチャット</button>
+    <button id="nav-status" onclick="showStatus()" title="進行中のチャットを中央ペインで一覧" data-i18n="nav.status" data-i18n-attr="title:nav.status.tip">処理状況</button>
+    <button id="nav-editor" onclick="sideView('editor')" title="カレント repo のフォルダツリーを右ペインで開く" data-i18n="nav.editor" data-i18n-attr="title:nav.editor.tip">エディター</button>
+    <button id="nav-agents" onclick="sideView('agents')" title="agent定義・ルール文書を右ペインで開く" data-i18n="nav.agents" data-i18n-attr="title:nav.agents.tip">AGENTS</button>
+    <button id="nav-skills" onclick="sideView('skills')" title="SKILL.md 一覧を右ペインで開く" data-i18n="nav.skills" data-i18n-attr="title:nav.skills.tip">SKILL</button>
+    <button id="nav-manual" onclick="showManual()" title="docs/ のマニュアルサイトを中央ペインで開く" data-i18n="nav.manual" data-i18n-attr="title:nav.manual.tip">マニュアル</button>
+    <button id="nav-settings" onclick="showSettings()" title="監視リポジトリの設定を中央ペインで開く" data-i18n="nav.settings" data-i18n-attr="title:nav.settings.tip">設定</button>
+    <hr class="nsep">
+    <button id="nav-commit" onclick="gitCommit()" title="カレント repo の全変更をローカルコミット（git add -A && git commit）" data-i18n="nav.commit" data-i18n-attr="title:nav.commit.tip">コミット</button>
+    <button id="nav-push" onclick="gitPush()" title="カレント repo のコミットをリモートへプッシュ" data-i18n="nav.push" data-i18n-attr="title:nav.push.tip">プッシュ</button>
   </div>
   <div id="mgmtbox">
-    <div class="sec"><h3>loop state</h3><div id="mstate" class="card">...</div></div>
-    <div class="sec"><h3>agents / sessions</h3><div id="magents" class="card">...</div></div>
-    <div class="sec"><h3>skills registry</h3><div id="mskills" class="card">...</div></div>
-    <div class="sec"><h3>candidates</h3><div id="mcands" class="card">...</div></div>
+    <div class="sec"><h3 data-i18n="mgmt.loopState">loop state</h3><div id="mstate" class="card">...</div></div>
+    <div class="sec"><h3 data-i18n="mgmt.candidates">candidates</h3><div id="mcands" class="card">...</div></div>
   </div>
 </div>
-<div class="grip" id="grip-l" title="ドラッグで左ペインの幅を変更"></div>
+<div class="grip" id="grip-l" title="ドラッグで左ペインの幅を変更" data-i18n-attr="title:grip.left.tip"></div>
 <div id="main">
   <div id="head">
     <span class="title" id="ctitle">チャット</span>
+    <span id="plink" class="chatonly"></span>
     <span id="status"></span>
-    <button onclick="latestChat()" title="updatedAt 最大のチャットを表示">最新</button>
-    <span id="opts"></span>
+    <button class="chatonly" onclick="latestChat()" title="updatedAt 最大のチャットを表示" data-i18n="head.latest" data-i18n-attr="title:head.latest.tip">最新</button>
+    <span id="opts" class="chatonly"></span>
+    <button class="doconly" onclick="sideView('chats')" title="チャット表示に戻る" data-i18n="head.back" data-i18n-attr="title:head.back.tip">← チャット</button>
+    <span id="viewsw" class="doconly">
+      <button id="vw-raw" onclick="setDocView('raw')" title="ソースをそのまま表示" data-i18n="view.raw" data-i18n-attr="title:view.raw.tip">原文</button>
+      <button id="vw-prev" onclick="setDocView('preview')" title="MD（mermaid 含む）/ HTML / MMD を描画表示" data-i18n="view.preview" data-i18n-attr="title:view.preview.tip">プレビュー</button>
+      <button id="vw-dir" onclick="mmdDirToggle()" style="display:none"
+        title="mermaid 図の向きを縦/横で切替（表示のみ・ファイルは変更しない）" data-i18n="view.dir" data-i18n-attr="title:view.dir.tip">縦⇄横</button>
+      <span id="vw-zoom" style="display:none">
+        <button onclick="mmdZoom(-1)" title="縮小（図の上でホイールでも可）" data-i18n-attr="title:view.zoomOut.tip">－</button>
+        <button id="vw-zv" onclick="mmdZoom(0)" title="クリックで 100% に戻す" data-i18n-attr="title:view.zoomReset.tip">100%</button>
+        <button onclick="mmdZoom(1)" title="拡大（図の上でホイールでも可）" data-i18n-attr="title:view.zoomIn.tip">＋</button>
+      </span>
+    </span>
     <span class="spacer"></span>
-    <button onclick="toIssue()" title="この会話を課題候補として登録">課題化</button>
-    <button onclick="renameChat()" title="ラベルを変更">改名</button>
-    <button onclick="chatCancel()">中断</button>
-    <button onclick="chatClear()">クリア</button>
-    <button onclick="chatReset()" title="セッションを畳んで次の送信で新規開始">リセット</button>
+    <select id="langsel" onchange="changeLang(this.value)"
+      title="表示言語" data-i18n-attr="title:lang.tip"></select>
+    <button class="chatonly" onclick="toIssue()" title="この会話を課題候補として登録" data-i18n="head.toIssue" data-i18n-attr="title:head.toIssue.tip">課題化</button>
+    <button class="chatonly" onclick="renameChat()" title="ラベルを変更" data-i18n="head.rename" data-i18n-attr="title:head.rename.tip">改名</button>
+    <button class="chatonly" onclick="chatCancel()" data-i18n="head.cancel">中断</button>
+    <button class="chatonly" onclick="chatClear()" data-i18n="head.clear">クリア</button>
+    <button class="chatonly" id="restorebtn" onclick="chatRestore()" style="display:none"
+      title="この chat が変更したファイルを、選択した時点の状態へ戻す（セッション復元後も可）" data-i18n="head.restore" data-i18n-attr="title:head.restore.tip">変更復元</button>
+    <button class="chatonly" onclick="chatReset()" title="セッションを畳んで次の送信で新規開始" data-i18n="head.reset" data-i18n-attr="title:head.reset.tip">リセット</button>
   </div>
-  <div id="box"><div class="msg sys">指示を入力すると devin セッションを開始します</div></div>
-  <div id="input">
+  <div id="ctabs" class="chatonly">
+    <button id="ctab-chat" class="ctab active" onclick="setChatTab('chat')" data-i18n="ctab.chat">チャット</button>
+    <button id="ctab-console" class="ctab" onclick="setChatTab('console')"><span data-i18n="ctab.console">コンソール</span><span id="condot" style="display:none"> ●</span></button>
+  </div>
+  <div id="box"><div class="msg sys" data-i18n="chat.hintStart">指示を入力すると AI セッションを開始します</div></div>
+  <div id="repoask" class="chatonly">
+    <span id="repoask-text" class="grow"></span>
+    <button class="primary" onclick="repoAnswer('switch')"
+      title="chat の repo/cwd を候補へ切り替え、保留した送信をそこで再送" data-i18n="repoask.switch" data-i18n-attr="title:repoask.switch.tip">切り替えて送信</button>
+    <button onclick="repoAnswer('keep')"
+      title="カレント repo のまま再送（この chat では同じ候補を再確認しません）" data-i18n="repoask.keep" data-i18n-attr="title:repoask.keep.tip">このまま送信</button>
+  </div>
+  <div id="conbox"></div>
+  <div id="input" class="chatonly">
     <div id="imgs"></div>
     <div id="row">
       <input type="file" id="file" multiple style="display:none" onchange="onFiles(this)">
-      <button title="ファイルを添付" onclick="document.getElementById('file').click()">📎</button>
+      <select id="exmode" onchange="exmodeChanged()"
+        title="処理モード: 直接=従来どおり逐次処理 / 並列=課題を分割して子チャットを自動起動し、各チャットで深く検討" data-i18n-attr="title:exmode.tip">
+        <option value="direct" data-i18n="exmode.direct">直接</option>
+        <option value="parallel" data-i18n="exmode.parallel">並列</option>
+      </select>
+      <button title="ファイルを添付" onclick="document.getElementById('file').click()" data-i18n-attr="title:input.attach.tip">📎</button>
       <textarea id="text" rows="1" placeholder="指示を入力（Enter で送信 / Shift+Enter で改行 / 実行中の追加指示も可）"
-        onkeydown="onKey(event)" onpaste="onPaste(event)" oninput="autoGrow(this)"></textarea>
-      <button class="primary" id="send" onclick="send()">送信</button>
+        onkeydown="onKey(event)" onpaste="onPaste(event)" oninput="autoGrow(this)" data-i18n-attr="placeholder:input.placeholder"></textarea>
+      <button class="primary" id="send" onclick="send()" data-i18n="common.send">送信</button>
     </div>
-    <div id="hint">添付は貼り付け・選択どちらも可。実行中の送信は追加指示（steer）になります。</div>
+    <div id="hint" data-i18n="input.hint">添付は貼り付け・選択どちらも可。実行中の送信は追加指示（steer）になります。最後の送信は ↑ または ✎ で修正できます。</div>
   </div>
 </div>
-<div class="grip" id="grip-r" title="ドラッグで右ペインの幅を変更"></div>
+<div class="grip" id="grip-r" title="ドラッグで右ペインの幅を変更" data-i18n-attr="title:grip.right.tip"></div>
 <div id="side">
   <div id="dochead"><span id="doctitle"></span>
     <span class="spacer"></span>
-    <button onclick="sideView('chats')">← チャット</button></div>
-  <div id="newbtn" onclick="newChat()">＋ 新規チャット</div>
+    <button id="docreload" onclick="treeReload()" style="display:none"
+      data-i18n="mgmt.reload">再読込</button>
+    <button onclick="sideView('chats')" data-i18n="head.back" data-i18n-attr="title:head.back.tip">← チャット</button></div>
+  <div id="newbtn" onclick="newChat()" data-i18n="side.newChat">＋ 新規チャット</div>
   <div id="sess"></div>
   <div id="doclist" style="display:none"></div>
+  <div id="reflist" style="display:none"></div>
+  <div id="treebox" style="display:none"></div>
 </div>
-<div id="docmodal" onclick="if(event.target===this)closeDoc()">
-  <div id="docbox">
-    <div id="dochd"><b id="docname"></b><span class="muted" id="docpath"></span>
-      <button onclick="closeDoc()">閉じる</button></div>
-    <div id="docbody"></div>
+<div id="dirmodal" onclick="if(event.target===this)closeDirPick()">
+  <div id="dirpanel">
+    <div class="dhead"><b data-i18n="dirpick.title">フォルダ選択</b><span class="spacer"></span>
+      <button onclick="closeDirPick()">×</button></div>
+    <div id="dircur" class="dcur"></div>
+    <div id="dirlist"></div>
+    <div class="dfoot">
+      <button class="primary" onclick="pickDir()" data-i18n="dirpick.pick">このフォルダを選択</button>
+      <button onclick="closeDirPick()" data-i18n="common.cancel">キャンセル</button>
+    </div>
   </div>
 </div>
+<div id="tip"></div>
+<script src="i18n.js"></script>
 <script>
 const API = '';
 let sel = null;            // 選択中チャット id（null = 新規）
 let repos = [];
 let files = [];
 let busySince = 0;
+let sendVerify = false;    // busy 中の送信ボタンを検証中表示にする（setSendBusy 経由）
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g,
   (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const J = (m, p, body) => fetch(API + p, {
   method: m, headers: { 'content-type': 'application/json' },
   body: body ? JSON.stringify(body) : undefined }).then((r) => r.json());
 
-// ---------- Markdown（agent/thought/plan 用。先に全文 HTML escape） ----------
-const mdInline = (s) => {
-  let x = esc(s);
-  const hold = [];
-  x = x.replace(/`([^`]+)`/g, (_, c) => {
-    hold.push(`<code>${c}</code>`);
-    return `\u0000${hold.length - 1}\u0000`;
-  });
-  x = x.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g,
-    '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
-  x = x.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
-  x = x.replace(/__([^_]+)__/g, '<strong>$1</strong>');
-  x = x.replace(/\*([^*]+)\*/g, '<em>$1</em>');
-  x = x.replace(/(^|\W)_([^_]+)_(?=\W|$)/g, '$1<em>$2</em>');
-  return x.replace(/\u0000(\d+)\u0000/g, (_, n) => hold[+n]);
-};
-const mdCells = (l) => l.trim().replace(/^\||\|$/g, '').split('|').map((c) => c.trim());
-function md(src) {
-  const lines = String(src ?? '').replace(/\r\n?/g, '\n').split('\n');
-  const blank = (l) => /^\s*$/.test(l);
-  const tableSep = (l) => /^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)*\|?\s*$/.test(l);
-  const blockStart = (l, i) => /^\s*```/.test(l) || /^\s*#{1,6}\s+/.test(l) ||
-    /^\s*>\s?/.test(l) || /^\s*[-*+]\s+/.test(l) || /^\s*\d+\.\s+/.test(l) ||
-    /^\s*(---+|\*\*\*+|___+)\s*$/.test(l) ||
-    (l.includes('|') && i + 1 < lines.length && tableSep(lines[i + 1]));
-  const out = [];
-  let i = 0;
-  while (i < lines.length) {
-    const l = lines[i];
-    if (blank(l)) { i++; continue; }
-    if (/^\s*```/.test(l)) {
-      const lang = l.trim().slice(3).trim();
-      const buf = [];
-      i++;
-      while (i < lines.length && !/^\s*```\s*$/.test(lines[i])) buf.push(lines[i++]);
-      i++;
-      out.push(`<pre><code${lang ? ` class="lang-${esc(lang)}"` : ''}>${esc(buf.join('\n'))}</code></pre>`);
-      continue;
+// ---------- 内容表示（Viewer に集約） ----------
+// chat message・doc 本文・参照ファイルの描画はすべてこのオブジェクト経由。
+// kind 判定（md/html/mmd/その他）・原文/プレビュー切替・Markdown 変換・
+// mermaid 後処理を一箇所にまとめる
+const Viewer = {
+  view: 'preview',                       // doc 本文の 'preview' | 'raw'
+  setView(v) { this.view = v === 'raw' ? 'raw' : 'preview'; },
+  kind(j) {                              // /api/doc 応答 → 表示種別
+    const p = String(j?.path || j?.name || '');
+    if (/\.(md|markdown)$/i.test(p)) return 'md';
+    if (/\.html?$/i.test(p)) return 'html';
+    if (/\.mmd$/i.test(p)) return 'mmd';
+    return '';
+  },
+  // ---- Markdown → HTML（agent/thought/plan と .md 本文で共用。
+  //      先に全文 HTML escape してから inline 変換する） ----
+  inline(s) {
+    let x = esc(s);
+    const hold = [];
+    x = x.replace(/`([^`]+)`/g, (_, c) => {
+      hold.push(`<code>${c}</code>`);
+      return `\u0000${hold.length - 1}\u0000`;
+    });
+    x = x.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g,
+      '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
+    x = x.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+    x = x.replace(/__([^_]+)__/g, '<strong>$1</strong>');
+    x = x.replace(/\*([^*]+)\*/g, '<em>$1</em>');
+    x = x.replace(/(^|\W)_([^_]+)_(?=\W|$)/g, '$1<em>$2</em>');
+    return x.replace(/\u0000(\d+)\u0000/g, (_, n) => hold[+n]);
+  },
+  cells(l) { return l.trim().replace(/^\||\|$/g, '').split('|').map((c) => c.trim()); },
+  md(src) {
+    const lines = String(src ?? '').replace(/\r\n?/g, '\n').split('\n');
+    const blank = (l) => /^\s*$/.test(l);
+    const tableSep = (l) => /^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)*\|?\s*$/.test(l);
+    const blockStart = (l, i) => /^\s*```/.test(l) || /^\s*#{1,6}\s+/.test(l) ||
+      /^\s*>\s?/.test(l) || /^\s*[-*+]\s+/.test(l) || /^\s*\d+\.\s+/.test(l) ||
+      /^\s*(---+|\*\*\*+|___+)\s*$/.test(l) ||
+      (l.includes('|') && i + 1 < lines.length && tableSep(lines[i + 1]));
+    const out = [];
+    let i = 0;
+    while (i < lines.length) {
+      const l = lines[i];
+      if (blank(l)) { i++; continue; }
+      if (/^\s*```/.test(l)) {
+        const lang = l.trim().slice(3).trim();
+        const buf = [];
+        i++;
+        while (i < lines.length && !/^\s*```\s*$/.test(lines[i])) buf.push(lines[i++]);
+        i++;
+        const code = esc(buf.join('\n'));
+        out.push(lang === 'mermaid'
+          ? `<pre class="mermaid">${code}</pre>`
+          : `<pre><code${lang ? ` class="lang-${esc(lang)}"` : ''}>${code}</code></pre>`);
+        continue;
+      }
+      const hm = l.match(/^\s*(#{1,6})\s+(.*)$/);
+      if (hm) {
+        out.push(`<h${hm[1].length}>${this.inline(hm[2])}</h${hm[1].length}>`);
+        i++; continue;
+      }
+      if (/^\s*(---+|\*\*\*+|___+)\s*$/.test(l)) { out.push('<hr>'); i++; continue; }
+      if (/^\s*>\s?/.test(l)) {
+        const buf = [];
+        while (i < lines.length && /^\s*>\s?/.test(lines[i]))
+          buf.push(lines[i++].replace(/^\s*>\s?/, ''));
+        out.push(`<blockquote>${buf.map((b) => this.inline(b)).join('<br>')}</blockquote>`);
+        continue;
+      }
+      if (l.includes('|') && i + 1 < lines.length && tableSep(lines[i + 1])) {
+        const header = this.cells(l);
+        i += 2;
+        const rows = [];
+        while (i < lines.length && !blank(lines[i]) && lines[i].includes('|'))
+          rows.push(this.cells(lines[i++]));
+        out.push('<table><thead><tr>' +
+          header.map((c) => `<th>${this.inline(c)}</th>`).join('') +
+          '</tr></thead><tbody>' +
+          rows.map((r) => '<tr>' +
+            r.map((c) => `<td>${this.inline(c)}</td>`).join('') + '</tr>').join('') +
+          '</tbody></table>');
+        continue;
+      }
+      if (/^\s*[-*+]\s+/.test(l)) {
+        const items = [];
+        while (i < lines.length && /^\s*[-*+]\s+/.test(lines[i]))
+          items.push(lines[i++].replace(/^\s*[-*+]\s+/, ''));
+        out.push('<ul>' + items.map((x) => `<li>${this.inline(x)}</li>`).join('') + '</ul>');
+        continue;
+      }
+      if (/^\s*\d+\.\s+/.test(l)) {
+        const items = [];
+        while (i < lines.length && /^\s*\d+\.\s+/.test(lines[i]))
+          items.push(lines[i++].replace(/^\s*\d+\.\s+/, ''));
+        out.push('<ol>' + items.map((x) => `<li>${this.inline(x)}</li>`).join('') + '</ol>');
+        continue;
+      }
+      const para = [];
+      while (i < lines.length && !blank(lines[i]) && !blockStart(lines[i], i))
+        para.push(lines[i++]);
+      out.push(`<p>${para.map((p) => this.inline(p)).join('<br>')}</p>`);
     }
-    const hm = l.match(/^\s*(#{1,6})\s+(.*)$/);
-    if (hm) {
-      out.push(`<h${hm[1].length}>${mdInline(hm[2])}</h${hm[1].length}>`);
-      i++; continue;
+    return out.join('\n');
+  },
+  // ---- chat 1件分のメッセージ HTML（agent/thought/plan は Markdown 描画） ----
+  mdRole(r) { return r === 'agent' || r === 'thought' || r === 'plan'; },
+  msg(m, editable) {
+    const body = this.mdRole(m.role) ? this.md(m.text) : esc(m.text);
+    const cls = this.mdRole(m.role) ? `${m.role} md` : m.role;
+    const edit = editable
+      ? `<span class="edit" onclick="startRevise()" title="${esc(t('edit.tip'))}">${esc(t('edit.label'))}</span>`
+      : '';
+    return `<div class="msg ${cls}">${body}<span class="time">${(m.ts || '').slice(11, 19)}${edit}</span></div>`;
+  },
+  // ---- mermaid（```mermaid ブロックと .mmd 本文を図として描画） ----
+  // CDN から lazy import。失敗時・構文エラー時はソース表示のまま残す
+  _mp: null,
+  _mermaid() {
+    return this._mp ||= import(
+      'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs')
+      .then((m) => {
+        m.default.initialize({ startOnLoad: false, securityLevel: 'strict' });
+        return m.default;
+      })
+      .catch(() => { this._mp = null; return null; });  // 失敗はキャッシュせず次回リトライ
+  },
+  async drawMermaid(root) {
+    const nodes = [...root.querySelectorAll('pre.mermaid:not([data-processed])')];
+    if (!nodes.length) return;
+    const m = await this._mermaid();
+    if (!m) return;
+    for (const n of nodes) {
+      try { await m.run({ nodes: [n] }); } catch { /* 壊れた図はソース表示のまま */ }
     }
-    if (/^\s*(---+|\*\*\*+|___+)\s*$/.test(l)) { out.push('<hr>'); i++; continue; }
-    if (/^\s*>\s?/.test(l)) {
-      const buf = [];
-      while (i < lines.length && /^\s*>\s?/.test(lines[i]))
-        buf.push(lines[i++].replace(/^\s*>\s?/, ''));
-      out.push(`<blockquote>${buf.map(mdInline).join('<br>')}</blockquote>`);
-      continue;
+  },
+  // ---- .mmd の縦横切替（表示のみ。ファイルは変更しない） ----
+  // flowchart/graph は宣言行の方向指定を、stateDiagram は direction 行を反転する。
+  // mmdAlt は path → 反転済みソース。縦⇄横ボタンで往復させる
+  mmdAlt: new Map(),
+  // frontmatter（--- title: ... ---）を除いた図本文を返す
+  _mmdBody(src) {
+    const fm = /^---\s*\n[\s\S]*?\n---\s*\n?/.exec(String(src ?? ''));
+    return fm ? String(src).slice(fm[0].length) : String(src ?? '');
+  },
+  // 現在の向き: 'v'（縦）/ 'h'（横）/ null（切替対象外の図種）
+  mmdOrient(src) {
+    const body = this._mmdBody(src);
+    const f = /^[ \t]*(?:flowchart|graph)[ \t]+(TB|TD|BT|RL|LR)\b/m.exec(body);
+    if (f) return /^(LR|RL)$/.test(f[1]) ? 'h' : 'v';
+    if (/^[ \t]*stateDiagram(?:-v2)?[ \t]*$/m.test(body)) {
+      const d = /^[ \t]*direction[ \t]+(TB|TD|BT|RL|LR)\b/m.exec(body);
+      return d && /^(LR|RL)$/.test(d[1]) ? 'h' : 'v';  // direction 無しは TB（縦）
     }
-    if (l.includes('|') && i + 1 < lines.length && tableSep(lines[i + 1])) {
-      const header = mdCells(l);
-      i += 2;
-      const rows = [];
-      while (i < lines.length && !blank(lines[i]) && lines[i].includes('|'))
-        rows.push(mdCells(lines[i++]));
-      out.push('<table><thead><tr>' +
-        header.map((c) => `<th>${mdInline(c)}</th>`).join('') +
-        '</tr></thead><tbody>' +
-        rows.map((r) => '<tr>' + r.map((c) => `<td>${mdInline(c)}</td>`).join('') + '</tr>').join('') +
-        '</tbody></table>');
-      continue;
+    return null;
+  },
+  mmdFlipped(src) {
+    const s = String(src ?? '');
+    const o = this.mmdOrient(s);
+    if (!o) return s;
+    const fm = /^---\s*\n[\s\S]*?\n---\s*\n?/.exec(s);
+    const head = fm ? fm[0] : '';
+    let body = s.slice(head.length);
+    const next = o === 'v' ? 'LR' : 'TB';
+    if (/^[ \t]*(?:flowchart|graph)[ \t]+(?:TB|TD|BT|RL|LR)\b/m.test(body)) {
+      body = body.replace(/^([ \t]*(?:flowchart|graph)[ \t]+)(?:TB|TD|BT|RL|LR)\b/m, `$1${next}`);
+    } else if (/^[ \t]*direction[ \t]+(?:TB|TD|BT|RL|LR)\b/m.test(body)) {
+      body = body.replace(/^([ \t]*direction[ \t]+)(?:TB|TD|BT|RL|LR)\b/m, `$1${next}`);
+    } else {
+      body = body.replace(/^([ \t]*stateDiagram(?:-v2)?[ \t]*)$/m, `$1\n    direction ${next}`);
     }
-    if (/^\s*[-*+]\s+/.test(l)) {
-      const items = [];
-      while (i < lines.length && /^\s*[-*+]\s+/.test(lines[i]))
-        items.push(lines[i++].replace(/^\s*[-*+]\s+/, ''));
-      out.push('<ul>' + items.map((x) => `<li>${mdInline(x)}</li>`).join('') + '</ul>');
-      continue;
+    return head + body;
+  },
+  // ---- mermaid 図の拡大縮小（表示のみ。＋−ボタン / Ctrl+wheel / ドラッグで視野移動） ----
+  // 図はベクタなので svg の width/height を viewBox 基準の倍率で書き換える。
+  // 縮小時は 100% 未満にもできる（max-width:100% の既定より小さく表示）
+  zoom: 1,
+  _zpath: null,                            // zoom を保持する doc path（切替で等倍に戻す）
+  mmdZoom(d) {
+    this.zoom = d === 0 ? 1
+      : Math.min(10, Math.max(0.05, this.zoom * (d > 0 ? 1.25 : 0.8)));
+    this._applyZoom();
+  },
+  _applyZoom() {
+    const z = document.getElementById('vw-zv');
+    if (z) z.textContent = Math.round(this.zoom * 100) + '%';
+    for (const svg of document.querySelectorAll('#box pre.mermaid svg')) {
+      const vb = (svg.getAttribute('viewBox') || '').trim().split(/[\s,]+/).map(Number);
+      if (vb.length === 4 && vb.every(Number.isFinite) && vb[2] > 0 && vb[3] > 0) {
+        svg.style.maxWidth = 'none';
+        svg.style.width = vb[2] * this.zoom + 'px';
+        svg.style.height = vb[3] * this.zoom + 'px';
+      }
     }
-    if (/^\s*\d+\.\s+/.test(l)) {
-      const items = [];
-      while (i < lines.length && /^\s*\d+\.\s+/.test(lines[i]))
-        items.push(lines[i++].replace(/^\s*\d+\.\s+/, ''));
-      out.push('<ol>' + items.map((x) => `<li>${mdInline(x)}</li>`).join('') + '</ol>');
-      continue;
-    }
-    const para = [];
-    while (i < lines.length && !blank(lines[i]) && !blockStart(lines[i], i))
-      para.push(lines[i++]);
-    out.push(`<p>${para.map(mdInline).join('<br>')}</p>`);
-  }
-  return out.join('\n');
-}
-const mdRole = (r) => r === 'agent' || r === 'thought' || r === 'plan';
-const renderMsg = (m) => {
-  const body = mdRole(m.role) ? md(m.text) : esc(m.text);
-  const cls = mdRole(m.role) ? `${m.role} md` : m.role;
-  return `<div class="msg ${cls}">${body}<span class="time">${(m.ts || '').slice(11, 19)}</span></div>`;
+  },
+  // ---- doc 本文を #box へ描画（/api/doc 応答。null なら空状態） ----
+  // preview 対応 kind: md=Markdown+mermaid / mmd=mermaid 図 / html=sandboxed
+  // iframe。kind 不明は view に関わらず原文表示
+  render(j) {
+    const kind = this.kind(j);
+    const prev = !!kind && this.view === 'preview';
+    document.getElementById('vw-raw').classList.toggle('active', !prev);
+    document.getElementById('vw-prev').classList.toggle('active', prev);
+    const mmdSrc = j && (this.mmdAlt.get(j.path) ?? j.text);   // 反転中は差替ソース
+    const orient = prev && kind === 'mmd' ? this.mmdOrient(mmdSrc) : null;
+    const dirBtn = document.getElementById('vw-dir');
+    dirBtn.style.display = orient ? '' : 'none';
+    if (orient) dirBtn.textContent = orient === 'v' ? t('doc.orientV') : t('doc.orientH');
+    const path = j ? j.path : null;        // doc が変わったらズームを等倍に戻す
+    if (path !== this._zpath) { this._zpath = path; this.zoom = 1; }
+    const box = document.getElementById('box');
+    box.classList.toggle('htmlview', kind === 'html' && prev);
+    box.innerHTML = !j
+      ? `<div class="msg sys">${esc(t('doc.notFound'))}</div>`
+      : j.binary
+        ? `<div class="msg sys">${esc(t('file.binary'))}</div>`
+        : (prev && kind === 'md'
+          ? '<div class="msg md">' + this.md(j.text) + '</div>'
+          : prev && kind === 'mmd'
+            ? '<div class="msg md"><pre class="mermaid">' + esc(mmdSrc) + '</pre></div>'
+            : prev && kind === 'html'
+              ? '<iframe class="htmlprev" sandbox="allow-scripts allow-popups"></iframe>'
+              : '<pre class="rawfile">' + esc(j.text) + '</pre>') +
+        (j.truncated ? `<div class="msg sys">${esc(t('doc.truncated'))}</div>` : '');
+    // srcdoc は属性経由だとクォート崩れするので JS プロパティで渡す
+    const fr = box.querySelector('.htmlprev');
+    if (fr) fr.srcdoc = j.text;
+    document.getElementById('vw-zoom').style.display =
+      prev && box.querySelector('pre.mermaid') ? '' : 'none';
+    this.drawMermaid(box).then(() => this._applyZoom());
+    this._applyZoom();                     // svg 未描画でも倍率ラベルは更新
+    box.scrollTop = 0;
+  },
 };
 
-// ---------- リポジトリスコープ（左ペインの選択が全表示のフィルタ） ----------
-let repoScope = localStorage.getItem('kasugai:repo') || '';   // '' = すべて
+// ---------- カレントリポジトリ（左ペインの選択が全表示のスコープ） ----------
+let repoScope = localStorage.getItem('kasugai:repo') || '';   // '' は repos 未設定時のみ
 const repoSlugOf = (r) => typeof r === 'string' ? r : (r?.slug ?? r?.github ?? '');
 const matchRepo = (r) => !repoScope || repoSlugOf(r) === repoScope;
 const repoQuery = () => repoScope ? '?repo=' + encodeURIComponent(repoScope) : '';
-function repoScopeChanged() {
-  repoScope = document.getElementById('repo-scope').value;
+// slug → [owner, name]（'/' 無しは owner=''）。owner/repo の2セレクトで選択
+const splitSlug = (s) => {
+  const i = s.indexOf('/');
+  return i > 0 ? [s.slice(0, i), s.slice(i + 1)] : ['', s];
+};
+const joinSlug = (o, n) => o ? o + '/' + n : n;
+let repoOwner = splitSlug(repoScope)[0];   // カレント owner 選択
+const scopeFromSelects = () =>
+  joinSlug(repoOwner, document.getElementById('repo-name').value);
+function applyRepoScope() {          // repoScope 確定後の全ペイン反映
   localStorage.setItem('kasugai:repo', repoScope);
+  const wasCenter = centerMode;    // sideView('chats') が centerMode を戻すので退避
   loadSessions();            // 右ペイン chat sessions
   sideView(sideMode);        // 右ペイン doc browser（再取得）
   loadMgmt();                // 左ペイン管理セクション
-  if (sel == null) renderEmpty();
+  treeSel = '';              // ツリーの選択は旧 repo のファイルになるので解除
+  if (sideMode === 'editor') renderTree();
+  if (wasCenter === 'status') showStatus();
+  else if (wasCenter === 'settings') showSettings();
+  else if (sel == null) renderEmpty();
 }
-
+function repoOwnerChanged() {
+  repoOwner = document.getElementById('repo-owner').value;
+  fillRepoNames();                 // owner 切替で name 一覧を詰め直し
+  repoScope = scopeFromSelects();
+  applyRepoScope();
+}
+function repoScopeChanged() {
+  repoScope = scopeFromSelects();
+  applyRepoScope();
+}
+// repo-name select を repoOwner 配下の repo 群で埋め、preferName があれば選択
+function fillRepoNames(preferName) {
+  const names = repos.map((r) => r.slug).map(splitSlug)
+    .filter(([o]) => o === repoOwner).map(([, n]) => n);
+  const sel = document.getElementById('repo-name');
+  sel.innerHTML = names.map((n) =>
+    `<option value="${esc(n)}">${esc(n)}</option>`).join('');
+  sel.value = names.includes(preferName) ? preferName : (names[0] ?? '');
+}
+// /api/state から選択肢を再構築。prefer 指定時はその slug を選択
+async function refreshRepos(prefer) {
+  const st = await J('GET', '/api/state');
+  repos = st.repos || [];
+  if (prefer && repos.some((r) => r.slug === prefer)) repoScope = prefer;
+  else if (!repos.some((r) => r.slug === repoScope))
+    repoScope = repos[0]?.slug ?? '';
+  [repoOwner] = splitSlug(repoScope);
+  const owners = [...new Set(repos.map((r) => splitSlug(r.slug)[0]))];
+  const osel = document.getElementById('repo-owner');
+  osel.innerHTML = owners.map((o) =>
+    `<option value="${esc(o)}">${esc(o || t('repo.noOwner'))}</option>`).join('');
+  if (!owners.includes(repoOwner)) repoOwner = owners[0] ?? '';
+  osel.value = repoOwner;
+  fillRepoNames(splitSlug(repoScope)[1]);
+  repoScope = scopeFromSelects();
+  localStorage.setItem('kasugai:repo', repoScope);
+}
 // ---------- セッション一覧 ----------
 async function loadSessions() {
   const j = await J('GET', '/api/chat/sessions');
   const list = (j.sessions || []).filter((s) => matchRepo(s.repo));
-  document.getElementById('sess').innerHTML = list.map((s) =>
-    `<div class="csess${s.id === sel ? ' active' : ''}" onclick="chatSelect(${s.id})"
-      ${s.resumable ? 'title="ACP切断・次の送信で再開"' : ''}>
-      <span class="dot">${s.busy ? '●' : (s.resumable ? '↺' : '○')}</span>
-      <span class="lbl">${esc(s.label)}${s.repo ? ' <span style="color:#9ca3af">(' + esc(shortRepo(s.repo)) + ')</span>' : ''}</span>
+  // 並列モードの子 chat は親の直下にインデントしてまとめる。
+  // 親が絞込対象外・削除済みの孤児は root として表示する
+  const ids = new Set(list.map((s) => s.id));
+  // 行は状態ドット+ラベルの最小表示（状態確認は処理状況ボードで行う）。
+  // 省略される .lbl の全文・状態・並列/agent の補足は data-tip へ集約し、
+  // ホバーポップアップで表示する
+  const stat = (s) => {
+    const key = statusKey(s);
+    if (key === 'exec' && s.waiting)
+      return s.waitInfo?.kind === 'repo' ? t('sess.waitRepo') : t('sess.waitFile');
+    if (key === 'resume') return t('sess.resumable');
+    return statusLabel(s);
+  };
+  const row = (s, child) =>
+    `<div class="csess${s.id === sel ? ' active' : ''}${child ? ' child' : ''}" onclick="chatSelect(${s.id})"
+      data-tip="${esc((child ? '↳ ' : '') + s.label + '\n' + stat(s) +
+        (s.execMode === 'parallel' ? '\n' + t('exmode.parallel') : '') +
+        (agentRows.length > 1 && s.agentLabel ? '\n' + s.agentLabel : ''))}">
+      <span class="sdot st-${statusKey(s)}"></span>
+      <span class="lbl">${child ? '↳ ' : ''}${esc(s.label)}</span>
       <span class="x" onclick="event.stopPropagation();closeChat(${s.id})">✕</span>
-    </div>`).join('');
+    </div>`;
+  const html = [];
+  for (const s of list) {
+    if (s.parent != null && ids.has(s.parent)) continue;   // 子は親の直下で描く
+    html.push(row(s));
+    for (const c of list.filter((c) => c.parent === s.id)
+      .sort((a, b) => a.id - b.id)) html.push(row(c, true));
+  }
+  document.getElementById('sess').innerHTML = html.join('');
+  hideTip();              // 描画し直した行に残ったポップアップを閉じる
   if (sel == null && list.length) { /* 新規画面のまま */ }
 }
-const shortRepo = (r) => String(r).split('/').pop();
 function chatSelect(id) {
   sel = id;
-  if (sideMode !== 'chats') sideView('chats'); else loadSessions();
+  endRevise();
+  if (sideMode !== 'chats') sideView('chats');
+  else { exitDoc(); loadSessions(); }
   loadChat();
 }
-function newChat() { sel = null; loadSessions(); renderEmpty(); }
+function newChat() { sel = null; endRevise(); exitDoc(); loadSessions(); renderEmpty(); }
 async function latestChat() {
   const j = await J('GET', '/api/chat/sessions');
   const latest = (j.sessions || []).filter((s) => matchRepo(s.repo)).slice().sort((a, b) =>
@@ -370,7 +790,7 @@ async function closeChat(id) {
 async function renameChat() {
   if (sel == null) return;
   const cur = document.getElementById('ctitle').textContent;
-  const label = prompt('チャット名', cur);
+  const label = prompt(t('prompt.chatName'), cur);
   if (!label) return;
   await J('POST', '/api/chat/rename', { id: sel, label });
   loadSessions(); loadChat();
@@ -378,28 +798,68 @@ async function renameChat() {
 
 // ---------- チャット本体 ----------
 function renderEmpty() {
-  document.getElementById('ctitle').textContent = '新規チャット';
-  document.getElementById('status').textContent =
-    '（未送信）' + (repoScope ? ' · ' + shortRepo(repoScope) : '');
+  if (centerMode !== 'chat') return;     // doc/処理状況 表示中は中央ペインを保持
+  lastMsgs = []; endRevise();
+  document.getElementById('restorebtn').style.display = 'none';
+  document.getElementById('repoask').style.display = 'none';
+  const alabel = agentRows.find((a) => a.id === activeAgent)?.label || 'AI';
+  document.getElementById('ctitle').textContent = t('chat.new');
+  document.getElementById('plink').innerHTML = '';
+  document.getElementById('exmode').value =
+    localStorage.getItem('kasugai:exmode') || 'direct';
+  document.getElementById('status').textContent = t('chat.unsent');
   document.getElementById('box').innerHTML =
-    '<div class="msg sys">指示を入力すると devin セッションを開始します</div>';
+    `<div class="msg sys">${esc(t('chat.hintStartAgent', { agent: alabel }))}</div>`;
 }
 async function loadChat() {
+  if (centerMode !== 'chat') return;     // doc/処理状況 表示中は中央ペインを保持
   if (sel == null) { renderEmpty(); return; }
   const j = await J('GET', '/api/chat?id=' + sel);
   document.getElementById('ctitle').textContent = j.label || ('chat ' + sel);
+  // 並列モードの親子リンク（子→親へ戻る / 親→子 chat 一覧）
+  document.getElementById('plink').innerHTML =
+    (j.parent != null
+      ? `<a onclick="chatSelect(${j.parent})" title="${esc(t('plink.parent.tip'))}">${esc(t('plink.parent', { id: j.parent }))}</a>` : '') +
+    (j.children || []).map((c) =>
+      `<a onclick="chatSelect(${c})" title="${esc(t('plink.child.tip'))}">${esc(t('plink.child', { id: c }))}</a>`).join('');
+  document.getElementById('exmode').value = j.execMode || 'direct';
   document.getElementById('status').textContent =
-    j.busy ? '（実行中…）' :
-    j.sessionId ? (j.live ? '（接続中）' : '（切断・次の送信で再開）') : '（未起動）';
-  setSendBusy(!!j.busy);
+    (j.execMode === 'parallel' ? `[${t('exmode.parallel')}] ` : '') +
+    (j.agent?.label ? '[' + j.agent.label + '] ' : '') +
+    (j.verify === 'running' ? t('status.verifying') : j.verify ? t('status.verifyWait') :
+    j.waiting ? (j.waiting.kind === 'repo'
+        ? t('status.repoAsk') : t('status.execWait')) :
+    j.busy ? t('status.running') :
+    j.sessionId ? (j.live ? t('status.connected') : t('status.disconnected'))
+    : (j.agent?.type && j.agent.type !== 'acp' ? t('status.http') : t('status.notStarted')));
+  // リポジトリ不整合の確認バー（waiting kind=repo）
+  const ra = document.getElementById('repoask');
+  const ask = j.waiting?.kind === 'repo' ? j.waiting.suggest : null;
+  ra.style.display = ask ? 'flex' : 'none';
+  if (ask)
+    document.getElementById('repoask-text').innerHTML = t('repoask.text', {
+      slug: esc(ask.slug),
+      reason: ask.reason ? ` (${esc(ask.reason)})` : '',
+      repo: esc(j.repo ?? '-') });
+  setSendBusy(!!j.busy, j.verify === 'running');
   renderOpts(j);
+  document.getElementById('restorebtn').style.display =
+    (j.snapPoints || []).length ? '' : 'none';
+  lastMsgs = j.messages || [];
+  const lastUser = lastMsgs.map((m) => m.role).lastIndexOf('user');
   const box = document.getElementById('box');
   const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 60;
-  box.innerHTML = (j.messages || []).map(renderMsg).join('')
-    || '<div class="msg sys">(メッセージなし)</div>';
+  box.innerHTML = lastMsgs.map((m, i) => Viewer.msg(m, i === lastUser)).join('')
+    || `<div class="msg sys">${esc(t('chat.noMessages'))}</div>`;
   if (j.busy) {
-    box.innerHTML += '<div class="msg agent"><span class="typing"><span>●</span><span>●</span><span>●</span></span></div>';
+    box.innerHTML += '<div class="msg agent">' +
+      (j.verify === 'running'
+        ? `<span class="pill ver">${esc(t('board.verifying'))}</span> ` : '') +
+      '<span class="typing"><span>●</span><span>●</span><span>●</span></span></div>';
+  } else if (j.verify === 'pending') {
+    box.innerHTML += `<div class="msg sys">${esc(t('status.verifyWait'))}</div>`;
   }
+  Viewer.drawMermaid(box).then(() => Viewer._applyZoom());
   if (atBottom) box.scrollTop = box.scrollHeight;
 }
 function renderOpts(j) {
@@ -414,19 +874,85 @@ function renderOpts(j) {
 async function setOpt(id, value) {
   await J('POST', '/api/chat/option', { sid: sel, id, value });
 }
-function setSendBusy(busy) {
+function setSendBusy(busy, verifying) {
+  if (verifying !== undefined) sendVerify = verifying;
   const b = document.getElementById('send');
   if (busy) {
     if (!busySince) busySince = Date.now();
     b.classList.add('busy');
-    b.textContent = Date.now() - busySince < 15000 ? '考えています…' : '動作中…';
-  } else { busySince = 0; b.classList.remove('busy'); b.textContent = '送信'; }
+    b.textContent = sendVerify ? t('board.verifying')
+      : Date.now() - busySince < 15000 ? t('send.thinking') : t('send.working');
+  } else { busySince = 0; sendVerify = false;
+    b.classList.remove('busy'); b.textContent = t('common.send'); }
+}
+
+// ---------- コンソールタブ（裏側プロセス出力のライブ表示） ----------
+// 選択は localStorage 永続化。履歴は GET /api/console、追加分は
+// SSE console push から追記する（seq 番号で重複を弾く）
+let chatTab = localStorage.getItem('kasugai:ctab') || 'chat';  // chat | console
+let conLast = 0;         // 描画済み行の最大 seq
+function setChatTab(t) {
+  chatTab = t === 'console' ? 'console' : 'chat';
+  localStorage.setItem('kasugai:ctab', chatTab);
+  applyChatTab();
+}
+function applyChatTab() {
+  const con = chatTab === 'console';
+  document.getElementById('main').classList.toggle('contab', con);
+  document.getElementById('ctab-chat').classList.toggle('active', !con);
+  document.getElementById('ctab-console').classList.toggle('active', con);
+  if (con) { document.getElementById('condot').style.display = 'none'; loadConsole(); }
+}
+const conLineHtml = (l) =>
+  `<div class="cl ${l.stream === 'err' ? 'err' : l.stream === 'sys' ? 'sys' : ''}">` +
+  `<span class="t">${(l.ts || '').slice(11, 19)}</span>` +
+  `<span class="cs">[${esc(l.src)}]</span>${esc(l.text)}</div>`;
+async function loadConsole() {
+  const j = await J('GET', '/api/console?limit=800');
+  const lines = j.lines || [];
+  const box = document.getElementById('conbox');
+  box.innerHTML = lines.map(conLineHtml).join('')
+    || `<div class="cl sys">${esc(t('con.empty'))}</div>`;
+  conLast = lines.length ? lines.at(-1).seq : 0;
+  box.scrollTop = box.scrollHeight;
+}
+function appendConLines(lines) {
+  const fresh = (lines || []).filter((l) => l.seq > conLast);
+  if (!fresh.length) return;
+  conLast = fresh.at(-1).seq;
+  const box = document.getElementById('conbox');
+  const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 60;
+  box.insertAdjacentHTML('beforeend', fresh.map(conLineHtml).join(''));
+  while (box.childNodes.length > 2500) box.removeChild(box.firstChild);
+  if (atBottom) box.scrollTop = box.scrollHeight;
+  // chat タブ表示中に新着があればコンソールタブへ未読ドットを出す
+  if (chatTab !== 'console')
+    document.getElementById('condot').style.display = '';
 }
 
 // ---------- 入力・添付 ----------
+let lastMsgs = [];         // 表示中チャットの messages（修正呼び戻し用）
+let reviseOn = false;      // 修正モード: 送信時 /api/chat/revise を使う
+const hintText = () => t(reviseOn ? 'input.reviseHint' : 'input.hint');
 function autoGrow(el) { el.style.height = 'auto'; el.style.height = Math.min(el.scrollHeight, 140) + 'px'; }
 function onKey(e) {
-  if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); send(); }
+  if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); send(); return; }
+  if (e.key === 'ArrowUp' && !e.target.value && sel != null) { e.preventDefault(); startRevise(); }
+  if (e.key === 'Escape' && reviseOn) { e.target.value = ''; autoGrow(e.target); endRevise(); }
+}
+// 最後の user 送信を入力欄へ呼び戻す（送信は revise API → 最終ターンやり直し）
+function startRevise() {
+  const i = lastMsgs.map((m) => m.role).lastIndexOf('user');
+  if (i < 0) return;
+  const el = document.getElementById('text');
+  el.value = lastMsgs[i].text;
+  autoGrow(el); el.focus();
+  reviseOn = true;
+  document.getElementById('hint').textContent = hintText();
+}
+function endRevise() {
+  reviseOn = false;
+  document.getElementById('hint').textContent = hintText();
 }
 function addFiles(fs) {
   for (const f of fs || []) {
@@ -452,27 +978,76 @@ function renderImgs() {
       : `<span class="fchip">${esc(a.name || 'file')}</span>`) +
     `<span class="del" onclick="files.splice(${i},1);renderImgs()">×</span></span>`).join('');
 }
+// 処理モード select。新規 chat は localStorage の既定を使い、
+// 既存 chat では切替を即 POST /api/chat/mode へ反映する
+async function exmodeChanged() {
+  const v = document.getElementById('exmode').value;
+  localStorage.setItem('kasugai:exmode', v);
+  if (sel != null) {
+    await J('POST', '/api/chat/mode', { id: sel, mode: v });
+    loadSessions();
+  }
+}
 async function send() {
   const el = document.getElementById('text');
   let text = el.value.trim();
   if (!text && !files.length) return;
   if (files.length) {
     const aj = await J('POST', '/api/chat/attach', { attachments: files });
-    if (!aj.ok) { alert('添付失敗'); return; }
+    if (!aj.ok) { alert(t('alert.attachFail')); return; }
     text += (text ? '\n' : '') +
       (aj.files || []).map((f) => '[添付] ' + f.name + ' → ' + f.path).join('\n');
     files = []; renderImgs();
   }
   el.value = ''; autoGrow(el);
-  const j = await J('POST', '/api/chat/send',
-    { id: sel, text, repo: repoScope || undefined });
-  if (j.error) { alert('送信失敗: ' + j.error); return; }
+  const j = await J('POST', reviseOn ? '/api/chat/revise' : '/api/chat/send',
+    { id: sel, text, repo: repoScope || undefined,
+      mode: document.getElementById('exmode').value });
+  endRevise();
+  if (j.error) { alert(t('alert.sendFail', { error: j.error })); return; }
   if (j.id != null && sel !== j.id) sel = j.id;
+  loadSessions(); loadChat();
+}
+// リポジトリ確認バーの回答: switch=切替えて再送 / keep=このまま再送。
+// switch 後は chat が切替先 repo のものになるため、カレント repo 選択も
+// 切替先へ合わせて chat が一覧から消えないようにする
+async function repoAnswer(action) {
+  if (sel == null) return;
+  const r = await J('POST', '/api/chat/repo-answer', { id: sel, action });
+  if (!r.ok) { alert(t('alert.fail', { error: r.error || '' })); return; }
+  if (action === 'switch' && r.repo) {
+    await refreshRepos(r.repo);   // カレント repo 選択を切替先へ
+    repoScopeChanged();           // 全ペインへ反映（各種 reload を兼ねる）
+    return;
+  }
   loadSessions(); loadChat();
 }
 async function chatCancel() { if (sel != null) { await J('POST', '/api/chat/cancel', { id: sel }); loadChat(); } }
 async function chatClear() { if (sel != null) { await J('POST', '/api/chat/clear', { id: sel }); loadChat(); } }
 async function chatReset() { if (sel != null) { await J('POST', '/api/chat/reset', { id: sel }); loadChat(); } }
+// 復元ポイント（turn 単位）を選んで、その時点以降のファイル変更を元へ戻す
+async function chatRestore() {
+  if (sel == null) return;
+  const j = await J('GET', '/api/chat?id=' + sel);
+  const pts = (j.snapPoints || []).slice().sort((a, b) => a.turn - b.turn);
+  if (!pts.length) { alert(t('restore.none')); return; }
+  const short = (f) => String(f).split('/').slice(-2).join('/');
+  const lines = pts.map((p, i) =>
+    `${i + 1}. ` + t('restore.line',
+      { prompt: p.prompt || t('restore.sentFallback'), count: p.files.length }));
+  const pick = prompt(t('restore.pick', { lines: lines.join('\n') }), '');
+  if (pick == null) return;
+  const n = parseInt(pick, 10);
+  const turn = Number.isFinite(n) && pts[n - 1] ? pts[n - 1].turn : undefined;
+  const files = [...new Set(pts.filter((p) => turn == null || p.turn >= turn)
+    .flatMap((p) => p.files))].map(short);
+  if (!confirm(t('restore.confirm', { files: files.join('\n') }))) return;
+  const r = await J('POST', '/api/chat/restore', { id: sel, turn });
+  if (!r.ok) { alert(t('restore.fail', { error: r.error || '' })); return; }
+  alert(t('restore.result', { restored: r.restored.length, deleted: r.deleted.length }) +
+    (r.failed.length ? t('restore.failedSuffix', { count: r.failed.length }) : ''));
+  loadChat();
+}
 
 // ---------- 課題化（manual detector 入口） ----------
 async function toIssue() {
@@ -481,99 +1056,840 @@ async function toIssue() {
   const convo = (j.messages || [])
     .filter((m) => m.role === 'user' || m.role === 'agent')
     .map((m) => `[${m.role}] ${m.text}`).join('\n').slice(0, 8000);
-  const title = prompt('課題タイトル', j.label || '');
+  const title = prompt(t('issue.titlePrompt'), j.label || '');
   if (!title) return;
   const r = await J('POST', '/api/candidates', {
     title, body: convo, repo: repoScope || undefined });
-  alert(r.ok ? '課題候補に登録しました' : '失敗: ' + (r.error || ''));
+  alert(r.ok ? t('issue.registered') : t('alert.fail', { error: r.error || '' }));
 }
 
-// ---------- doc browser（右ペイン: AGENTS/SKILL 詳細） ----------
-let sideMode = 'chats';                      // chats | agents | skills
+// ---------- 中央ペインの表示モード（chat / doc / status / settings） ----------
+let centerMode = 'chat';                     // 'chat' | 'doc' | 'status' | 'settings'
+
+// ---------- 処理状況（中央ペイン: 状態別カンバン列） ----------
+// 列定義: [key, pill の色クラス, 表示名]。chat は現在地の列へカードとして置く。
+// exec 列は busy/waiting を統合し、カード側のピルで実行中/実行待機中を明示する
+const STATUS_COLS = [
+  ['idle',   '',       'board.idle'],
+  ['exec',   'run',    'board.exec'],
+  ['verify', 'ver',    'board.verify'],
+  ['resume', 'resume', 'board.resume'],
+  ['live',   'live',   'board.live'],
+];
+const statusKey = (s) =>
+  s.verify ? 'verify' : s.waiting || s.busy ? 'exec' : s.live ? 'live'
+    : s.resumable ? 'resume' : 'idle';
+// chat 行のホバーポップアップに出す状態名。カンバン列名と同じ語を使い、
+// exec 列はボードのカードと同じく 実行中/実行待機中/確認待ち を出し分ける
+const statusLabel = (s) => {
+  const [key, , name] = STATUS_COLS.find(([k]) => k === statusKey(s));
+  return key === 'exec'
+    ? (s.busy ? t('board.running')
+      : s.waitInfo?.kind === 'repo' ? t('board.waitConfirm')
+      : t('board.waiting'))
+    : t(name);
+};
+async function showStatus() {
+  const j = await J('GET', '/api/chat/sessions');
+  const list = (j.sessions || []).filter((s) => matchRepo(s.repo));
+  centerMode = 'status';
+  curDoc = null;
+  document.getElementById('main').classList.add('doc');
+  document.getElementById('box').classList.remove('htmlview');
+  document.getElementById('viewsw').style.display = 'none';
+  renderSide();
+  const by = Object.fromEntries(STATUS_COLS.map(([k]) => [k, []]));
+  for (const s of list) by[statusKey(s)].push(s);
+  by.exec.sort((a, b) => (b.busy ? 1 : 0) - (a.busy ? 1 : 0)); // 実行中 → 実行待機中の順
+  document.getElementById('ctitle').textContent = t('nav.status');
+  document.getElementById('status').textContent = t('board.total', { count: list.length });
+  const short = (f) => String(f).split('/').slice(-2).join('/');
+  const card = (s) =>
+    `<div class="bcard" onclick="chatSelect(${s.id})">` +
+    (statusKey(s) === 'live'
+      ? `<span class="bx" title="${esc(t('board.close.tip'))}" onclick="event.stopPropagation();boardClose(${s.id})">×</span>`
+      : '') +
+    (statusKey(s) === 'resume'
+      ? `<button class="bact" title="${esc(t('board.resume.tip'))}" onclick="event.stopPropagation();boardResume(${s.id})">${esc(t('board.resume.btn'))}</button>`
+      : '') +
+    (statusKey(s) === 'verify' && s.verify === 'pending'
+      ? `<button class="bact" title="${esc(t('board.verify.tip'))}" onclick="event.stopPropagation();boardVerify(${s.id})">${esc(t('board.verify.btn'))}</button>`
+      : '') +
+    `<div><b>${s.parent != null ? '↳ ' : ''}${esc(s.label)}</b>` +
+    (s.execMode === 'parallel' ? ` <span class="pill par">${esc(t('exmode.parallel'))}</span>` : '') +
+    (statusKey(s) === 'exec'
+      ? ` <span class="pill run">${s.busy ? esc(t('board.running')) : s.waitInfo?.kind === 'repo' ? esc(t('board.waitConfirm')) : esc(t('board.waiting'))}</span>` +
+        (s.verifyBack ? ` <span class="pill ver" title="${esc(t('board.verifyBack.tip'))}">${esc(t('board.verifyBack', { count: s.verifyBack }))}</span>` : '')
+      : '') +
+    (statusKey(s) === 'verify'
+      ? ` <span class="pill ver">${s.verify === 'running' ? esc(t('board.verifying')) : esc(t('board.verifyPending'))}</span>`
+      : '') +
+    `</div>` +
+    `<div class="muted">#${s.id} · ${esc(fmtTs(s.updatedAt))}</div>` +
+    (s.waitInfo?.kind === 'repo'
+      ? `<div class="muted">${esc(t('board.repoWait', { slug: s.waitInfo.suggest?.slug ?? '?' }))}</div>`
+      : s.waitInfo
+      ? `<div class="muted">${esc(t('board.conflict', {
+          files: s.waitInfo.files.map(short).join(', '),
+          chats: s.waitInfo.blockedBy.map((b) => '#' + b).join(',') }))}` +
+        (s.waitInfo.held ? esc(t('board.held', { count: s.waitInfo.held })) : '') + `</div>`
+      : '') +
+    `</div>`;
+  const col = ([k, pill, name]) =>
+    `<div class="bcol"><div class="bhead"><span class="pill ${pill}">${esc(t(name))}</span>` +
+    (k === 'live' && by.live.length
+      ? `<button class="bxall" title="${esc(t('board.closeAll.tip'))}" onclick="boardCloseAll(${by.live.length})">${esc(t('board.closeAll.btn'))}</button>`
+      : '') +
+    `<span class="n">${by[k].length}</span></div>` +
+    `<div class="bcards">${by[k].map(card).join('') || `<div class="empty">${esc(t('board.empty'))}</div>`}</div></div>`;
+  document.getElementById('box').innerHTML =
+    `<div id="board">${STATUS_COLS.map(col).join('')}</div>`;
+  document.getElementById('box').scrollTop = 0;
+}
+let statT = null;
+const scheduleStatus = () => {
+  if (centerMode !== 'status') return;
+  clearTimeout(statT);
+  statT = setTimeout(showStatus, 300);
+};
+// 完了列カードの × で chat を削除（closeChat と同じ API）。ボードも即時再描画
+async function boardClose(id) {
+  await closeChat(id);              // close API + 右ペイン一覧の更新
+  if (centerMode === 'status') showStatus();
+}
+// 完了列ヘッダの「すべて削除」: カレント repo の完了（live）列 chat を一括削除
+async function boardCloseAll(count) {
+  if (!count || !confirm(t('board.closeAll.confirm', { count }))) return;
+  const r = await J('POST', '/api/chat/close-completed', { repo: repoScope || undefined });
+  if (!r.ok) { alert(t('alert.fail', { error: r.error || '' })); return; }
+  if (r.ids?.includes(sel)) { sel = null; loadChat(); }
+  loadSessions();
+  if (centerMode === 'status') showStatus();
+}
+// 再開可列カードの「再開」で session/load 再接続（次の送信を待たない）。
+// SSE chat push でもボードは再描画されるが、応答直後にも即時更新する
+async function boardResume(id) {
+  const r = await J('POST', '/api/chat/resume', { id });
+  if (!r.ok) alert(t('alert.resumeFail', { error: r.error || '' }));
+  if (centerMode === 'status') showStatus();
+}
+// 検証列カードの「検証」で実機検証ターンを起動（POST /api/chat/verify）
+async function boardVerify(id) {
+  const r = await J('POST', '/api/chat/verify', { id });
+  if (!r.ok) alert(t('alert.verifyFail', { error: r.error || '' }));
+  if (centerMode === 'status') showStatus();
+}
+
+// ---------- git 操作（左ペイン: カレント repo のコミット/プッシュ） ----------
+// 実行は control 側（POST /api/git/*）。結果はコンソールタブへ SSE push される
+const gitSlug = () => repoScope || repos[0]?.slug || '';
+async function gitCommit() {
+  const slug = gitSlug();
+  if (!slug) { alert(t('git.noRepo')); return; }
+  const message = prompt(t('git.commitPrompt'));
+  if (message == null || !message.trim()) return;
+  const r = await J('POST', '/api/git/commit', { slug, message: message.trim() });
+  if (!r.ok) { alert(t('alert.fail', { error: r.error || '' })); return; }
+  alert(t(r.noop ? 'git.nothing' : 'git.committed'));
+}
+async function gitPush() {
+  const slug = gitSlug();
+  if (!slug) { alert(t('git.noRepo')); return; }
+  if (!confirm(t('git.pushConfirm', { slug }))) return;
+  const r = await J('POST', '/api/git/push', { slug });
+  if (!r.ok) { alert(t('alert.fail', { error: r.error || '' })); return; }
+  alert(t('git.pushed'));
+}
+
+// ---------- 設定（中央ペイン: 接続AI + 監視リポジトリ一覧・編集） ----------
+// GET /api/repos は config.repos 登録済み + IDEワークスペース直下の .git
+// ディレクトリ（IDE管理下）を返す。カレントrepo選択では絞らず全件表示する。
+// GET /api/chat-agents は config.chatAgents/chatAgent（ACP 実行体の台帳）を返す
+let repoRows = [];
+let agentRows = [];
+let activeAgent = '';
+let wsRoot = '';            // GET /api/repos の workspace。path ピッカーの初期位置
+let sysState = {};          // GET /api/state。システムタブの表示用
+let setTab = localStorage.getItem('kasugai:settab') || 'agents';  // agents|repos|system
+async function refreshAgents() {
+  const aj = await J('GET', '/api/chat-agents');
+  agentRows = aj.agents || [];
+  activeAgent = aj.active || '';
+}
+async function showSettings() {
+  const [j, , st] = await Promise.all(
+    [J('GET', '/api/repos'), refreshAgents(), J('GET', '/api/state')]);
+  repoRows = j.entries || [];
+  wsRoot = j.workspace || '';
+  sysState = st || {};
+  centerMode = 'settings';
+  curDoc = null;
+  document.getElementById('main').classList.add('doc');
+  document.getElementById('box').classList.remove('htmlview');
+  document.getElementById('viewsw').style.display = 'none';
+  renderSide();
+  document.getElementById('ctitle').textContent = t('settings.title');
+  document.getElementById('status').textContent =
+    `workspace: ${j.workspace || '-'}`;
+  renderSettings();
+}
+// ---------- マニュアル（中央ペイン: /docs/ サイトを iframe で表示） ----------
+// 右ペインは変えない（chat 一覧のまま）。戻るときはヘッダの「← チャット」
+function showManual() {
+  centerMode = 'manual';
+  curDoc = null;
+  document.getElementById('main').classList.add('doc');
+  document.getElementById('viewsw').style.display = 'none';
+  renderSide();
+  document.getElementById('ctitle').textContent = t('nav.manual');
+  document.getElementById('status').textContent = '/docs/';
+  const box = document.getElementById('box');
+  box.classList.add('htmlview');
+  box.innerHTML = '<iframe class="htmlprev" src="/docs/"' +
+    ' sandbox="allow-scripts allow-same-origin allow-popups"></iframe>';
+}
+// タブ切替は再取得せず保持済みの行データで描き直す（選択は永続化）
+function setSettingsTab(t) {
+  setTab = t;
+  localStorage.setItem('kasugai:settab', t);
+  renderSettings();
+}
+function renderSettings() {
+  const base = (p) => String(p).replace(/\\/g, '/').replace(/\/+$/, '').split('/').pop();
+  const card = (e, i) => {
+    const badges =
+      (e.ide ? `<span class="pill live">${esc(t('repo.ide'))}</span>` : '') +
+      (e.registered ? `<span class="pill">${esc(t('repo.registered'))}</span>`
+                    : `<span class="pill wait">${esc(t('repo.unregistered'))}</span>`);
+    const cur = e.slug && e.slug === repoScope
+      ? `<span class="pill resume">${esc(t('repo.current'))}</span>` : '';
+    const body = e.registered
+      ? `<div class="rset">` +
+        `<label><input type="checkbox" id="r-at-${i}"${e.autoTrigger ? ' checked' : ''}>autoTrigger</label>` +
+        `<label>triggerLabel<input type="text" id="r-tl-${i}" value="${esc(e.triggerLabel ?? 'devin')}"></label>` +
+        `<label><input type="checkbox" id="r-pa-${i}"${e.requirePushApproval ? ' checked' : ''}>requirePushApproval</label>` +
+        `<button class="primary" onclick="saveRepo(${i})">${esc(t('common.save'))}</button>` +
+        `<button onclick="removeRepo(${i})">${esc(t('repo.unregister'))}</button></div>`
+      : `<div class="rset"><button class="primary" onclick="regIdeRepo(${i})">${esc(t('repo.watch'))}</button></div>`;
+    return `<div class="rcard">` +
+      `<div><b>${esc(e.slug ?? base(e.path))}</b> ${badges}${cur}</div>` +
+      `<div class="muted">${esc(e.path)}</div>${body}</div>`;
+  };
+  // 接続AI セクション。active が新規 chat の実行体。
+  // フィールドは type 別: acp=exe/args/auth、agent|openai=endpoint/provider/model/token
+  const acard = (a, i) => {
+    const act = a.id === activeAgent;
+    const detail = a.type === 'acp'
+      ? `${esc(a.exe)} ${esc((a.args || []).join(' '))} · auth=${esc(a.auth)}`
+      : `${esc(a.endpoint)}` +
+        (a.provider ? ` · ${esc(a.provider)}` : '') +
+        (a.model ? ` · ${esc(a.model)}` : '') +
+        (a.hasToken ? ` · ${esc(t('agent.tokenSet'))}` : '');
+    const fields = a.type === 'acp'
+      ? `<label>exe<input type="text" class="wide" id="a-exe-${i}" value="${esc(a.exe)}"></label>` +
+        `<label>args<input type="text" id="a-args-${i}" value="${esc((a.args || []).join(' '))}"></label>` +
+        `<label><input type="checkbox" id="a-auth-${i}"${a.auth === 'devin' ? ' checked' : ''}>${esc(t('agent.devinAuth'))}</label>`
+      : `<label>endpoint<input type="text" class="wide" id="a-ep-${i}" value="${esc(a.endpoint)}"></label>` +
+        (a.type === 'agent'
+          ? `<label>provider<input type="text" id="a-pr-${i}" value="${esc(a.provider)}"></label>` : '') +
+        `<label>model<input type="text" id="a-mo-${i}" value="${esc(a.model)}"></label>` +
+        `<label>token<input type="password" id="a-tk-${i}"` +
+        ` placeholder="${esc(t(a.hasToken ? 'agent.tokenSetPh' : 'agent.tokenUnsetPh'))}"></label>`;
+    return `<div class="rcard">` +
+      `<div><b>${esc(a.label)}</b> <span class="pill">${esc(a.id)}</span>` +
+      `<span class="pill">${esc(a.type)}</span>` +
+      (act ? `<span class="pill live">${esc(t('agent.active'))}</span>` : '') + `</div>` +
+      `<div class="muted">${detail}</div>` +
+      `<div class="rset">${fields}` +
+      `<button class="primary" onclick="saveAgent(${i})">${esc(t('common.save'))}</button>` +
+      (act ? '' :
+        `<button onclick="setAgentActive('${esc(a.id)}')">${esc(t('agent.activate'))}</button>` +
+        `<button onclick="removeAgent(${i})">${esc(t('agent.remove'))}</button>`) +
+      `</div></div>`;
+  };
+  const agentReg =
+    `<div class="rcard"><b>${esc(t('agent.regTitle'))}</b>` +
+    `<div class="rset" id="agent-reg-fields">` +
+    `<label>${esc(t('agent.type'))}<select id="set-agent-type" onchange="agentTypeUI()">` +
+    `<option value="acp">${esc(t('agent.typeAcp'))}</option>` +
+    `<option value="agent">${esc(t('agent.typeAgent'))}</option>` +
+    `<option value="openai">${esc(t('agent.typeOpenai'))}</option></select></label>` +
+    `<label>id<input type="text" id="set-agent-id" placeholder="claude"></label>` +
+    `<label>${esc(t('agent.label'))}<input type="text" id="set-agent-label" placeholder="Claude"></label>` +
+    `<label data-t="acp">exe<input type="text" class="wide" id="set-agent-exe" placeholder="C:/path/to/agent.exe"` +
+    ` onkeydown="if(event.key==='Enter')regAgent()"></label>` +
+    `<label data-t="acp">args<input type="text" id="set-agent-args" placeholder="acp"` +
+    ` onkeydown="if(event.key==='Enter')regAgent()"></label>` +
+    `<label data-t="acp"><input type="checkbox" id="set-agent-auth">${esc(t('agent.devinAuth'))}</label>` +
+    `<label data-t="agent openai">endpoint<input type="text" class="wide" id="set-agent-endpoint"` +
+    ` placeholder="${esc(t('agent.endpointPh'))}"` +
+    ` onkeydown="if(event.key==='Enter')regAgent()"></label>` +
+    `<label data-t="agent">provider<input type="text" id="set-agent-provider"` +
+    ` placeholder="copilot / devin / antigravity"></label>` +
+    `<label data-t="agent openai">model<input type="text" id="set-agent-model"` +
+    ` placeholder="${esc(t('agent.modelPh'))}"></label>` +
+    `<label data-t="agent openai">token<input type="password" id="set-agent-token"` +
+    ` placeholder="${esc(t('agent.tokenPh'))}"></label>` +
+    `<button class="primary" onclick="regAgent()">${esc(t('common.register'))}</button></div>` +
+    `<div class="muted">${esc(t('agent.regNote'))}</div></div>`;
+  // システムタブ（control 自身の情報と再起動ボタン）
+  const sysCard =
+    `<div class="rcard"><b>${esc(t('sys.title'))}</b>` +
+    `<div class="muted">version ${esc(sysState.version ?? '-')} · port ${esc(sysState.port ?? '-')} · ` +
+    `uptime ${esc(fmtDur(sysState.uptime))}</div>` +
+    (sysState.restartPending
+      ? `<div class="muted">${esc(t('sys.restartPending'))}</div>` : '') +
+    `<div class="rset"><button onclick="sysRestart(false)"` +
+    ` title="${esc(t('sys.restart.tip'))}">${esc(t('sys.restart'))}</button>` +
+    `<button onclick="sysRestart(true)"` +
+    ` title="${esc(t('sys.restartForce.tip'))}">${esc(t('sys.restartForce'))}</button>` +
+    `<span class="muted" id="restart-note"></span></div>` +
+    `<div class="muted">${esc(t('sys.restartNote'))}</div></div>`;
+  // 先頭カードは任意パスの登録フォーム。登録はすべてこのビューで行う
+  const regCard =
+    `<div class="rcard"><b>${esc(t('repo.regTitle'))}</b>` +
+    `<div class="rset">` +
+    `<label>path<input type="text" class="wide" id="set-repo-path" placeholder="C:/devin/xxx"` +
+    ` onkeydown="if(event.key==='Enter')regNewRepo()"></label>` +
+    `<button onclick="openDirPick()" title="${esc(t('repo.browse.tip'))}">${esc(t('repo.browse'))}</button>` +
+    `<label>slug<input type="text" id="set-repo-slug" placeholder="${esc(t('repo.slugPh'))}"` +
+    ` onkeydown="if(event.key==='Enter')regNewRepo()"></label>` +
+    `<button class="primary" onclick="regNewRepo()">${esc(t('common.register'))}</button></div>` +
+    `<div class="muted">${esc(t('repo.regNote'))}</div></div>`;
+  // 3タブにグループ分け: 接続AI（既定）/ リポジトリ / システム
+  const tabs = [
+    ['agents', t('stab.agents', { count: agentRows.length })],
+    ['repos', t('stab.repos', { count: repoRows.length })],
+    ['system', t('stab.system')],
+  ];
+  if (!tabs.some(([id]) => id === setTab)) setTab = 'agents';
+  const tabbar = `<div class="stabs">` + tabs.map(([id, lbl]) =>
+    `<button class="stab${setTab === id ? ' active' : ''}"` +
+    ` onclick="setSettingsTab('${id}')">${lbl}</button>`).join('') + `</div>`;
+  const body = setTab === 'repos'
+    ? regCard + (repoRows.length
+        ? `<div class="rgrid">` + repoRows.map(card).join('') + `</div>`
+        : `<div class="empty">${esc(t('repo.none'))}</div>`)
+    : setTab === 'system'
+      ? sysCard
+      : agentReg + (agentRows.length
+          ? agentRows.map(acard).join('') : `<div class="empty">${esc(t('agent.none'))}</div>`);
+  document.getElementById('box').innerHTML = tabbar + body;
+  agentTypeUI();
+  document.getElementById('box').scrollTop = 0;
+}
+// 登録フォームの型（data-t 属性）で入力欄を出し分ける
+function agentTypeUI() {
+  const t = document.getElementById('set-agent-type')?.value ?? 'acp';
+  for (const el of document.querySelectorAll('#agent-reg-fields [data-t]'))
+    el.style.display = (el.dataset.t || '').split(' ').includes(t) ? '' : 'none';
+}
+async function sysRestart(force) {
+  if (!confirm(force ? t('confirm.restartForce') : t('confirm.restart')))
+    return;
+  const r = await J('POST', '/api/control/restart', force ? { force: true } : {});
+  if (!r.ok) { alert(t('alert.restartFail', { error: r.error || '' })); return; }
+  showRestarting(!!r.pending, force);
+}
+// 再起動の状態表示（最上部 #rban バナー + カード内 note。SSE restart からも呼ぶ）
+let restartShown = false;
+let restartState = { pending: false, forced: false };   // 言語切替時の再描画用
+function showRestarting(pending, forced) {
+  restartShown = true;
+  restartState = { pending: !!pending, forced: !!forced };
+  const el = document.getElementById('rban');
+  el.style.display = '';
+  el.textContent = pending
+    ? t('banner.pending')
+    : forced ? t('banner.forced') : t('banner.normal');
+  const note = document.getElementById('restart-note');
+  if (note) note.textContent = pending ? t('sys.pendingShort') : t('sys.restartingShort');
+}
+function clearRestarting() {
+  restartShown = false;
+  document.getElementById('rban').style.display = 'none';
+}
+async function regAgent() {
+  const type = document.getElementById('set-agent-type').value;
+  const body = {
+    type,
+    id: document.getElementById('set-agent-id').value.trim() || undefined,
+    label: document.getElementById('set-agent-label').value.trim() || undefined,
+  };
+  if (type === 'acp') {
+    body.exe = document.getElementById('set-agent-exe').value.trim();
+    if (!body.exe) { alert(t('alert.exeRequired')); return; }
+    body.args = document.getElementById('set-agent-args').value;
+    body.auth = document.getElementById('set-agent-auth').checked ? 'devin' : 'none';
+  } else {
+    body.endpoint = document.getElementById('set-agent-endpoint').value.trim();
+    if (!body.endpoint) { alert(t('alert.endpointRequired')); return; }
+    if (type === 'agent')
+      body.provider = document.getElementById('set-agent-provider').value.trim();
+    body.model = document.getElementById('set-agent-model').value.trim();
+    const tk = document.getElementById('set-agent-token').value;
+    if (tk) body.token = tk;
+  }
+  const r = await J('POST', '/api/chat-agents', body);
+  if (!r.ok) { alert(t('alert.regFail', { error: r.error || '' })); return; }
+  showSettings();
+}
+async function saveAgent(i) {
+  const a = agentRows[i];
+  if (!a) return;
+  const body = { id: a.id };
+  if (a.type === 'acp') {
+    body.exe = document.getElementById('a-exe-' + i).value;
+    body.args = document.getElementById('a-args-' + i).value;
+    body.auth = document.getElementById('a-auth-' + i).checked ? 'devin' : 'none';
+  } else {
+    body.endpoint = document.getElementById('a-ep-' + i).value;
+    body.model = document.getElementById('a-mo-' + i).value;
+    if (a.type === 'agent')
+      body.provider = document.getElementById('a-pr-' + i).value;
+    const tk = document.getElementById('a-tk-' + i).value;
+    if (tk !== '') body.token = tk;    // 空欄は既存トークンを維持
+  }
+  const r = await J('POST', '/api/chat-agents/update', body);
+  if (!r.ok) { alert(t('alert.saveFail', { error: r.error || '' })); return; }
+  showSettings();
+}
+async function setAgentActive(id) {
+  const r = await J('POST', '/api/chat-agents/active', { id });
+  if (!r.ok) { alert(t('alert.switchFail', { error: r.error || '' })); return; }
+  showSettings();
+}
+async function removeAgent(i) {
+  const a = agentRows[i];
+  if (!a) return;
+  if (!confirm(t('agent.removeConfirm', { label: a.label, id: a.id }))) return;
+  const r = await J('POST', '/api/chat-agents/remove', { id: a.id });
+  if (!r.ok) { alert(t('alert.removeFail', { error: r.error || '' })); return; }
+  showSettings();
+}
+async function regNewRepo() {
+  const pathEl = document.getElementById('set-repo-path');
+  const slugEl = document.getElementById('set-repo-slug');
+  const path = pathEl.value.trim();
+  if (!path) { alert(t('alert.pathRequired')); return; }
+  const j = await J('POST', '/api/repos',
+    { path, slug: slugEl.value.trim() || undefined });
+  if (!j.ok) { alert(t('alert.regFail', { error: j.error || '' })); return; }
+  await refreshRepos(j.repo?.slug);   // 登録した repo をカレント選択へ
+  repoScopeChanged();                  // スコープ切替を全ペインへ反映
+}
+async function saveRepo(i) {
+  const e = repoRows[i];
+  if (!e) return;
+  const r = await J('POST', '/api/repos/update', {
+    slug: e.slug, path: e.path,
+    autoTrigger: document.getElementById('r-at-' + i).checked,
+    triggerLabel: document.getElementById('r-tl-' + i).value,
+    requirePushApproval: document.getElementById('r-pa-' + i).checked });
+  if (!r.ok) { alert(t('alert.saveFail', { error: r.error || '' })); return; }
+  showSettings();
+}
+async function removeRepo(i) {
+  const e = repoRows[i];
+  if (!e) return;
+  if (!confirm(t('repo.removeConfirm', { slug: e.slug ?? e.path }))) return;
+  const r = await J('POST', '/api/repos/remove', { slug: e.slug, path: e.path });
+  if (!r.ok) { alert(t('alert.removeFail', { error: r.error || '' })); return; }
+  showSettings();
+}
+async function regIdeRepo(i) {
+  const e = repoRows[i];
+  if (!e) return;
+  const r = await J('POST', '/api/repos', { path: e.path });
+  if (!r.ok) { alert(t('alert.regFail', { error: r.error || '' })); return; }
+  await refreshRepos(r.repo?.slug);   // 登録した repo をカレント選択へ
+  repoScopeChanged();                  // スコープ切替を全ペインへ反映
+}
+
+// ---------- ローカルパス選択（GET /api/fs/dirs を辿る簡易ピッカー） ----------
+let dirPickPath = '';       // ピッカーの現在位置
+let dirPickParent = '';     // 1つ上のパス
+let dirPickDirs = [];       // 表示中のサブdir 一覧
+async function openDirPick() {
+  document.getElementById('dirmodal').style.display = 'flex';
+  const v = document.getElementById('set-repo-path').value.trim();
+  await loadDirPick(v || wsRoot);
+}
+async function loadDirPick(path) {
+  const j = await J('GET', '/api/fs/dirs?path=' + encodeURIComponent(path));
+  if (!j.ok) {              // 実在しない入力値は workspace → ルートへフォールバック
+    if (path && path !== wsRoot) return loadDirPick(wsRoot);
+    if (path) return loadDirPick('');
+    alert(t('dirpick.fail', { error: j.error === 'not found'
+      ? t('dirpick.notRestarted') : (j.error || '') }));
+    closeDirPick();
+    return;
+  }
+  dirPickPath = j.path;
+  dirPickParent = j.parent;
+  dirPickDirs = j.dirs || [];
+  const rows = dirPickPath
+    ? [`<div class="ditem" onclick="loadDirPick(dirPickParent)">${esc(t('dirpick.up'))}</div>`]
+    : [];
+  rows.push(...dirPickDirs.map((d, i) =>
+    `<div class="ditem" onclick="loadDirPick(dirPickDirs[${i}].path)">` +
+    `${d.git ? '<span class="pill live">.git</span>' : ''}${esc(d.name)}</div>`));
+  document.getElementById('dircur').textContent = dirPickPath || t('dirpick.drives');
+  document.getElementById('dirlist').innerHTML =
+    rows.join('') || `<div class="empty">${esc(t('dirpick.empty'))}</div>`;
+}
+function pickDir() {
+  if (!dirPickPath) return;                 // ドライブ一覧階層では選択不可
+  document.getElementById('set-repo-path').value = dirPickPath;
+  closeDirPick();
+}
+function closeDirPick() {
+  document.getElementById('dirmodal').style.display = 'none';
+}
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' &&
+      document.getElementById('dirmodal').style.display === 'flex')
+    closeDirPick();
+});
+
+// ---------- doc browser（右ペイン: doc 一覧 / 中央ペイン: doc 本文） ----------
+let sideMode = 'chats';                      // chats | editor | agents | skills
 const docs = { agents: [], skills: [] };     // mode -> /api/<mode> の entries
+let docSel = -1;                             // doclist の選択 index
+let refs = [];                               // 選択中 doc が参照するファイル（/api/refs）
+let refSel = -1;                             // reflist の選択 index
 async function sideView(mode) {
   sideMode = mode;
+  docSel = -1;
+  refs = []; refSel = -1;
+  if (mode === 'editor') { renderSide(); return; }   // renderSide → renderTree
   if (mode !== 'chats') {
     const j = await J('GET', '/api/' + mode + repoQuery());
     docs[mode] = j.entries || [];
-  } else loadSessions();
-  renderSide();
+    if (mode === 'agents') refs = await loadAgentRefs();
+    renderSide();
+    if (docs[mode].length) await openDoc(0);   // 先頭 doc を中央ペインで自動表示
+    else enterDoc(null);
+  } else {
+    exitDoc();
+    loadSessions();
+    renderSide();
+    loadChat();              // doc/処理状況からの復帰で中央ペインを再描画
+  }
+}
+// agents モード: AGENTS.md は1枚前提なので doc 一覧ではなく
+// 収集した全 doc の参照ファイルをマージして一覧にする（path で dedupe）
+async function loadAgentRefs() {
+  const seen = new Set();
+  const out = [];
+  for (const d of docs.agents) {
+    const r = await J('GET', '/api/refs?path=' + encodeURIComponent(d.path));
+    for (const e of r.entries || []) {
+      const k = String(e.path || '').toLowerCase();
+      if (seen.has(k)) continue;
+      seen.add(k);
+      out.push(e);
+    }
+  }
+  return out;
+}
+// 参照ファイル行（開けるものだけクリック可。秘匿・未作成・dir は無効表示）
+function refRow(d, i) {
+  const ok = d.exists && !d.denied && !d.isDir;
+  return `<div class="csess${i === refSel ? ' active' : ''}${ok ? '' : ' off'}"` +
+    (ok ? ` onclick="openRef(${i})"` : '') +
+    ` data-tip="${esc(d.path + (d.denied ? t('ref.denied') : !d.exists ? t('ref.notCreated') : ''))}">` +
+    `<span class="dot">${d.denied ? '🔒' : d.isDir ? '▸' : '○'}</span>` +
+    `<span class="lbl">${esc(d.name)}</span>` +
+    (d.denied ? `<span class="pill">${esc(t('ref.deniedPill'))}</span>`
+      : d.isDir ? `<span class="pill">${esc(t('ref.dirPill'))}</span>`
+      : !d.exists ? `<span class="pill">${esc(t('ref.notCreatedPill'))}</span>` : '') +
+    `</div>`;
 }
 function renderSide() {
   const doc = sideMode !== 'chats';
-  for (const m of ['chats', 'agents', 'skills'])
-    document.getElementById('nav-' + m).classList.toggle('active', sideMode === m);
+  for (const m of ['chats', 'editor', 'agents', 'skills'])
+    document.getElementById('nav-' + m).classList.toggle('active',
+      sideMode === m && centerMode !== 'status' && centerMode !== 'settings'
+        && centerMode !== 'manual');
+  document.getElementById('nav-status').classList.toggle('active', centerMode === 'status');
+  document.getElementById('nav-settings').classList.toggle('active', centerMode === 'settings');
+  document.getElementById('nav-manual').classList.toggle('active', centerMode === 'manual');
   document.getElementById('dochead').style.display = doc ? 'flex' : 'none';
+  document.getElementById('docreload').style.display =
+    sideMode === 'editor' ? '' : 'none';
   document.getElementById('newbtn').style.display = doc ? 'none' : '';
   document.getElementById('sess').style.display = doc ? 'none' : '';
-  document.getElementById('doclist').style.display = doc ? '' : 'none';
+  document.getElementById('doclist').style.display =
+    doc && sideMode !== 'editor' ? '' : 'none';
+  document.getElementById('treebox').style.display =
+    sideMode === 'editor' ? '' : 'none';
+  // agents モードは参照行を doclist へ統合するため reflist は使わない
+  document.getElementById('reflist').style.display =
+    doc && sideMode !== 'agents' && sideMode !== 'editor' && refs.length ? '' : 'none';
   if (!doc) return;
   document.getElementById('doctitle').textContent =
-    sideMode === 'agents' ? 'AGENTS' : 'SKILL';
-  document.getElementById('doclist').innerHTML = docs[sideMode].length
-    ? docs[sideMode].map((d, i) =>
-      `<div class="csess" onclick="openDoc(${i})" title="${esc(d.path)}">` +
-      `<span class="dot">${d.kind === 'agent' ? '◆' : '○'}</span>` +
-      `<span class="lbl">${esc(d.name)}${d.desc
-        ? ' <span style="color:#9ca3af">' + esc(d.desc.slice(0, 40)) + '</span>' : ''}</span>` +
-      `<span class="pill">${esc(d.scope)}</span></div>`).join('')
-    : '<div class="empty" style="padding:10px">(見つかりません)</div>';
+    sideMode === 'agents' ? 'AGENTS' : sideMode === 'skills' ? 'SKILL' : t('nav.editor');
+  if (sideMode === 'editor') { renderTree(); return; }
+  const docRows = docs[sideMode].map((d, i) =>
+    `<div class="csess${i === docSel ? ' active' : ''}" onclick="openDoc(${i})" data-tip="${esc(d.path)}">` +
+    `<span class="dot">${d.kind === 'agent' ? '◆' : '○'}</span>` +
+    `<span class="lbl">${esc(d.name)}${d.desc
+      ? ' <span style="color:#9ca3af">' + esc(d.desc.slice(0, 40)) + '</span>' : ''}</span>` +
+    `<span class="pill">${esc(d.scope)}</span></div>`).join('');
+  // agents: doc 自身 + その参照ファイルを1つの一覧にする（doc が1枚でも意味を持つ）
+  const refRows = sideMode === 'agents' && refs.length
+    ? `<div class="refhead">${esc(t('ref.head'))}</div>` + refs.map((d, i) => refRow(d, i)).join('')
+    : '';
+  document.getElementById('doclist').innerHTML = (docRows || refRows)
+    ? docRows + refRows
+    : `<div class="empty" style="padding:10px">${esc(t('doc.noneFound'))}</div>`;
+  // 選択中 doc の参照ファイル（skills モードのみ）
+  document.getElementById('reflist').innerHTML =
+    sideMode !== 'agents' && refs.length
+      ? `<div class="refhead">${esc(t('ref.head'))}</div>` + refs.map((d, i) => refRow(d, i)).join('')
+      : '';
+  hideTip();              // 描画し直した行に残ったポップアップを閉じる
+}
+// 中央ペインを doc 表示に切替（j = /api/doc 応答。null なら空状態）
+// 描画自体は Viewer.render に集約。curDoc は「原文 / プレビュー」切替の再描画に使う
+let curDoc = null;
+function enterDoc(j) {
+  curDoc = j;
+  Viewer.setView('preview');
+  centerMode = 'doc';
+  document.getElementById('main').classList.add('doc');
+  document.getElementById('ctitle').textContent =
+    j ? j.name
+      : (sideMode === 'agents' ? 'AGENTS'
+        : sideMode === 'skills' ? 'SKILL' : t('nav.editor'));
+  document.getElementById('status').textContent =
+    j ? (j.scope + ' · ' + j.path) : '';
+  document.getElementById('viewsw').style.display = Viewer.kind(j) ? '' : 'none';
+  Viewer.render(curDoc);
+}
+function setDocView(v) {
+  Viewer.setView(v);
+  Viewer.render(curDoc);
+}
+// .mmd の縦⇄横。原文と交互に切替えるので常に「現ファイル基準」で反転する
+function mmdDirToggle() {
+  if (!curDoc || Viewer.kind(curDoc) !== 'mmd') return;
+  if (Viewer.mmdAlt.has(curDoc.path)) Viewer.mmdAlt.delete(curDoc.path);
+  else Viewer.mmdAlt.set(curDoc.path, Viewer.mmdFlipped(curDoc.text));
+  Viewer.render(curDoc);
+}
+// mermaid 図の拡縮ボタン（d: +1=拡大 / -1=縮小 / 0=等倍）。実処理は Viewer 側
+function mmdZoom(d) { Viewer.mmdZoom(d); }
+// wheel 拡縮（カーソル位置を維持）とドラッグ視野移動を #box に委譲
+// （pre.mermaid は描画ごとに作り直し）。図の上では wheel は常に拡縮になり、
+// ページ送りはドラッグか図の外のホイールで行う
+function initMmdZoom() {
+  const box = document.getElementById('box');
+  box.addEventListener('wheel', (e) => {
+    const p = e.target.closest('pre.mermaid[data-processed]');
+    if (!p) return;
+    const svg = p.querySelector('svg');
+    if (!svg) return;
+    e.preventDefault();
+    // カーソル下の図内点がズーム前後で動かないようスクロールを補正する
+    const r = svg.getBoundingClientRect();
+    if (!r.width || !r.height) return;
+    const fx = (e.clientX - r.left) / r.width;
+    const fy = (e.clientY - r.top) / r.height;
+    Viewer.mmdZoom(e.deltaY < 0 ? 1 : -1);
+    const n = svg.getBoundingClientRect();
+    p.scrollLeft += (n.left + fx * n.width) - e.clientX;
+    box.scrollTop += (n.top + fy * n.height) - e.clientY;
+  }, { passive: false });
+  box.addEventListener('mousedown', (e) => {
+    const p = e.target.closest('pre.mermaid[data-processed]');
+    if (!p || e.button !== 0) return;
+    e.preventDefault();
+    const x0 = e.clientX, y0 = e.clientY, sl = p.scrollLeft, st = box.scrollTop;
+    p.classList.add('pan');
+    const mv = (ev) => {
+      p.scrollLeft = sl - (ev.clientX - x0);
+      box.scrollTop = st - (ev.clientY - y0);
+    };
+    const up = () => {
+      p.classList.remove('pan');
+      document.removeEventListener('mousemove', mv);
+      document.removeEventListener('mouseup', up);
+    };
+    document.addEventListener('mousemove', mv);
+    document.addEventListener('mouseup', up);
+  });
+}
+function exitDoc() {
+  centerMode = 'chat';
+  curDoc = null;
+  document.getElementById('main').classList.remove('doc');
+  document.getElementById('box').classList.remove('htmlview');
 }
 async function openDoc(i) {
   const d = docs[sideMode][i];
   if (!d) return;
   const j = await J('GET', '/api/doc?path=' + encodeURIComponent(d.path));
-  if (!j.ok) { alert('読み込み失敗: ' + (j.error || '')); return; }
-  document.getElementById('docname').textContent = j.name;
-  document.getElementById('docpath').textContent = j.path;
-  document.getElementById('docbody').innerHTML =
-    '<div class="msg md">' + md(j.text) + '</div>' +
-    (j.truncated ? '<div class="muted">（200KB で打切り）</div>' : '');
-  document.getElementById('docbody').scrollTop = 0;
-  document.getElementById('docmodal').style.display = 'flex';
+  if (!j.ok) { alert(t('alert.loadFail', { error: j.error || '' })); return; }
+  docSel = i;
+  refSel = -1;
+  // agents は全 doc の参照をマージ済み。選択 doc 単体の参照で上書きしない
+  if (sideMode !== 'agents') {
+    const r = await J('GET', '/api/refs?path=' + encodeURIComponent(d.path));
+    refs = r.entries || [];
+  }
+  renderSide();
+  enterDoc(j);
 }
-function closeDoc() { document.getElementById('docmodal').style.display = 'none'; }
-// skills registry（左ペイン）の項目から直接本文を開く
-async function openSkill(i) { await sideView('skills'); openDoc(i); }
+// 参照ファイルボタン → 中央ペインで本文表示（開けるものだけここに来る）
+async function openRef(i) {
+  const d = refs[i];
+  if (!d || !d.exists || d.denied || d.isDir) return;
+  const j = await J('GET', '/api/doc?path=' + encodeURIComponent(d.path));
+  if (!j.ok) { alert(t('alert.loadFail', { error: j.error || '' })); return; }
+  refSel = i;
+  renderSide();
+  enterDoc(j);
+}
+// ---------- エディター（右ペイン: カレント repo のフォルダツリー） ----------
+// 1階層ずつ GET /api/fs/tree で lazy 展開。file クリックで GET /api/fs/file を
+// 取り、中央ペインの doc viewer（enterDoc/Viewer）へ表示する
+const treeKids = new Map();   // dir path -> 応答 | 'loading' | 'err'
+const treeOpen = new Set();   // 展開中の dir path
+let treeSel = '';             // 中央ペインに表示中の file path
+let treeRows = [];            // 描画中の行 {kind, path, denied}
+const treeRoot = () => repos.find((r) => r.slug === repoScope)?.path || '';
+async function treeLoad(dir) {
+  treeKids.set(dir, 'loading');
+  const j = await J('GET', '/api/fs/tree?path=' + encodeURIComponent(dir));
+  treeKids.set(dir, j.ok ? j : 'err');
+  renderTree();
+}
+function treeReload() { treeKids.clear(); renderTree(); }
+function treeClick(i) {
+  const r = treeRows[i];
+  if (!r || r.denied) return;
+  if (r.kind === 'file') { openTreeFile(r.path); return; }
+  if (treeOpen.has(r.path)) treeOpen.delete(r.path);
+  else { treeOpen.add(r.path); if (!treeKids.has(r.path)) treeLoad(r.path); }
+  renderTree();
+}
+function renderTree() {
+  const box = document.getElementById('treebox');
+  const root = treeRoot();
+  if (!root) {
+    box.innerHTML = `<div class="empty">${esc(t('tree.noRepo'))}</div>`;
+    return;
+  }
+  if (!treeOpen.has(root) && !treeKids.has(root)) treeOpen.add(root); // 初回は根を展開
+  treeRows = [];
+  const rows = [];
+  const emit = (dir, depth) => {
+    const k = treeKids.get(dir);
+    if (!k || k === 'loading' || k === 'err') {
+      if (!k) treeLoad(dir);
+      rows.push(`<div class="trow off" style="padding-left:${depth * 14}px">` +
+        `<span class="tg"></span>` +
+        `<span class="tn">${esc(k === 'err' ? t('tree.loadFail') : '…')}</span></div>`);
+      return;
+    }
+    for (const d of k.dirs) {
+      const i = treeRows.push({ kind: 'dir', path: d.path }) - 1;
+      const open = treeOpen.has(d.path);
+      rows.push(`<div class="trow" style="padding-left:${depth * 14}px"` +
+        ` onclick="treeClick(${i})" data-tip="${esc(d.path)}">` +
+        `<span class="tg">${open ? '▾' : '▸'}</span>` +
+        `<span class="tn">${esc(d.name)}</span></div>`);
+      if (open) emit(d.path, depth + 1);
+    }
+    for (const f of k.files) {
+      const i = treeRows.push({ kind: 'file', path: f.path,
+        denied: f.denied }) - 1;
+      rows.push(`<div class="trow${f.denied ? ' off' : ''}` +
+        `${f.path === treeSel ? ' sel' : ''}"` +
+        ` style="padding-left:${depth * 14}px" onclick="treeClick(${i})"` +
+        ` data-tip="${esc(f.path + (f.denied ? '\n' + t('ref.denied') : ''))}">` +
+        `<span class="tg">${f.denied ? '🔒' : ''}</span>` +
+        `<span class="tn">${esc(f.name)}</span></div>`);
+    }
+  };
+  const i = treeRows.push({ kind: 'dir', path: root }) - 1;
+  const open = treeOpen.has(root);
+  rows.push(`<div class="trow" onclick="treeClick(${i})" data-tip="${esc(root)}">` +
+    `<span class="tg">${open ? '▾' : '▸'}</span>` +
+    `<span class="tn"><b>${esc(root.split('/').pop())}</b></span></div>`);
+  if (open) emit(root, 1);
+  box.innerHTML = rows.join('');
+  hideTip();
+}
+async function openTreeFile(path) {
+  const j = await J('GET', '/api/fs/file?path=' + encodeURIComponent(path));
+  if (!j.ok) { alert(t('alert.loadFail', { error: j.error || '' })); return; }
+  treeSel = path;
+  renderTree();
+  enterDoc(j);
+}
 
 // ---------- 管理ペイン（左） ----------
 const fmtTs = (ts) => String(ts || '').replace('T', ' ').slice(0, 19) || '-';
+// 秒数 → 表示用の稼働時間（86400s=1d）
+const fmtDur = (sec) => {
+  const s = Math.floor(+sec || 0);
+  if (s < 60) return s + 's';
+  if (s < 3600) return Math.floor(s / 60) + 'm ' + (s % 60) + 's';
+  if (s < 86400) return Math.floor(s / 3600) + 'h ' + Math.floor(s % 3600 / 60) + 'm';
+  return Math.floor(s / 86400) + 'd ' + Math.floor(s % 86400 / 3600) + 'h';
+};
 let mgmtT = null;
 const scheduleMgmt = () => {
   clearTimeout(mgmtT);
   mgmtT = setTimeout(loadMgmt, 400);
 };
 async function loadMgmt() {
-  const [st, sess, cand, sk] = await Promise.all([
+  const [st, sess, cand] = await Promise.all([
     J('GET', '/api/state'), J('GET', '/api/chat/sessions'),
-    J('GET', '/api/candidates'), J('GET', '/api/skills' + repoQuery())]);
+    J('GET', '/api/candidates')]);
   const sessions = (sess.sessions || []).filter((s) => matchRepo(s.repo));
   const candidates = (cand.candidates || []).filter((c) => matchRepo(c.repo));
-  const skills = sk.entries || [];
   document.getElementById('mstate').innerHTML =
     `<div class="kv"><span>version</span><b>${esc(st.version || '-')}</b></div>` +
     `<div class="kv"><span>port</span><b>${esc(st.port || '-')}</b></div>` +
     `<div class="kv"><span>repos</span><b>${(st.repos || []).length}</b></div>` +
     `<div class="kv"><span>chats</span><b>${sessions.length}</b></div>` +
     `<div class="kv"><span>candidates</span><b>${candidates.length}</b></div>`;
-  document.getElementById('magents').innerHTML = sessions.length ? sessions.map((s) =>
-    `<div class="item" onclick="chatSelect(${s.id})">` +
-    `<div><span class="pill ${s.busy ? 'run' : s.live ? 'live' : s.resumable ? 'resume' : ''}">` +
-    `${s.busy ? 'busy' : s.live ? 'live' : s.resumable ? 'resume' : 'idle'}</span>` +
-    `<b>${esc(s.label)}</b></div>` +
-    `<div class="muted">#${s.id} ${esc(shortRepo(s.repo || ''))} · ${esc(fmtTs(s.updatedAt))}</div>` +
-    `</div>`).join('') : '<div class="empty">(chat なし)</div>';
-  document.getElementById('mskills').innerHTML = skills.length ? skills.map((d, i) =>
-    `<div class="item" onclick="openSkill(${i})" title="${esc(d.path)}">` +
-    `<div><b>${esc(d.name)}</b></div>` +
-    `<div class="muted">${esc(d.scope)} · ${esc(d.source || '')}${d.desc
-      ? ' · ' + esc(d.desc.slice(0, 50)) : ''}</div>` +
-    `</div>`).join('') : '<div class="empty">(skill なし)</div>';
   document.getElementById('mcands').innerHTML = candidates.length ? candidates.map((c) =>
     `<div class="item">` +
     `<div><b>${esc(c.title)}</b></div>` +
-    `<div class="muted">${esc(c.source || 'manual')} · ${esc(shortRepo(c.repo || ''))} · ${esc(fmtTs(c.detectedAt))}</div>` +
-    `</div>`).join('') : '<div class="empty">(candidate なし)</div>';
+    `<div class="muted">${esc(c.source || 'manual')} · ${esc(fmtTs(c.detectedAt))}</div>` +
+    `</div>`).join('') : `<div class="empty">${esc(t('cand.none'))}</div>`;
+}
+
+// ---------- 省略ラベルの全文ポップアップ ----------
+// [data-tip] へホバーで即時表示（ネイティブ title より速く改行も出せる）。
+// 行の直下に出し、下端がはみ出す時は行の上側へ。innerHTML 描き直しで
+// 対象行が消えるため、一覧を再描画した側から hideTip() も呼ぶ
+const hideTip = () => { document.getElementById('tip').style.display = 'none'; };
+function initTip() {
+  const tip = document.getElementById('tip');
+  document.addEventListener('mouseover', (e) => {
+    const t = e.target.closest?.('[data-tip]');
+    if (!t) { hideTip(); return; }
+    tip.textContent = t.dataset.tip;
+    tip.style.display = 'block';
+    const r = t.getBoundingClientRect();
+    tip.style.left = Math.max(4, Math.min(r.left, innerWidth - tip.offsetWidth - 8)) + 'px';
+    let y = r.bottom + 4;
+    if (y + tip.offsetHeight > innerHeight - 8)
+      y = Math.max(4, r.top - tip.offsetHeight - 4);
+    tip.style.top = y + 'px';
+  });
+  document.addEventListener('mouseout', (e) => {
+    const t = e.target.closest?.('[data-tip]');
+    if (t && !t.contains(e.relatedTarget)) hideTip();
+  });
+  document.addEventListener('scroll', hideTip, true);   // スクロールで位置がずれるので閉じる
+  document.addEventListener('mousedown', hideTip);
 }
 
 // ---------- ペイン幅（境界ドラッグで可変・localStorage 永続化） ----------
@@ -612,14 +1928,19 @@ function initGrips() {
 }
 
 // ---------- 起動 ----------
+// 言語は initI18n で復元（localStorage → ブラウザ言語 → en の順）。
+// langsel の選択肢を SUPPORTED_LANGUAGES から構築し、静的DOMへ辞書を
+// 適用してから各ペインを描く
 async function boot() {
-  const st = await J('GET', '/api/state');
-  repos = st.repos || [];
-  const selEl = document.getElementById('repo-scope');
-  selEl.innerHTML = '<option value="">すべてのリポジトリ</option>' +
-    repos.map((r) => `<option value="${esc(r.slug)}">${esc(r.slug)}</option>`).join('');
-  if (!repos.some((r) => r.slug === repoScope)) repoScope = '';
-  selEl.value = repoScope;
+  await initI18n();
+  const langsel = document.getElementById('langsel');
+  langsel.innerHTML = SUPPORTED_LANGUAGES.map((l) =>
+    `<option value="${l}">${LANGUAGE_NAMES[l]}</option>`).join('');
+  langsel.value = getLanguage();
+  applyI18n();
+  document.title = t('app.title');
+  await refreshRepos();
+  await refreshAgents();             // active 接続AI（新規chatの実行体表示用）
   // セッション未開始でもモデル/モード選択肢を出す
   const oc = await J('GET', '/api/chat/options');
   renderOpts(oc);
@@ -627,6 +1948,23 @@ async function boot() {
   renderEmpty();
   renderSide();
   loadMgmt();
+  applyChatTab();          // チャット/コンソールタブの復元
+}
+// 言語切替: setLanguage が静的DOM(data-i18n)を適用するので、
+// JS 生成文字列を含むビュー（一覧・ボード・設定・doc 本文）はここで再描画する
+async function changeLang(v) {
+  await setLanguage(v);
+  document.title = t('app.title');
+  document.getElementById('langsel').value = getLanguage();
+  document.getElementById('hint').textContent = hintText();
+  if (busySince) setSendBusy(true);
+  if (restartShown) showRestarting(restartState.pending, restartState.forced);
+  loadSessions(); loadMgmt(); renderSide();
+  if (centerMode === 'status') showStatus();
+  else if (centerMode === 'settings') showSettings();
+  else if (centerMode === 'manual') showManual();
+  else if (centerMode === 'doc') enterDoc(curDoc);
+  else if (sel == null) renderEmpty(); else loadChat();
 }
 // SSE push: 状態変化の即時反映（ポーリングはしない）
 const es = new EventSource('/api/events');
@@ -634,14 +1972,33 @@ es.addEventListener('chat', (e) => {
   const { id } = JSON.parse(e.data);
   loadSessions();
   scheduleMgmt();
+  scheduleStatus();
   if (id === sel) loadChat();
 });
-es.addEventListener('chats', () => { loadSessions(); scheduleMgmt(); });
+es.addEventListener('chats', () => { loadSessions(); scheduleMgmt(); scheduleStatus(); });
 es.addEventListener('candidates', scheduleMgmt);
+es.addEventListener('console', (e) => appendConLines(JSON.parse(e.data).lines));
+es.addEventListener('repos', async () => { await refreshRepos(); loadMgmt();
+  if (centerMode === 'settings') showSettings(); });
+es.addEventListener('chatAgents', async () => { await refreshAgents();
+  loadSessions();
+  if (centerMode === 'settings') showSettings(); });
+es.addEventListener('restart', (e) => {  // control 再起動の pending/restarting 表示
+  const d = JSON.parse(e.data);
+  showRestarting(!!d.pending, !!d.forced);
+});
+es.onopen = () => {            // 再起動後の自動再接続 → 全表示を再取得
+  if (!restartShown) return;
+  clearRestarting();
+  boot();
+  if (centerMode === 'settings') showSettings();
+};
 setInterval(() => { // busy 表示の経過切替のみ時計で更新
   if (busySince) setSendBusy(true);
 }, 5000);
 initGrips();
+initMmdZoom();
+initTip();
 boot();
 </script>
 </body>

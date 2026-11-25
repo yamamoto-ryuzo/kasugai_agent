@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>2-2 AIチャット — KASUGAI Agent マニュアル</title>
+  <link rel="stylesheet" href="style.css">
+  <script type="module">
+    import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+    mermaid.initialize({ startOnLoad: true });
+  </script>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>KASUGAI Agent マニュアル <span class="version-badge">v0.2.0</span></h1>
+      <p>課題の検出 → 評価 → 対応 → 実機検証 → 学習 の自律ループ常駐システム</p>
+    </header>
+    <div class="layout">
+      <nav class="side"><div class="sec"><div class="sec-name">概要</div><a href="index.html">1-1 概要</a></div>
+<div class="sec"><div class="sec-name">使い方</div><a href="2-1-panel.html">2-1 パネル構成</a><a href="2-2-chat.html" class="active">2-2 AIチャット</a><a href="2-3-status.html">2-3 処理状況</a><a href="2-4-docs.html">2-4 doc browser</a><a href="2-5-settings.html">2-5 設定</a></div>
+<div class="sec"><div class="sec-name">設計</div><a href="3-1-diagrams.html">3-1 統一モデル図</a></div></nav>
+      <main>
+        <h2 class="ptitle">2-2 AIチャット</h2>
+        <p>チャットは接続AIを実行体に持つ対話面で、manual detector の会話入口です。</p>
+<h3>基本操作</h3>
+<ul><li><strong>新規チャット</strong> — 右ペイン「＋ 新規チャット」。cwd はカレント repo の path</li><li><strong>送信</strong> — Enter（Shift+Enter で改行）。実行中の送信は追加指示（steer）になる</li><li><strong>修正</strong> — 最後の送信を ↑ キーまたは ✎ で取り消してやり直し</li><li><strong>中断 / リセット</strong> — 実行中断 / セッションを畳んで次の送信で新規開始</li><li><strong>変更復元</strong> — その chat が変更したファイルを、選択した turn 時点の スナップショットへ復元</li><li><strong>課題化</strong> — 会話を課題候補として登録（manual detector 入口）</li><li><strong>添付</strong> — 📎 ボタンまたは貼り付け。<code>chat-uploads/</code> に保存</li></ul>
+<h3>処理モード</h3>
+<p>入力欄の select で切替（chat ごとに永続化）:</p>
+<ul><li><strong>直接</strong> — 従来どおり逐次処理</li><li><strong>並列</strong> — <code>kasugai-split</code> で課題を分割し子チャットを自動起動。 各子の最終回答はダイジェストとして親へ集約される</li></ul>
+<h3>他のタブ・表示</h3>
+<ul><li><strong>console タブ</strong> — 実行体の stderr・control 自身の stdio を表示</li><li><strong>リポジトリ確認バー</strong> — prompt が他 repo 向けと判定されると確認バーが出る （切替えて送信 / このまま送信）</li><li><strong>ファイル競合</strong> — 他 busy chat が触れているファイルに触れる指示は 実行待機（waiting）になり、ブロッカー解除で自動再送される</li></ul>
+<h3>セッション再接続</h3>
+<p>ACP 型の実行体はセッション常駐です。control 再起動後は resumable chat を<br>自動で <code>session/load</code> 再接続し、処理状況「再開可」列の「再開」ボタンでも<br>手動再接続できます。</p>
+      </main>
+    </div>
+  </div>
+</body>
+</html>

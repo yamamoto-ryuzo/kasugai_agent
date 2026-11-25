@@ -1,0 +1,23 @@
+---
+title: 課題ライフサイクル
+---
+stateDiagram-v2
+    [*] --> detected : detector emit
+    detected --> deduped : 正規化・重複判定
+    deduped --> dropped : 既知/重複
+    deduped --> assessed : 新規
+    assessed --> gated : 人ゲート待ち (external等)
+    assessed --> queued : 自律可
+    gated --> queued : 人が承認
+    gated --> rejected : 人が却下
+    queued --> running : runner 起動
+    running --> verifying : 実装完了
+    verifying --> done : 検証合格
+    verifying --> retry : NG (差し戻し)
+    retry --> queued : 再実行
+    retry --> failed : リトライ上限
+    running --> failed : 異常終了
+    done --> [*]
+    failed --> [*]
+    rejected --> [*]
+    dropped --> [*]

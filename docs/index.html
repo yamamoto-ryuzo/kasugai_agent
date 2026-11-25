@@ -1,203 +1,39 @@
 <!DOCTYPE html>
 <html lang="ja">
 <head>
-<meta charset="utf-8">
-<title>KASUGAI Agent — 設計図</title>
-<script type="module">
-  import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
-  mermaid.initialize({ startOnLoad: true });
-</script>
-<style>
-  body { font-family: system-ui, sans-serif; max-width: 1100px; margin: 2rem auto; padding: 0 1rem; }
-  h1 { border-bottom: 2px solid #ccc; }
-  h2 { margin-top: 3rem; }
-  .note { color: #666; font-size: .9rem; }
-</style>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>1-1 概要 — KASUGAI Agent マニュアル</title>
+  <link rel="stylesheet" href="style.css">
+  <script type="module">
+    import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+    mermaid.initialize({ startOnLoad: true });
+  </script>
 </head>
 <body>
-<h1>KASUGAI Agent — 統一モデル図</h1>
-<p class="note">正本は README.md。本ページの mermaid 図は README と常に同期させること（片方だけの変更は禁止）。</p>
-
-<h2>3. 課題ライフサイクル</h2>
-<pre class="mermaid">
-stateDiagram-v2
-    [*] --&gt; detected : detector emit
-    detected --&gt; deduped : 正規化・重複判定
-    deduped --&gt; dropped : 既知/重複
-    deduped --&gt; assessed : 新規
-    assessed --&gt; gated : 人ゲート待ち (external等)
-    assessed --&gt; queued : 自律可
-    gated --&gt; queued : 人が承認
-    gated --&gt; rejected : 人が却下
-    queued --&gt; running : runner 起動
-    running --&gt; verifying : 実装完了
-    verifying --&gt; done : 検証合格
-    verifying --&gt; retry : NG (差し戻し)
-    retry --&gt; queued : 再実行
-    retry --&gt; failed : リトライ上限
-    running --&gt; failed : 異常終了
-    done --&gt; [*]
-    failed --&gt; [*]
-    rejected --&gt; [*]
-    dropped --&gt; [*]
-</pre>
-
-<h2>4. 全体構成</h2>
-<pre class="mermaid">
-flowchart LR
-    subgraph Detect[検出層]
-        D1[github-issues]
-        D2[ci-failure]
-        D3[local-health]
-        D4[spec-drift]
-        D5[manual/chat]
-    end
-
-    subgraph Core[コア src/]
-        N[normalize + dedupe&lt;br/&gt;store.mjs]
-        A[assess&lt;br/&gt;pipeline.mjs]
-        G[gate&lt;br/&gt;人ゲート]
-        R[runner&lt;br/&gt;session.mjs]
-        V[verify&lt;br/&gt;verify.mjs]
-        K[knowledge&lt;br/&gt;knowledge.mjs]
-    end
-
-    subgraph IO[外部]
-        GH[GitHub gh CLI]
-        DV[devin CLI]
-        RP[監視対象リポジトリ]
-    end
-
-    C[control.mjs&lt;br/&gt;HTTP :8586 + SSE] --&gt; P[panel/&lt;br/&gt;ブラウザUI]
-    D1 &amp; D2 &amp; D3 &amp; D4 &amp; D5 --&gt; N --&gt; A --&gt; G --&gt; R --&gt; V --&gt; K
-    R --&gt; DV
-    A &amp; R &amp; V --&gt; GH
-    R &amp; V --&gt; RP
-    K --&gt;|proposals| G
-</pre>
-
-<h2>5.1 detect → normalize → dedupe</h2>
-<pre class="mermaid">
-flowchart TD
-    DET[detector] --&gt;|candidate&lt;br/&gt;source/repo/title/body/&lt;br/&gt;symptomHash/detectedAt| NORM[正規化]
-    NORM --&gt; HASH[issue key =&lt;br/&gt;source+repo+symptomHash]
-    HASH --&gt; EXIST{既出?}
-    EXIST --&gt;|yes| BUMP[既存課題の&lt;br/&gt;lastSeen 更新のみ]
-    EXIST --&gt;|no| NEW[課題レコード作成&lt;br/&gt;status=assessed へ]
-</pre>
-
-<h2>5.5 verify（push 統合）</h2>
-<pre class="mermaid">
-flowchart TD
-    IMPL[実装完了&lt;br/&gt;ローカルコミット] --&gt; VL{verifyLevel}
-    VL --&gt; RUN[層別検証実行&lt;br/&gt;証跡 = shots/logs/応答]
-    RUN --&gt; JUDGE{合格?}
-    JUDGE --&gt;|OK| ATTRIB[コミット帰属確認&lt;br/&gt;Issue: #N]
-    ATTRIB --&gt; CLEAN{帰属不明/&lt;br/&gt;rejected 混入?}
-    CLEAN --&gt;|yes| REVERT[git revert で除去]
-    CLEAN --&gt;|no| PUSH[git push]
-    REVERT --&gt; PUSH
-    PUSH --&gt; DONE[status=done]
-    JUDGE --&gt;|NG| BACK[差し戻し + コメント&lt;br/&gt;自分コミットは revert]
-    BACK --&gt; RETRY[status=retry]
-</pre>
-
-<h2>5.6 learn（知見の還流）</h2>
-<pre class="mermaid">
-flowchart LR
-    RUN[run 結果・証跡] --&gt; KN[knowledge/&lt;br/&gt;課題key単位で蓄積]
-    KN --&gt; PROP[proposals 生成&lt;br/&gt;skills/prompts/config/&lt;br/&gt;正本ドキュメント]
-    PROP --&gt; HUMAN{人の採否}
-    HUMAN --&gt;|採用| SELF[agent 自身へ反映&lt;br/&gt;or 正本へ課題起票]
-    HUMAN --&gt;|却下| DROP[記録して破棄]
-</pre>
-
-<h2>7. チャット（manual detector の会話入口）</h2>
-<pre class="mermaid">
-sequenceDiagram
-    participant UI as panel (browser)
-    participant C as control.mjs
-    participant A as devin.exe acp
-    UI-&gt;&gt;C: POST /api/chat/send {id?, text}
-    C-&gt;&gt;A: session/new or session/load → session/prompt
-    A--&gt;&gt;C: session/update stream (message/tool_call/plan)
-    C--&gt;&gt;UI: SSE push (chat 更新通知)
-    UI-&gt;&gt;C: GET /api/chat?id=N
-    C--&gt;&gt;UI: messages/busy/options スナップショット
-</pre>
-
-<h2>7. パネル横3ペイン構成</h2>
-<pre class="mermaid">
-flowchart LR
-    L[左ペイン&lt;br/&gt;title + repo選択 + 管理] --&gt; C[中央ペイン&lt;br/&gt;chat messages]
-    C --&gt; R[右ペイン&lt;br/&gt;chat sessions /&lt;br/&gt;doc browser]
-    G[境界グリップ&lt;br/&gt;ドラッグで幅可変&lt;br/&gt;localStorage 永続化] --&gt; L
-    G --&gt; R
-    RS[repo選択&lt;br/&gt;左ペイン title 直下&lt;br/&gt;localStorage 永続化] --&gt;|表示スコープ| L
-    RS --&gt;|表示スコープ| R
-    RS --&gt;|新規chatの cwd&lt;br/&gt;課題化の repo| C
-    C --&gt;|最新ボタン| NEW[updatedAt 最大の&lt;br/&gt;chat を選択]
-    L --&gt; M1[loop state]
-    L --&gt; M2[agents/sessions]
-    L --&gt; M3[skills registry]
-    L --&gt; M4[candidates/proposals]
-    L --&gt;|縦並びナビ&lt;br/&gt;AIチャット/AGENTS/SKILL| R
-    R --&gt;|doc ボタン選択| MOD[content modal&lt;br/&gt;GET /api/doc]
-</pre>
-
-<h2>7. SkillOps/AgentOps（スキル/エージェント管理）</h2>
-<pre class="mermaid">
-flowchart LR
-    U[管理 chat / 手動操作] --&gt; RT[router&lt;br/&gt;入力→対象特定]
-    SR[skill registry&lt;br/&gt;src/registry/skills.mjs]
-    AR[agent registry&lt;br/&gt;src/registry/agents.mjs]
-    PR[proposals.mjs&lt;br/&gt;skills/prompts/config 差分生成]
-    HG{人の採否}
-    CONF[.devin/skills&lt;br/&gt;prompts/config]
-    PIPE[pipeline.mjs&lt;br/&gt;状態遷移]
-    RUN[runner/worker]
-    VER[verify]
-    EV[evidence/]
-    KN[knowledge/]
-    RT --&gt;|参照/検索| SR
-    RT --&gt;|権限/割当| AR
-    RT --&gt;|編集要求| PR
-    SR --&gt; PR
-    AR --&gt; PR
-    PR --&gt; HG
-    HG --&gt;|採用| CONF
-    HG --&gt;|却下| DROP[記録して破棄]
-    CONF --&gt;|reload| SR
-    CONF --&gt;|reload| AR
-    AR --&gt; PIPE
-    PIPE --&gt; RUN --&gt; VER
-    VER --&gt; EV --&gt; KN --&gt; PR
-</pre>
-
-<pre class="mermaid">
-stateDiagram-v2
-    [*] --&gt; draft : scaffold/提案
-    draft --&gt; active : validate+test 合格
-    draft --&gt; rejected : 人が却下
-    active --&gt; proposal : 改善/失敗知見
-    proposal --&gt; active : 採用+verify
-    proposal --&gt; draft : 差し戻し
-    active --&gt; deprecated : 代替/失敗率悪化
-    rejected --&gt; [*]
-    deprecated --&gt; [*]
-</pre>
-
-<h2>8. 自動再起動（code drift）</h2>
-<pre class="mermaid">
-flowchart TD
-    WATCH[src/*.mjs 変更検知] --&gt; EN{autoRestartOnDrift?}
-    EN --&gt;|off| END[何もしない]
-    EN --&gt;|on| BUSY{実行中 run あり?}
-    BUSY --&gt;|yes| DEFER[空くまで延期]
-    BUSY --&gt;|no| STOP[runner 停止]
-    DEFER --&gt; BUSY
-    STOP --&gt; START[control 再起動]
-</pre>
-
+  <div class="container">
+    <header>
+      <h1>KASUGAI Agent マニュアル <span class="version-badge">v0.2.0</span></h1>
+      <p>課題の検出 → 評価 → 対応 → 実機検証 → 学習 の自律ループ常駐システム</p>
+    </header>
+    <div class="layout">
+      <nav class="side"><div class="sec"><div class="sec-name">概要</div><a href="index.html" class="active">1-1 概要</a></div>
+<div class="sec"><div class="sec-name">使い方</div><a href="2-1-panel.html">2-1 パネル構成</a><a href="2-2-chat.html">2-2 AIチャット</a><a href="2-3-status.html">2-3 処理状況</a><a href="2-4-docs.html">2-4 doc browser</a><a href="2-5-settings.html">2-5 設定</a></div>
+<div class="sec"><div class="sec-name">設計</div><a href="3-1-diagrams.html">3-1 統一モデル図</a></div></nav>
+      <main>
+        <h2 class="ptitle">1-1 概要</h2>
+        <p>KASUGAI Agent は、<strong>課題の検出 → 評価 → 対応 → 実機検証 → 学習</strong> の自律ループを<br>実装する常駐システムです。統一モデルの正本は <code>README.md</code>、開発規約は<br><code>AGENTS.md</code> にあります。</p>
+<h3>画面構成</h3>
+<p>操作の中心はブラウザのパネル UI（<code>http://127.0.0.1:8586/</code>）です。<br>制御は loopback bind のみで、外部には公開しません。</p>
+<table><thead><tr><th>UI 領域</th><th>内容</th></tr></thead><tbody><tr><td>左ペイン</td><td>title・カレントリポジトリ選択・管理セクション（loop state / candidates）・縦並びナビ（AIチャット / 処理状況 / エディター / AGENTS / SKILL / マニュアル / 設定）</td></tr><tr><td>中央ペイン</td><td>chat messages（chat/console タブ切替）・doc 本文・処理状況カンバン・設定ビュー・マニュアル（本サイト）</td></tr><tr><td>右ペイン</td><td>chat sessions 一覧 / エディター（フォルダツリー） / doc browser（doc + 参照ファイル）</td></tr></tbody></table>
+<p>左ペインのナビから各ビューを開き、右ペインまたは中央ペインに表示します。<br>このマニュアルは「マニュアル」ナビで開いた <code>docs/</code> サイトそのものです。</p>
+<h3>自律ループ（課題ライフサイクル）</h3>
+<p>detector が課題候補（candidate）を emit し、入口で正規化・重複判定<br>（source+repo+symptomHash）して課題レコードを作ります。<code>external</code> ラベル付きは<br>人ゲート待ち、それ以外はキュー → runner 起動 → 実装 → verify（L0〜L4 の<br>実機検証）→ push まで自動で進みます。詳細は「3-1 統一モデル図」を参照。</p>
+<ul><li><strong>manual detector</strong>: このパネルのチャットが会話入口（「課題化」ボタンで 会話を課題候補に登録）</li><li><strong>verify</strong>: L2 以上は対象 EXE を実機で起動して応答確認。証跡は <code>evidence/</code> へ</li><li><strong>learn</strong>: 実行結果・証跡は <code>knowledge/</code> へ蓄積し、agent 自身への反映は proposals 機構で人が採否する</li></ul>
+<h3>関連ドキュメント</h3>
+<ul><li><code>README.md</code> — 統一モデル正本（設計の詳細はこちら）</li><li><code>AGENTS.md</code> — 開発規約（mermaid 正本・1ファイル1責務・SSE 即時反映 等）</li></ul>
+      </main>
+    </div>
+  </div>
 </body>
 </html>

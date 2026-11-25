@@ -1,0 +1,18 @@
+---
+title: 自動再起動（code drift）
+---
+flowchart TD
+    WATCH[src/*.mjs 変更検知] --> EN{autoRestartOnDrift?}
+    EN -->|off| END[何もしない]
+    MAN[手動再起動<br/>設定ビューのボタン or<br/>POST /api/control/restart] --> BUSY
+    EN -->|on| BUSY{実行中 run あり?}
+    BUSY -->|yes| FORCE{force 指定?}
+    FORCE -->|no| DEFER[空くまで延期<br/>SSE restart pending push]
+    FORCE -->|yes| STOP[runner 停止<br/>busy も含め全 proc を畳む]
+    BUSY -->|no| STOP
+    DEFER --> BUSY
+    STOP --> START[control 再起動<br/>detached respawner が親終了を<br/>待って新プロセスを起動]
+    START --> RSM{autoResumeOnStart かつ<br/>resumable chat あり?}
+    RSM -->|yes| LOAD[全対象を session/load で自動再接続<br/>失敗時は session/new へフォールバック]
+    RSM -->|no| READY[idle 待機]
+    LOAD --> READY

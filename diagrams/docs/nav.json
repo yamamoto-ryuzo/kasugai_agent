@@ -1,0 +1,28 @@
+{
+  "site": "KASUGAI Agent マニュアル",
+  "desc": "課題の検出 → 評価 → 対応 → 実機検証 → 学習 の自律ループ常駐システム",
+  "groups": [
+    {
+      "section": "概要",
+      "items": [
+        { "page": "index", "text": "1-1 概要" }
+      ]
+    },
+    {
+      "section": "使い方",
+      "items": [
+        { "page": "2-1-panel", "text": "2-1 パネル構成" },
+        { "page": "2-2-chat", "text": "2-2 AIチャット" },
+        { "page": "2-3-status", "text": "2-3 処理状況" },
+        { "page": "2-4-docs", "text": "2-4 doc browser" },
+        { "page": "2-5-settings", "text": "2-5 設定" }
+      ]
+    },
+    {
+      "section": "設計",
+      "items": [
+        { "page": "3-1-diagrams", "text": "3-1 統一モデル図" }
+      ]
+    }
+  ]
+}

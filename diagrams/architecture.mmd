@@ -1,0 +1,33 @@
+---
+title: 全体構成
+---
+flowchart LR
+    subgraph Detect[検出層]
+        D1[github-issues]
+        D2[ci-failure]
+        D3[local-health]
+        D4[spec-drift]
+        D5[manual/chat]
+    end
+
+    subgraph Core[コア src/]
+        N[normalize + dedupe<br/>store.mjs]
+        A[assess<br/>pipeline.mjs]
+        G[gate<br/>人ゲート]
+        R[runner<br/>session.mjs]
+        V[verify<br/>verify.mjs]
+        K[knowledge<br/>knowledge.mjs]
+    end
+
+    subgraph IO[外部]
+        GH[GitHub gh CLI]
+        DV[接続AI<br/>ACP CLI / /agent HTTP /<br/>OpenAI互換・chatAgent で選択]
+        RP[監視対象リポジトリ]
+    end
+
+    C[control.mjs<br/>HTTP :8586 + SSE] --> P[panel/<br/>ブラウザUI]
+    D1 & D2 & D3 & D4 & D5 --> N --> A --> G --> R --> V --> K
+    R --> DV
+    A & R & V --> GH
+    R & V --> RP
+    K -->|proposals| G

@@ -1,0 +1,13 @@
+---
+title: スキルライフサイクル
+---
+stateDiagram-v2
+    [*] --> draft : scaffold/提案
+    draft --> active : validate+test 合格
+    draft --> rejected : 人が却下
+    active --> proposal : 改善/失敗知見
+    proposal --> active : 採用+verify
+    proposal --> draft : 差し戻し
+    active --> deprecated : 代替/失敗率悪化
+    rejected --> [*]
+    deprecated --> [*]

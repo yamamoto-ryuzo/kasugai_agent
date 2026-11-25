@@ -1,0 +1,150 @@
+/* KASUGAI Agent マニュアル共通スタイル（KASUGAI Canvas docs/ 参考） */
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans JP',
+    'Hiragino Kaku Gothic ProN', 'Yu Gothic', Meiryo, sans-serif;
+  line-height: 1.7;
+  color: #333;
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  min-height: 100vh;
+  padding: 20px;
+}
+
+.container {
+  max-width: 1200px;
+  margin: 0 auto;
+  background: #fff;
+  border-radius: 12px;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, .3);
+  overflow: hidden;
+}
+
+header {
+  padding: 28px 36px 20px;
+  border-bottom: 1px solid #eee;
+}
+
+header h1 {
+  font-size: 1.6rem;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.version-badge {
+  font-size: .8rem;
+  font-weight: 600;
+  color: #fff;
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  padding: 3px 12px;
+  border-radius: 999px;
+}
+
+header p { color: #666; font-size: .9rem; margin-top: 6px; }
+
+.layout { display: flex; align-items: stretch; }
+
+nav.side {
+  flex: none;
+  width: 260px;
+  padding: 20px 16px;
+  border-right: 1px solid #eee;
+  background: #fafafa;
+}
+
+nav.side .sec {
+  margin-bottom: 16px;
+}
+
+nav.side .sec-name {
+  font-size: .75rem;
+  font-weight: 700;
+  color: #888;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  margin-bottom: 6px;
+}
+
+nav.side a {
+  display: block;
+  padding: 7px 12px;
+  margin: 2px 0;
+  border-radius: 7px;
+  color: #374151;
+  text-decoration: none;
+  font-size: .88rem;
+}
+
+nav.side a:hover { background: #eef2ff; }
+nav.side a.active {
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  color: #fff;
+}
+
+main {
+  flex: 1;
+  min-width: 0;
+  padding: 28px 36px 48px;
+}
+
+main .ptitle {
+  font-size: 1.3rem;
+  border-bottom: 2px solid #eee;
+  padding-bottom: 10px;
+  margin-bottom: 18px;
+}
+
+main h2 { margin: 1.8em 0 .5em; font-size: 1.1rem; }
+main h3 { margin: 1.4em 0 .4em; font-size: 1rem; }
+main p { margin: .6em 0; }
+main ul, main ol { margin: .5em 0 .5em 1.5em; }
+main li { margin: .25em 0; }
+
+main code {
+  background: #f3f4f6;
+  border: 1px solid #e5e7eb;
+  border-radius: 4px;
+  padding: 0 .3em;
+  font-family: Consolas, monospace;
+  font-size: .92em;
+}
+
+main pre {
+  background: #111827;
+  color: #e5e7eb;
+  padding: 12px 14px;
+  border-radius: 8px;
+  overflow-x: auto;
+  margin: .8em 0;
+}
+
+main pre code { background: none; border: 0; padding: 0; color: inherit; }
+
+main pre.mermaid {
+  background: #fff;
+  color: #1f2937;
+  border: 1px solid #e5e7eb;
+  text-align: center;
+}
+
+main pre.mermaid svg { display: block; margin: 0 auto; max-width: 100%; height: auto; }
+
+main table {
+  border-collapse: collapse;
+  margin: .8em 0;
+  font-size: .9rem;
+}
+
+main th, main td { border: 1px solid #e5e7eb; padding: 6px 12px; }
+main th { background: #f9fafb; }
+main a { color: #4f46e5; }
+main blockquote {
+  margin: .8em 0;
+  padding: .4em 1em;
+  color: #4b5563;
+  background: #f8fafc;
+  border-left: 3px solid #cbd5e1;
+}
+main hr { border: 0; border-top: 1px solid #e5e7eb; margin: 1.2em 0; }
+main .note { color: #666; font-size: .85rem; }

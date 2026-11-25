@@ -1,0 +1,28 @@
+---
+title: SkillOps/AgentOps
+---
+flowchart LR
+    U[管理 chat / 手動操作] --> RT[router<br/>入力→対象特定]
+    SR[skill registry<br/>src/registry/skills.mjs]
+    AR[agent registry<br/>src/registry/agents.mjs]
+    PR[proposals.mjs<br/>skills/prompts/config 差分生成]
+    HG{人の採否}
+    CONF[.devin/skills<br/>prompts/config]
+    PIPE[pipeline.mjs<br/>状態遷移]
+    RUN[runner/worker]
+    VER[verify]
+    EV[evidence/]
+    KN[knowledge/]
+    RT -->|参照/検索| SR
+    RT -->|権限/割当| AR
+    RT -->|編集要求| PR
+    SR --> PR
+    AR --> PR
+    PR --> HG
+    HG -->|採用| CONF
+    HG -->|却下| DROP[記録して破棄]
+    CONF -->|reload| SR
+    CONF -->|reload| AR
+    AR --> PIPE
+    PIPE --> RUN --> VER
+    VER --> EV --> KN --> PR

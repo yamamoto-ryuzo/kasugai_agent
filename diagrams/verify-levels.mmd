@@ -1,0 +1,22 @@
+---
+title: verify（L0〜L4）
+---
+flowchart TD
+    IMPL[実装完了<br/>ローカルコミット] --> VL{verifyLevel}
+    VL -->|L0/L1| STATIC[静的・単体チェック<br/>構文・lint・テスト・ビルド]
+    VL -->|L2以上| LAUNCH[実機で対象EXE自体を起動<br/>QGIS等・成果物バイナリ]
+    LAUNCH --> DRIVE[実機駆動<br/>Playwright等でUI操作・応答確認]
+    STATIC --> EVID[証跡採取<br/>shots/logs/応答 → evidence/]
+    DRIVE --> EVID
+    EVID --> JUDGE{合格?<br/>実装の確認}
+    JUDGE -->|OK| ATTRIB[コミット帰属確認<br/>Issue: #N]
+    ATTRIB --> CLEAN{帰属不明/<br/>rejected 混入?}
+    CLEAN -->|yes| REVERT[git revert で除去]
+    CLEAN -->|no| PUSH[git push]
+    REVERT --> PUSH
+    PUSH --> DONE[status=done]
+    JUDGE -->|NG| SEP[課題を分離<br/>実装済みNG課題 × 未実装課題<br/>kasugai-verify verdict]
+    SEP --> BACK[差し戻し prompt で再実装指示<br/>実装済み→修正 / 未実装→実装]
+    BACK --> RETRY[status=retry<br/>verifyBackLimit まで]
+    RETRY --> IMPL
+    RETRY -->|上限到達| FAIL[status=failed<br/>sys 報告]

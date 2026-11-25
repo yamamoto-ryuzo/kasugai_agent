@@ -1,0 +1,9 @@
+---
+title: detect → normalize → dedupe
+---
+flowchart TD
+    DET[detector] -->|candidate<br/>source/repo/title/body/<br/>symptomHash/detectedAt| NORM[正規化]
+    NORM --> HASH[issue key =<br/>source+repo+symptomHash]
+    HASH --> EXIST{既出?}
+    EXIST -->|yes| BUMP[既存課題の<br/>lastSeen 更新のみ]
+    EXIST -->|no| NEW[課題レコード作成<br/>status=assessed へ]

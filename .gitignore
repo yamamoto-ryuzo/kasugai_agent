@@ -26,3 +26,5 @@ shots/
 # OS/ツール
 Thumbs.db
 node_modules/
+chat-snapshots/
+.tmp_verify/

@@ -1,0 +1,9 @@
+---
+title: learn（知見の還流）
+---
+flowchart LR
+    RUN[run 結果・証跡] --> KN[knowledge/<br/>課題key単位で蓄積]
+    KN --> PROP[proposals 生成<br/>skills/prompts/config/<br/>正本ドキュメント]
+    PROP --> HUMAN{人の採否}
+    HUMAN -->|採用| SELF[agent 自身へ反映<br/>or 正本へ課題起票]
+    HUMAN -->|却下| DROP[記録して破棄]

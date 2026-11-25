@@ -2,9 +2,36 @@
   "controlPort": 8586,
   "devinExe": "C:\\path\\to\\devin.exe",
   "devinExtraArgs": [],
+  "chatAgent": "devin",
+  "chatAgents": {
+    "devin": {
+      "label": "Devin",
+      "type": "acp",
+      "exe": "C:\\path\\to\\devin.exe",
+      "args": ["acp"],
+      "auth": "devin"
+    },
+    "hub-copilot": {
+      "label": "Copilot (bridge-hub)",
+      "type": "agent",
+      "endpoint": "http://127.0.0.1:8511/agent",
+      "provider": "copilot"
+    },
+    "local-llm": {
+      "label": "Local LLM (OpenAI互換)",
+      "type": "openai",
+      "endpoint": "http://127.0.0.1:1234/v1",
+      "model": "model-name"
+    }
+  },
   "chatStallMinutes": 30,
+  "parallelMaxChildren": 4,
+  "parallelMaxDepth": 1,
   "autoRestartOnDrift": true,
+  "autoVerify": true,
+  "autoResumeOnStart": true,
   "retryLimit": 3,
+  "verifyBackLimit": 3,
   "repos": [
     {
       "slug": "yamamoto-ryuzo/kasugai_agent",
