@@ -9,6 +9,8 @@ import { join, dirname, extname, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomBytes } from 'node:crypto';
 import { AcpChat } from './acp-chat.mjs';
+import { listAgentDocs } from './registry/agents.mjs';
+import { listSkillDocs } from './registry/skills.mjs';
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const PANEL = join(ROOT, 'panel');
@@ -34,12 +36,26 @@ const CHATS_PATH = join(ROOT, 'chats.json');       // {id:{label,repo,sessionId,
 const OPTS_PATH = join(ROOT, 'acp-options.json');  // {configId: value}（全チャット共通の既定）
 const CAND_PATH = join(ROOT, 'candidates.json');   // manual 課題化の受け皿
 
+// ---------- SkillOps/AgentOps doc browser（read-only スキャン） ----------
+// repo slug 指定時はその path のみ（+ registry 側で global 配置）に絞る
+const docRoots = (slug) => {
+  const all = [...new Set(
+    [ROOT, ...(config.repos ?? []).map((r) => r.path)].filter(Boolean))];
+  if (!slug) return all;
+  const hit = (config.repos ?? []).find((r) => (r.slug ?? r.github) === slug);
+  return hit?.path ? [hit.path] : [];
+};
+const agentDocs = (slug) => listAgentDocs(docRoots(slug));
+const skillDocs = (slug) => listSkillDocs(docRoots(slug));
+
 // ---------- チャット管理 ----------
 const chats = new Map(); // id -> {chat:AcpChat, label, repo}
 let chatSeq = 0;
 const sseTimers = new Map(); // id -> debounce timer
 
 function notifyChat(id) {
+  const s = chats.get(id);
+  if (s) s.updatedAt = new Date().toISOString();
   // session/update は高頻度なので 300ms デバウンスで SSE 化する
   clearTimeout(sseTimers.get(id));
   sseTimers.set(id, setTimeout(() => { sseTimers.delete(id); sse('chat', { id }); }, 300));
@@ -50,7 +66,7 @@ function persistChats() {
   for (const [id, s] of chats) {
     o[id] = { label: s.label, repo: s.repo,
       sessionId: s.chat.savedSessionId ?? s.chat.sessionId ?? null,
-      updatedAt: new Date().toISOString() };
+      updatedAt: s.updatedAt ?? new Date().toISOString() };
   }
   saveJ(CHATS_PATH, o);
 }
@@ -72,11 +88,12 @@ function makeChat(repo) {
   return chat;
 }
 
-function newChat({ label, repo, sessionId } = {}) {
+function newChat({ label, repo, sessionId, updatedAt } = {}) {
   const id = ++chatSeq;
   const chat = makeChat(repo);
   chat.savedSessionId = sessionId ?? null;
-  const entry = { chat, label: label ?? `chat ${id}`, repo: repo ?? null };
+  const entry = { chat, label: label ?? `chat ${id}`, repo: repo ?? null,
+    updatedAt: updatedAt ?? new Date().toISOString() };
   chat.onSessionId = () => persistChats();
   chat.onChange = () => notifyChat(id);
   chats.set(id, entry);
@@ -88,7 +105,8 @@ function newChat({ label, repo, sessionId } = {}) {
 {
   const saved = loadJ(CHATS_PATH, {});
   for (const [id, s] of Object.entries(saved)) {
-    const nid = newChat({ label: s.label, sessionId: s.sessionId });
+    const nid = newChat({ label: s.label, repo: s.repo,
+      sessionId: s.sessionId, updatedAt: s.updatedAt });
     // id を元の番号へ揃える（永続化キーと会話の対応を維持）
     if (String(nid) !== id) {
       const e = chats.get(nid); chats.delete(nid); chats.set(+id, e);
@@ -103,7 +121,9 @@ function chatList() {
     id, label: s.label, busy: s.chat.busy, ready: s.chat.ready,
     live: !!s.chat.proc, sessionId: s.chat.sessionId,
     resumable: !s.chat.proc && !!s.chat.savedSessionId,
-    repo: s.repo?.github ?? s.repo?.slug ?? null,
+    updatedAt: s.updatedAt ?? null,
+    repo: typeof s.repo === 'string'
+      ? s.repo : (s.repo?.github ?? s.repo?.slug ?? null),
   }));
 }
 
@@ -202,7 +222,11 @@ const server = http.createServer(async (req, res) => {
   if (p === '/api/chat/rename' && req.method === 'POST') {
     const a = await readBody(req);
     const s = chats.get(+a.id);
-    if (s && a.label) { s.label = String(a.label).slice(0, 60); persistChats(); }
+    if (s && a.label) {
+      s.label = String(a.label).slice(0, 60);
+      s.updatedAt = new Date().toISOString();
+      persistChats();
+    }
     sse('chats', {});
     return json(res, 200, { ok: true });
   }
@@ -250,13 +274,36 @@ const server = http.createServer(async (req, res) => {
   if (p === '/api/candidates' && req.method === 'GET') {
     return json(res, 200, { ok: true, candidates: loadJ(CAND_PATH, []) });
   }
+  // SkillOps/AgentOps doc browser（?repo=<slug> で対象リポジトリに絞込）
+  if (p === '/api/agents' && req.method === 'GET') {
+    return json(res, 200, { ok: true,
+      entries: agentDocs(url.searchParams.get('repo') || '') });
+  }
+  if (p === '/api/skills' && req.method === 'GET') {
+    return json(res, 200, { ok: true,
+      entries: skillDocs(url.searchParams.get('repo') || '') });
+  }
+  if (p === '/api/doc' && req.method === 'GET') {
+    // 収集済み doc のパスのみ本文を返す（任意ファイル参照を防ぐ）
+    const target = normalize(String(url.searchParams.get('path') ?? '')).toLowerCase();
+    const hit = [...agentDocs(), ...skillDocs()]
+      .find((d) => normalize(d.path).toLowerCase() === target);
+    if (!hit) return json(res, 404, { ok: false, error: 'not found' });
+    let text = '';
+    try { text = readFileSync(hit.path, 'utf8'); } catch { /* noop */ }
+    const truncated = text.length > 200 * 1024;
+    return json(res, 200, { ok: true, ...hit,
+      text: truncated ? text.slice(0, 200 * 1024) : text, truncated });
+  }
 
   // 静的ファイル（panel/）
   const rel = p === '/' ? '/index.html' : p;
   const file = normalize(join(PANEL, rel));
   if (!file.startsWith(PANEL)) return json(res, 403, { ok: false });
   if (existsSync(file) && statSync(file).isFile()) {
-    res.writeHead(200, { 'content-type': MIME[extname(file)] ?? 'application/octet-stream' });
+    res.writeHead(200, {
+      'content-type': MIME[extname(file)] ?? 'application/octet-stream',
+      'cache-control': 'no-store' });
     return res.end(readFileSync(file));
   }
   json(res, 404, { ok: false, error: 'not found' });
