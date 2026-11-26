@@ -335,6 +335,17 @@
   "cand.df.rate-limit": "diferido (rate-limit)",
   "cand.df.observing": "observando",
   "cand.df.cooldown": "enfriamiento",
+  "cand.df.silenced": "silenciado",
+  "sil.title": "silences (silencio de registro)",
+  "sil.none": "no hay silences",
+  "sil.comment": "comentario",
+  "sil.commentPh": "motivo (ventana de mantenimiento, síntoma conocido, …)",
+  "sil.minutes": "minutos",
+  "sil.ends": "termina:",
+  "sil.sched": "empieza:",
+  "sil.add": "añadir",
+  "sil.remove": "quitar",
+  "sil.note": "los candidatos que coincidan con los matchers (source/repo/kind, vacío = cualquiera) no se convierten en incidencias durante el periodo; expira automáticamente",
   "cand.df.inhibited": "inhibido",
   "iss.backoff": "espera"
 }

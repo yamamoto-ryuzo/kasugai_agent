@@ -105,7 +105,10 @@ flowchart TD
     NORM --&gt; HASH[issue key =&lt;br/&gt;source+repo+symptomHash]
     HASH --&gt; EXIST{既出?}
     EXIST --&gt;|yes| BUMP[既存課題の&lt;br/&gt;lastSeen 更新のみ]
-    EXIST --&gt;|no| CD{クールダウン?&lt;br/&gt;同一バケット&lt;br/&gt;intakeCooldownBy&lt;br/&gt;（既定 source+repo+kind）の&lt;br/&gt;reject/verify NG から&lt;br/&gt;intakeCooldownMinutes 未満}
+    EXIST --&gt;|no| SIL{silence?&lt;br/&gt;silences.json の&lt;br/&gt;matcher（source/repo/&lt;br/&gt;kind/severity）+&lt;br/&gt;startsAt〜endsAt 窓内&lt;br/&gt;（設定 UI / API で作成）}
+    SIL --&gt;|窓内| SH[candidate に留め置く&lt;br/&gt;deferred=silenced&lt;br/&gt;課題は作らない]
+    SH -.-&gt;|期限切れで自動解除| SIL
+    SIL --&gt;|窓外・非合致| CD{クールダウン?&lt;br/&gt;同一バケット&lt;br/&gt;intakeCooldownBy&lt;br/&gt;（既定 source+repo+kind）の&lt;br/&gt;reject/verify NG から&lt;br/&gt;intakeCooldownMinutes 未満}
     CD --&gt;|抑止中| CDH[candidate に留め置く&lt;br/&gt;deferred=cooldown&lt;br/&gt;課題は作らない]
     CDH -.-&gt;|窓経過で再試行| INH
     CD --&gt;|経過| INH{inhibition?&lt;br/&gt;config.inhibitRules の&lt;br/&gt;原因課題が open&lt;br/&gt;（cause/effect matcher +&lt;br/&gt;match 属性等値。&lt;br/&gt;inhibitedBy 明示も可）}
@@ -123,6 +126,7 @@ flowchart TD
     GATE --&gt;|no| Q[queued&lt;br/&gt;一覧の対応ボタンで&lt;br/&gt;人が dispatch]
     GATE --&gt;|yes| G[gated&lt;br/&gt;候補一覧で人が&lt;br/&gt;dispatch 判断]
     DEFER --&gt; INBOX
+    SH --&gt; INBOX
     CDH --&gt; INBOX
     IHOLD --&gt; INBOX
     OHOLD --&gt; INBOX

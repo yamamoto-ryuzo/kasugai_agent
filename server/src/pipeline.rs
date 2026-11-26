@@ -331,6 +331,50 @@ fn bucket_cooling(cfg: &Value, issues: &[Value], cand: &Value) -> bool {
     })
 }
 
+/// silence（detect-pipeline.mmd SIL。Alertmanager silence 相当）:
+/// silences.json の matcher（source/repo/slug/kind/severity の等値・
+/// 未指定はワイルドカード）に合う候補を、startsAt〜endsAt の窓内で
+/// 課題化しない（計画作業・定期メンテ中の既知症状のミュート）。
+/// endsAt は必須で期限切れは自動解除（save_silences が掃除する）。
+/// 戻り値は照合した silence の id（id 無しなら空文字）。
+fn silenced_by(root: &Path, cand: &Value) -> Option<String> {
+    let now = chrono::Utc::now();
+    let ts = |v: &str| {
+        chrono::DateTime::parse_from_rfc3339(v)
+            .map(|t| t.with_timezone(&chrono::Utc))
+            .ok()
+    };
+    for s in store::load_silences(root) {
+        if let Some(t) = s.get("startsAt").and_then(|v| v.as_str()).and_then(ts) {
+            if now < t {
+                continue; // 開始前の予約窓
+            }
+        }
+        match s.get("endsAt").and_then(|v| v.as_str()).and_then(ts) {
+            Some(t) if now < t => {}
+            _ => continue, // endsAt 必須・期限切れは照合しない
+        }
+        let m = s.get("matchers").cloned().unwrap_or(json!({}));
+        let hit = ["source", "repo", "slug", "kind", "severity"]
+            .iter()
+            .all(|attr| match m.get(*attr).and_then(|v| v.as_str()) {
+                Some(w) if !w.is_empty() => {
+                    cand.get(*attr).and_then(|v| v.as_str()).unwrap_or("") == w
+                }
+                _ => true,
+            });
+        if hit {
+            return Some(
+                s.get("id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+            );
+        }
+    }
+    None
+}
+
 /// 課題が open（終端 = done/failed/rejected/dropped 以外）か
 fn is_open(issue: &Value) -> bool {
     !matches!(
@@ -508,6 +552,14 @@ fn intake_inner(root: &Path, cand: &Value, force: bool) -> IntakeOutcome {
     }
 
     let cfg = load_config(root);
+    // silence（detect-pipeline.mmd SIL）: メンテ窓・既知症状のミュート。
+    // matcher+期限に合う候補は課題を作らない（期限切れは自動解除）
+    if !force {
+        if let Some(sid) = silenced_by(root, cand) {
+            return IntakeOutcome::Deferred(format!("silenced:{}", sid));
+        }
+    }
+
     // 起票クールダウン（detect-pipeline.mmd CD）: 同一バケットの課題が
     // reject/verify NG で終端へ落ちた直後の再 emit は課題を作らない
     if !force && bucket_cooling(&cfg, &issues, cand) {
@@ -827,6 +879,97 @@ mod tests {
             IntakeOutcome::Created(_) => {}
             IntakeOutcome::Deferred(r) => panic!("cooldown expired, got {}", r),
             _ => panic!("expected Created after cooldown window"),
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // ---- silence（matcher+期限の起票ミュート） ----
+
+    #[test]
+    fn silence_defers_matched_and_expires() {
+        let root = temp_root("silence");
+        let fut = (chrono::Utc::now() + chrono::Duration::minutes(30))
+            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        store::save_silences(
+            &root,
+            &[json!({
+                "id": "s1", "endsAt": fut,
+                "matchers": {"source": "ci-failure", "kind": "disk"},
+            })],
+        );
+        let mut c = det_cand("disk almost full", "b");
+        c["kind"] = json!("disk");
+        c["hits"] = json!(99);
+        match intake(&root, &c) {
+            IntakeOutcome::Deferred(r) => assert_eq!(r, "silenced:s1"),
+            _ => panic!("expected silenced deferral"),
+        }
+        // matcher 不一致はミュートされない
+        let mut c2 = det_cand("port conflict", "b");
+        c2["kind"] = json!("port");
+        c2["hits"] = json!(99);
+        match intake(&root, &c2) {
+            IntakeOutcome::Created(_) => {}
+            IntakeOutcome::Deferred(r) => panic!("expected Created, got {}", r),
+            _ => panic!("expected Created"),
+        }
+        // 期限切れは照合しない（起票できる）。save_silences が期限切れを
+        // 除去するので台帳にも残らない
+        let past = (chrono::Utc::now() - chrono::Duration::minutes(1))
+            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        crate::config::save_j(
+            &store::silences_path(&root),
+            &json!([{"id": "s2", "endsAt": past,
+                "matchers": {"source": "ci-failure"}}]),
+        );
+        match intake(&root, &c) {
+            IntakeOutcome::Created(_) => {}
+            IntakeOutcome::Deferred(r) => panic!("expired silence, got {}", r),
+            _ => panic!("expected Created"),
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn silence_scheduled_window_and_force_bypass() {
+        let root = temp_root("silence2");
+        // 開始前の予約窓は照合しない
+        let st = (chrono::Utc::now() + chrono::Duration::minutes(10))
+            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        let en = (chrono::Utc::now() + chrono::Duration::minutes(40))
+            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        store::save_silences(
+            &root,
+            &[json!({"id": "w1", "startsAt": st, "endsAt": en,
+                "matchers": {"kind": "disk"}})],
+        );
+        let mut c = det_cand("disk almost full", "b");
+        c["kind"] = json!("disk");
+        c["hits"] = json!(99);
+        match intake(&root, &c) {
+            IntakeOutcome::Created(_) => {}
+            IntakeOutcome::Deferred(r) => panic!("not yet started, got {}", r),
+            _ => panic!("expected Created"),
+        }
+        // アクティブ窓では force 起票（人判断）がミュートを bypass する。
+        // 別症状で試す（同じ候補は既起票で dedupe に引っ掛かる）
+        let now_s = (chrono::Utc::now() - chrono::Duration::minutes(1))
+            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        store::save_silences(
+            &root,
+            &[json!({"id": "w2", "startsAt": now_s, "endsAt": en,
+                "matchers": {"kind": "disk"}})],
+        );
+        let mut c2 = det_cand("disk io stalls", "b");
+        c2["kind"] = json!("disk");
+        c2["hits"] = json!(99);
+        match intake(&root, &c2) {
+            IntakeOutcome::Deferred(r) => assert_eq!(r, "silenced:w2"),
+            _ => panic!("expected silenced"),
+        }
+        match intake_forced(&root, &c2) {
+            IntakeOutcome::Created(_) | IntakeOutcome::Existing(_) => {}
+            IntakeOutcome::Deferred(r) => panic!("forced, got {}", r),
         }
         let _ = std::fs::remove_dir_all(&root);
     }

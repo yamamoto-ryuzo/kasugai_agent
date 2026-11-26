@@ -335,6 +335,17 @@
   "cand.df.rate-limit": "보류 (rate-limit)",
   "cand.df.observing": "관측 중",
   "cand.df.cooldown": "쿨다운",
+  "cand.df.silenced": "음소거됨",
+  "sil.title": "silence（등록 음소거）",
+  "sil.none": "silence 없음",
+  "sil.comment": "comment",
+  "sil.commentPh": "사유(점검 시간, 알려진 증상 등)",
+  "sil.minutes": "분",
+  "sil.ends": "해제:",
+  "sil.sched": "시작:",
+  "sil.add": "추가",
+  "sil.remove": "해제",
+  "sil.note": "matcher(source/repo/kind, 빈칸=전체)에 맞는 후보를 지정 시간 동안 과제화하지 않습니다. 기한이 지나면 자동 해제됩니다",
   "cand.df.inhibited": "억제됨",
   "iss.backoff": "백오프"
 }

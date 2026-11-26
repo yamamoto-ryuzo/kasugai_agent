@@ -335,6 +335,17 @@
   "cand.df.rate-limit": "zurückgestellt (rate-limit)",
   "cand.df.observing": "Beobachtung",
   "cand.df.cooldown": "Abklingzeit",
+  "cand.df.silenced": "stummgeschaltet",
+  "sil.title": "Silences (Meldungs-Stummschaltung)",
+  "sil.none": "keine Silences",
+  "sil.comment": "Kommentar",
+  "sil.commentPh": "Grund (Wartungsfenster, bekanntes Problem, …)",
+  "sil.minutes": "Minuten",
+  "sil.ends": "endet:",
+  "sil.sched": "startet:",
+  "sil.add": "hinzufügen",
+  "sil.remove": "entfernen",
+  "sil.note": "Kandidaten mit passenden Matchern (source/repo/kind, leer = beliebig) werden für die Dauer nicht angelegt; läuft automatisch ab",
   "cand.df.inhibited": "unterdrückt",
   "iss.backoff": "Backoff"
 }

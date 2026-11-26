@@ -149,7 +149,10 @@ flowchart TD
     NORM --> HASH[issue key =<br/>source+repo+symptomHash]
     HASH --> EXIST{既出?}
     EXIST -->|yes| BUMP[既存課題の<br/>lastSeen 更新のみ]
-    EXIST -->|no| CD{クールダウン?<br/>同一バケット<br/>intakeCooldownBy<br/>（既定 source+repo+kind）の<br/>reject/verify NG から<br/>intakeCooldownMinutes 未満}
+    EXIST -->|no| SIL{silence?<br/>silences.json の<br/>matcher（source/repo/<br/>kind/severity）+<br/>startsAt〜endsAt 窓内<br/>（設定 UI / API で作成）}
+    SIL -->|窓内| SH[candidate に留め置く<br/>deferred=silenced<br/>課題は作らない]
+    SH -.->|期限切れで自動解除| SIL
+    SIL -->|窓外・非合致| CD{クールダウン?<br/>同一バケット<br/>intakeCooldownBy<br/>（既定 source+repo+kind）の<br/>reject/verify NG から<br/>intakeCooldownMinutes 未満}
     CD -->|抑止中| CDH[candidate に留め置く<br/>deferred=cooldown<br/>課題は作らない]
     CDH -.->|窓経過で再試行| INH
     CD -->|経過| INH{inhibition?<br/>config.inhibitRules の<br/>原因課題が open<br/>（cause/effect matcher +<br/>match 属性等値。<br/>inhibitedBy 明示も可）}
@@ -167,6 +170,7 @@ flowchart TD
     GATE -->|no| Q[queued<br/>一覧の対応ボタンで<br/>人が dispatch]
     GATE -->|yes| G[gated<br/>候補一覧で人が<br/>dispatch 判断]
     DEFER --> INBOX
+    SH --> INBOX
     CDH --> INBOX
     IHOLD --> INBOX
     OHOLD --> INBOX
@@ -177,6 +181,13 @@ flowchart TD
 
 - detector は `server/src/detectors/*.rs` に置き、統一 candidate 形式を stdout/ファイルで emit
 - dedupe は入口の1箇所のみ（detector 個別に持たせない）
+- **silence（起票ミュート）**: `silences.json` の matcher
+  （`source`/`repo`/`slug`/`kind`/`severity` の等値・未指定は任意）に合う
+  candidate を `startsAt`〜`endsAt`（`endsAt` 必須）の窓内で課題化せず
+  `deferred:"silenced"` で留め置く。計画作業・定期メンテ中の既知症状を
+  抑える仕組みで、設定画面のシステムタブまたは
+  `GET/POST /api/silences`・`POST /api/silences/remove` で作成・解除する。
+  期限切れは照合対象から外れ、台帳からも自動的に除去される
 - **起票クールダウン**: バケット（`intakeCooldownBy` 既定
   `["source","repo","kind"]` の等値グループ。dedupe hash とは別次元の
   「何を同一とみなすか」パラメータ）内の課題が rejected/failed へ遷移して
@@ -363,6 +374,7 @@ flowchart LR
 | `state.json` | ループ全体の稼働状態 | 対象外 |
 | `issues.json` | 課題レコード（status・verifyLevel・retry 回数） | 対象外 |
 | `candidates.json` | 未評価の候補一覧 | 対象外 |
+| `silences.json` | 起票ミュート（matcher+期限の silence 一覧） | 対象外 |
 | `work-queue.json` | 実行待ちキュー | 対象外 |
 | `knowledge/` | 課題単位の知見 | 対象外 |
 | `proposals/` | 人ゲート待ちの提案 | 対象外 |

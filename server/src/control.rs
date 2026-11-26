@@ -3252,6 +3252,114 @@ async fn api_issues_action(
     }
 }
 
+// ---------- silences（起票ミュート。matcher+期限・期限切れ自動解除） ----------
+// silences.json の 1レコード:
+//   {id, comment, createdBy, createdAt, startsAt?, endsAt,
+//    matchers: {source?, repo?, slug?, kind?, severity?}}
+// endsAt は必須（無期限 silence は置かない）。照合は intake の SIL ゲート。
+
+/// silence が照合対象（startsAt<=now<endsAt）か
+fn silence_active(s: &Value, now: chrono::DateTime<chrono::Utc>) -> bool {
+    let ts = |v: &str| {
+        chrono::DateTime::parse_from_rfc3339(v)
+            .map(|t| t.with_timezone(&chrono::Utc))
+            .ok()
+    };
+    if let Some(t) = s.get("startsAt").and_then(|v| v.as_str()).and_then(ts) {
+        if now < t {
+            return false;
+        }
+    }
+    matches!(
+        s.get("endsAt").and_then(|v| v.as_str()).and_then(ts),
+        Some(t) if now < t
+    )
+}
+
+async fn api_silences_get(State(app): State<Shared>) -> Response {
+    let now = chrono::Utc::now();
+    let mut sils = crate::store::load_silences(&app.root);
+    for s in sils.iter_mut() {
+        s["active"] = json!(silence_active(s, now));
+    }
+    j(json!({"ok": true, "silences": sils}))
+}
+
+// POST /api/silences — {matchers:{...}, comment, durationMinutes} または
+// {endsAt, startsAt?}（RFC3339）。matcher は1属性以上必須
+async fn api_silences_post(State(app): State<Shared>, b: Bytes) -> Response {
+    let a = body_json(b).await;
+    let mut m = serde_json::Map::new();
+    if let Some(mm) = a.get("matchers").and_then(|v| v.as_object()) {
+        for attr in ["source", "repo", "slug", "kind", "severity"] {
+            if let Some(v) = mm.get(attr).and_then(|v| v.as_str()) {
+                if !v.trim().is_empty() {
+                    m.insert(attr.to_string(), json!(v.trim()));
+                }
+            }
+        }
+    }
+    if m.is_empty() {
+        return err(StatusCode::BAD_REQUEST, "matchers required");
+    }
+    let parse_ts = |v: Option<&Value>| {
+        v.and_then(|v| v.as_str())
+            .and_then(|v| chrono::DateTime::parse_from_rfc3339(v).ok())
+            .map(|t| t.with_timezone(&chrono::Utc))
+    };
+    let ends = parse_ts(a.get("endsAt")).or_else(|| {
+        a.get("durationMinutes")
+            .and_then(|v| v.as_i64())
+            .map(|min| chrono::Utc::now() + chrono::Duration::minutes(min.max(0)))
+    });
+    let Some(ends) = ends else {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "endsAt or durationMinutes required",
+        );
+    };
+    if ends <= chrono::Utc::now() {
+        return err(StatusCode::BAD_REQUEST, "endsAt must be in the future");
+    }
+    let starts = parse_ts(a.get("startsAt"));
+    let mut sil = json!({
+        "id": rand_hex(4),
+        "comment": a.get("comment").and_then(|v| v.as_str()).unwrap_or(""),
+        "createdBy": a.get("createdBy").and_then(|v| v.as_str())
+            .unwrap_or("panel"),
+        "createdAt": now_iso(),
+        "endsAt": ends.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+        "matchers": Value::Object(m),
+    });
+    if let Some(t) = starts {
+        sil["startsAt"] =
+            json!(t.to_rfc3339_opts(chrono::SecondsFormat::Millis, true));
+    }
+    let mut sils = crate::store::load_silences(&app.root);
+    sils.push(sil.clone());
+    crate::store::save_silences(&app.root, &sils);
+    app.sse("silences", &json!({}));
+    j(json!({"ok": true, "silence": sil}))
+}
+
+// POST /api/silences/remove — {id}
+async fn api_silences_remove(State(app): State<Shared>, b: Bytes) -> Response {
+    let a = body_json(b).await;
+    let id = a.get("id").and_then(|v| v.as_str()).unwrap_or("");
+    let sils = crate::store::load_silences(&app.root);
+    let kept: Vec<Value> = sils
+        .iter()
+        .filter(|s| s.get("id").and_then(|v| v.as_str()) != Some(id))
+        .cloned()
+        .collect();
+    if kept.len() == sils.len() {
+        return err(StatusCode::NOT_FOUND, "silence not found");
+    }
+    crate::store::save_silences(&app.root, &kept);
+    app.sse("silences", &json!({}));
+    j(json!({"ok": true}))
+}
+
 // ---------- proposals（採否は人ゲート・vet が前提検査） ----------
 
 async fn api_proposals_get(State(app): State<Shared>) -> Response {
@@ -3532,6 +3640,8 @@ pub fn router(app: Shared) -> Router {
         .route("/api/candidates/{key}/{action}", post(api_candidates_action))
         .route("/api/issues", get(api_issues_get))
         .route("/api/issues/{key}/{action}", post(api_issues_action))
+        .route("/api/silences", get(api_silences_get).post(api_silences_post))
+        .route("/api/silences/remove", post(api_silences_remove))
         .route("/api/proposals", get(api_proposals_get).post(api_proposals_post))
         .route("/api/proposals/{id}/{decision}", post(api_proposals_decide))
         .route("/api/agents", get(api_agents))

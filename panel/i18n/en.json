@@ -335,6 +335,17 @@
   "cand.df.rate-limit": "deferred (rate-limit)",
   "cand.df.observing": "observing",
   "cand.df.cooldown": "cooldown",
+  "cand.df.silenced": "silenced",
+  "sil.title": "silences (filing mute)",
+  "sil.none": "no silences",
+  "sil.comment": "comment",
+  "sil.commentPh": "reason (maintenance window, known symptom, …)",
+  "sil.minutes": "minutes",
+  "sil.ends": "ends:",
+  "sil.sched": "starts:",
+  "sil.add": "add",
+  "sil.remove": "remove",
+  "sil.note": "candidates matching the matchers (source/repo/kind, blank = any) are not filed for the duration; expires automatically",
   "cand.df.inhibited": "inhibited",
   "iss.backoff": "backoff"
 }

@@ -15,6 +15,9 @@ pub fn candidates_path(root: &Path) -> PathBuf {
 pub fn queue_path(root: &Path) -> PathBuf {
     root.join("work-queue.json")
 }
+pub fn silences_path(root: &Path) -> PathBuf {
+    root.join("silences.json")
+}
 
 pub fn load_issues(root: &Path) -> Vec<Value> {
     load_j(&issues_path(root), json!([]))
@@ -42,6 +45,29 @@ pub fn load_queue(root: &Path) -> Vec<Value> {
 }
 pub fn save_queue(root: &Path, q: &[Value]) {
     save_j(&queue_path(root), &json!(q));
+}
+pub fn load_silences(root: &Path) -> Vec<Value> {
+    load_j(&silences_path(root), json!([]))
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+}
+/// 保存時に endsAt 経過済みの silence を除く（期限切れ自動解除。
+/// endsAt 欠落・不正なレコードも残さない）
+pub fn save_silences(root: &Path, sils: &[Value]) {
+    let now = chrono::Utc::now();
+    let kept: Vec<Value> = sils
+        .iter()
+        .filter(|s| {
+            s.get("endsAt")
+                .and_then(|v| v.as_str())
+                .and_then(|v| chrono::DateTime::parse_from_rfc3339(v).ok())
+                .map(|t| t.with_timezone(&chrono::Utc) > now)
+                .unwrap_or(false)
+        })
+        .cloned()
+        .collect();
+    save_j(&silences_path(root), &json!(kept));
 }
 
 // ---- issue key / symptomHash（detect-pipeline.mmd: key = source+repo+symptomHash） ----

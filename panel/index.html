@@ -1402,6 +1402,7 @@ let agentRows = [];
 let activeAgent = '';
 let wsRoot = '';            // GET /api/repos の workspace。path ピッカーの初期位置
 let sysState = {};          // GET /api/state。システムタブの表示用
+let silRows = [];           // GET /api/silences。起票ミュート台帳
 let isDev = false;          // /api/state.dev。開発インスタンス表示
 function markDev(st) {
   isDev = !!(st && st.dev);
@@ -1427,11 +1428,13 @@ async function refreshAgents() {
   activeAgent = aj.active || '';
 }
 async function showSettings() {
-  const [j, , st] = await Promise.all(
-    [J('GET', '/api/repos'), refreshAgents(), J('GET', '/api/state')]);
+  const [j, , st, sj] = await Promise.all(
+    [J('GET', '/api/repos'), refreshAgents(), J('GET', '/api/state'),
+     J('GET', '/api/silences')]);
   repoRows = j.entries || [];
   wsRoot = j.workspace || '';
   sysState = st || {};
+  silRows = (sj && sj.silences) || [];
   centerMode = 'settings';
   curDoc = null;
   curPropId = null;
@@ -1639,7 +1642,7 @@ function renderSettings() {
             .join('') + `</div>`
         : `<div class="empty">${esc(t('repo.none'))}</div>`)
     : setTab === 'system'
-      ? sysCard + autoCard + tzCard + assetCardHtml
+      ? sysCard + autoCard + tzCard + assetCardHtml + silencesCard()
       : agentReg + (agentRows.length
           ? agentRows.map(acard).join('') : `<div class="empty">${esc(t('agent.none'))}</div>`);
   document.getElementById('box').innerHTML = tabbar + body;
@@ -1689,6 +1692,63 @@ function assetsCard() {
     `<div class="rset"><button onclick="assetsCheck()" ${a.checking ? 'disabled' : ''}` +
     ` title="${esc(t('assets.check.tip'))}">${esc(a.checking ? t('assets.checking') : t('assets.check'))}</button></div>` +
     `<div class="muted">${esc(t('assets.note'))}</div></div>`;
+}
+// ---------- silence（起票ミュート: /api/silences。matcher+期限） ----------
+// 窓内に matcher 合致する candidate は課題化せず deferred="silenced" で
+// 留め置く。期限切れはサーバ側で自動解除（台帳からも除去）
+function silencesCard() {
+  const row = (s) => {
+    const m = Object.entries(s.matchers || {})
+      .map(([k, v]) => `${k}=${v}`).join(' ');
+    const sched = s.startsAt && !s.active;
+    return `<div class="muted"><b>${esc(m)}</b>` +
+      (s.comment ? ` · ${esc(s.comment)}` : '') +
+      (sched
+        ? ` <span class="pill">${esc(t('sil.sched'))} ${esc(fmtTs(s.startsAt))}</span>`
+        : '') +
+      ` · ${esc(t('sil.ends'))} ${esc(fmtTs(s.endsAt))}` +
+      ` <span class="rset" style="display:inline-flex">` +
+      `<button onclick="silRemove('${esc(s.id)}')">${esc(t('sil.remove'))}</button>` +
+      `</span></div>`;
+  };
+  return `<div class="rcard"><b>${esc(t('sil.title'))}</b>` +
+    (silRows.length ? silRows.map(row).join('')
+      : `<div class="empty">${esc(t('sil.none'))}</div>`) +
+    `<div class="rset">` +
+    `<label>source<input type="text" id="sil-src" placeholder="*"></label>` +
+    `<label>repo<input type="text" id="sil-repo" placeholder="*"></label>` +
+    `<label>kind<input type="text" id="sil-kind" placeholder="*"></label>` +
+    `<label>${esc(t('sil.minutes'))}` +
+    `<input type="number" id="sil-min" value="60" min="1"></label></div>` +
+    `<div class="rset"><label class="wide">${esc(t('sil.comment'))}` +
+    `<input type="text" class="wide" id="sil-comment"` +
+    ` placeholder="${esc(t('sil.commentPh'))}"></label>` +
+    `<button class="primary" onclick="silAdd()">${esc(t('sil.add'))}</button>` +
+    `</div>` +
+    `<div class="muted">${esc(t('sil.note'))}</div></div>`;
+}
+async function silRefresh() {
+  const r = await J('GET', '/api/silences');
+  silRows = (r && r.silences) || [];
+  if (centerMode === 'settings' && setTab === 'system') renderSettings();
+}
+async function silAdd() {
+  const v = (id) => (document.getElementById(id)?.value || '').trim();
+  const matchers = {};
+  if (v('sil-src')) matchers.source = v('sil-src');
+  if (v('sil-repo')) matchers.repo = v('sil-repo');
+  if (v('sil-kind')) matchers.kind = v('sil-kind');
+  const r = await J('POST', '/api/silences', {
+    matchers, comment: v('sil-comment'),
+    durationMinutes: parseInt(v('sil-min'), 10) || 0,
+  });
+  if (!r.ok) { alert(t('alert.fail', { error: r.error || '' })); return; }
+  await silRefresh();
+}
+async function silRemove(id) {
+  const r = await J('POST', '/api/silences/remove', { id });
+  if (!r.ok) { alert(t('alert.fail', { error: r.error || '' })); return; }
+  await silRefresh();
 }
 async function assetsCheck() {
   const r = await J('POST', '/api/assets/check', {});
@@ -2718,6 +2778,7 @@ es.addEventListener('chats', () => { loadSessions(); scheduleMgmt(); scheduleSta
 es.addEventListener('candidates', scheduleMgmt);
 es.addEventListener('issues', scheduleMgmt);
 es.addEventListener('proposals', scheduleMgmt);
+es.addEventListener('silences', () => { silRefresh(); scheduleMgmt(); });
 es.addEventListener('console', (e) => appendConLines(JSON.parse(e.data).lines));
 es.addEventListener('repos', async () => {
   const prev = repoScope;
