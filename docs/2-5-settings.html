@@ -28,6 +28,7 @@
 <p>監視対象リポジトリ（<code>config.repos</code>）の登録・設定更新・解除を行います。<br><code>path</code> 入力は参照ピッカー（<code>GET /api/fs/dirs</code>）で選択できます。<br>IDE ワークスペース直下の <code>.git</code> 付きディレクトリは「IDE管理下」として<br>自動検出され、そのまま登録ボタンで追加できます。<br>GitHub を利用していないユーザーリポジトリも「ユーザー」として検出します:</p>
 <ul><li>ワークスペース直下の <code>.git</code> 無しディレクトリ（Git 未使用のプロジェクト dir）</li><li>ユーザーディレクトリ直下の <code>.git</code> 付きディレクトリ</li><li><code>config.repoScanDirs</code> に列挙した各ディレクトリ直下のディレクトリ（全件）</li></ul>
 <p>いずれも登録ボタンで <code>POST /api/repos</code> へ流せます<br>（slug 省略時は git remote から推定、無ければディレクトリ名）。</p>
+<p>リポジトリ一覧はサブタブでグループ化されます。slug に owner を持つ<br>リポジトリは GitHub owner ごとのタブに、owner を持たないものは<br>「ユーザー」（GitHub 非依存の検出 repo）または「(owner なし)」タブに<br>振り分けられます。選択中のサブタブは localStorage に保存されます。<br>各サブタブにホバーするとグループの意味をポップアップで確認できます。</p>
 <h3>システム</h3>
 <p>「システム再起動 / 強制再起動」ボタン（<code>POST /api/control/restart</code>）。<br>実行中 run が残る間は空くまで延期し、強制なら実行中の chat を中断して<br>即時再起動します。</p>
 <p>実行 exe の更新検知時は <code>autoRestartOnDrift</code>（既定 ON）により<br>タスク空きを待って自動再起動します（判断フローは「3-1 統一モデル図」の<br>自動再起動図を参照）。</p>

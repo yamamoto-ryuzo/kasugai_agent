@@ -118,6 +118,10 @@
   .bcard .bx:hover { color: #dc2626; background: #fee2e2; }
   .bcard .bact { position: absolute; bottom: 4px; right: 6px; font-size: 12px;
                  padding: 1px 8px; }
+  /* ボード上部の一括操作バー（処理再開ボタン） */
+  #boardwrap .btools { display: flex; align-items: center; gap: 8px;
+                       margin-bottom: 8px; }
+  #boardwrap .btools .muted { margin-top: 0; }
   /* ---- 設定ビュー（中央ペインの repo カード） ---- */
   .rcard { background: #fff; border: 1px solid #e5e7eb; border-radius: 8px;
            padding: 10px 12px; margin-bottom: 10px; font-size: 12px; max-width: 720px; }
@@ -139,6 +143,14 @@
                  color: #6b7280; }
   .stabs .stab.active { background: #eff6ff; border-color: #bfdbfe;
                         color: #1d4ed8; }
+  /* リポジトリタブ内のサブタブ（GitHub owner / ユーザー / (owner なし) の
+     グループ切替）。ピル型・下線なし */
+  .stabs.sub { border-bottom: 0; margin-bottom: 10px; gap: 6px;
+               max-width: none; }
+  .stabs.sub .stab { border: 1px solid #e5e7eb; border-radius: 999px;
+                     margin-bottom: 0; padding: 2px 10px; font-size: 11px; }
+  .stabs.sub .stab.active { background: #eff6ff; border-color: #bfdbfe;
+                            color: #1d4ed8; }
   /* ---- フォルダツリー（エディターナビ → 右ペイン） ---- */
   #treebox { flex: 1; overflow-y: auto; padding: 6px 4px; font-size: 12px; }
   .trow { display: flex; align-items: center; gap: 2px; padding: 2px 4px;
@@ -1188,6 +1200,17 @@ async function showStatus() {
       : '') +
     `</div>`;
   };
+  // 停止中の判定は server の resume-all と同じ順で数える:
+  // busy → 対象外 / verify=pending → 検証起動 / 待機で blocker 全非busy → 解放
+  // / それ以外で resumable → 再接続+続行。repo 確認待ちは人ゲートなので除外
+  const byId = new Map(list.map((s) => [s.id, s]));
+  const stopped = list.filter((s) => {
+    if (s.busy) return false;
+    if (s.verify === 'pending') return true;
+    if (s.waiting) return s.waitInfo?.kind !== 'repo' &&
+      !(s.waitInfo?.blockedBy || []).some((b) => byId.get(b)?.busy);
+    return statusKey(s) === 'resume';
+  });
   const col = ([k, pill, name]) =>
     `<div class="bcol"><div class="bhead"><span class="pill ${pill}">${esc(t(name))}</span>` +
     (k === 'live' && by.live.length
@@ -1196,7 +1219,12 @@ async function showStatus() {
     `<span class="n">${by[k].length}</span></div>` +
     `<div class="bcards">${by[k].map(card).join('') || `<div class="empty">${esc(t('board.empty'))}</div>`}</div></div>`;
   document.getElementById('box').innerHTML =
-    `<div id="board">${STATUS_COLS.map(col).join('')}</div>`;
+    `<div id="boardwrap"><div class="btools">` +
+    `<button onclick="boardResumeAll(${stopped.length})"${stopped.length ? '' : ' disabled'}` +
+    ` title="${esc(t('board.resumeAll.tip'))}">${esc(t('board.resumeAll.btn'))}` +
+    (stopped.length ? ` (${stopped.length})` : '') + `</button>` +
+    `<span class="muted">${esc(t('board.resumeAll.note'))}</span></div>` +
+    `<div id="board">${STATUS_COLS.map(col).join('')}</div></div>`;
   document.getElementById('box').scrollTop = 0;
 }
 let statT = null;
@@ -1233,6 +1261,16 @@ async function boardCloseAll(count) {
 async function boardResume(id) {
   const r = await J('POST', '/api/chat/resume', { id });
   if (!r.ok) alert(t('alert.resumeFail', { error: r.error || '' }));
+  if (centerMode === 'status') showStatus();
+}
+// ボード上部の「処理再開」: 止まった処理を一括再開（POST /api/chat/resume-all）。
+// 再開可=再接続+続行 prompt / 検証待ち=検証起動 / 宙ぶら待機=解放して再送
+async function boardResumeAll(n) {
+  if (!n || !confirm(t('board.resumeAll.confirm', { count: n }))) return;
+  const r = await J('POST', '/api/chat/resume-all', {});
+  if (!r.ok) { alert(t('alert.resumeFail', { error: r.error || '' })); return; }
+  alert(t('board.resumeAll.result', {
+    resumed: r.resumed || 0, verify: r.verify || 0, released: r.released || 0 }));
   if (centerMode === 'status') showStatus();
 }
 // 検証列カードの「検証」で実機検証ターンを起動（POST /api/chat/verify）
@@ -1281,6 +1319,18 @@ function markDev(st) {
   document.title = (isDev ? '[DEV] ' : '') + t('app.title');
 }
 let setTab = localStorage.getItem('kasugai:settab') || 'agents';  // agents|repos|system
+// リポジトリタブ内のサブタブ選択（GitHub owner / 'user' / 'local'）
+let repoTab = localStorage.getItem('kasugai:repotab') || '';
+// 一覧行のグループ key: slug に owner があればその owner、
+// 無ければ user 検出は 'user'、その他（IDE管理下等）は 'local'（owner なし）
+const repoGroupKey = (e) =>
+  splitSlug(e.slug || '')[0] || (e.user ? 'user' : 'local');
+const repoGroupLabel = (g) =>
+  g === 'user' ? t('repo.user') : g === 'local' ? t('repo.noOwner') : g;
+// サブタブのホバー説明（data-tip ポップアップ）
+const repoGroupTip = (g) =>
+  t(g === 'user' ? 'repo.gtip.user' : g === 'local' ? 'repo.gtip.local'
+    : 'repo.gtip.owner', { owner: g });
 async function refreshAgents() {
   const aj = await J('GET', '/api/chat-agents');
   agentRows = aj.agents || [];
@@ -1322,6 +1372,12 @@ function showManual() {
 function setSettingsTab(t) {
   setTab = t;
   localStorage.setItem('kasugai:settab', t);
+  renderSettings();
+}
+// リポジトリタブ内のサブタブ切替（owner / user / local のグループ）
+function setRepoTab(g) {
+  repoTab = g;
+  localStorage.setItem('kasugai:repotab', g);
   renderSettings();
 }
 function renderSettings() {
@@ -1469,9 +1525,26 @@ function renderSettings() {
   const tabbar = `<div class="stabs">` + tabs.map(([id, lbl]) =>
     `<button class="stab${setTab === id ? ' active' : ''}"` +
     ` onclick="setSettingsTab('${id}')">${lbl}</button>`).join('') + `</div>`;
+  // リポジトリタブ: GitHub owner / ユーザー / (owner なし) のサブタブで絞込。
+  // グループ順は owner（出現順）→ user → local。カードの index は
+  // repoRows 上の位置を維持する（saveRepo 等の行参照用）
+  const gRank = (g) => g === 'user' ? 1 : g === 'local' ? 2 : 0;
+  const repoGroups = [...new Set(repoRows.map(repoGroupKey))]
+    .sort((a, b) => gRank(a) - gRank(b));
+  if (!repoGroups.includes(repoTab)) repoTab = repoGroups[0] ?? '';
+  const subTabs = repoGroups.length > 1
+    ? `<div class="stabs sub">` + repoGroups.map((g) =>
+        `<button class="stab${repoTab === g ? ' active' : ''}"` +
+        ` onclick="setRepoTab('${esc(g)}')" data-tip="${esc(repoGroupTip(g))}">` +
+        `${esc(repoGroupLabel(g))}` +
+        ` (${repoRows.filter((e) => repoGroupKey(e) === g).length})</button>`
+      ).join('') + `</div>`
+    : '';
   const body = setTab === 'repos'
-    ? regCard + (repoRows.length
-        ? `<div class="rgrid">` + repoRows.map(card).join('') + `</div>`
+    ? regCard + subTabs + (repoRows.length
+        ? `<div class="rgrid">` + repoRows
+            .map((e, i) => repoGroupKey(e) === repoTab ? card(e, i) : '')
+            .join('') + `</div>`
         : `<div class="empty">${esc(t('repo.none'))}</div>`)
     : setTab === 'system'
       ? sysCard + autoCard + tzCard + assetCardHtml

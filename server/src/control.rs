@@ -2342,6 +2342,137 @@ async fn api_chat_resume(State(app): State<Shared>, b: Bytes) -> Response {
     }
 }
 
+// POST /api/chat/resume-all — 処理状況ボード上部の「処理再開」ボタン。
+// 止まった処理を一括で再開する（panel-layout.mmd RALL）:
+//   verify=pending                         → start_verify（検証ターン起動）
+//   resumable（acp・proc無・saved sid有）   → 再接続+中断作業の続行 prompt
+//   waiting（kind!=repo）で blocker 全非busy → leave_wait + 保留 prompt 再送
+// busy 中・repo 確認待ち（kind=repo の人ゲート）は触らない。
+// {repo} 指定時はその slug の chat のみ対象。
+async fn api_chat_resume_all(State(app): State<Shared>, b: Bytes) -> Response {
+    let a = body_json(b).await;
+    let repo_f = a.get("repo").and_then(|v| v.as_str()).map(String::from);
+    // 対象の仕分け（優先度は列の順に倣う: verify → 待機 → resume）
+    let (verify_ids, resume_ids, waiter_ids) = {
+        let chats = app.chats.lock().await;
+        let mut busy = HashSet::new();
+        for (id, s) in chats.iter() {
+            if s.chat.core().lock().await.busy {
+                busy.insert(*id);
+            }
+        }
+        let (mut v, mut r, mut w) = (Vec::new(), Vec::new(), Vec::new());
+        for (id, s) in chats.iter() {
+            if let Some(rf) = &repo_f {
+                if repo_slug(s.repo.as_ref()).as_deref() != Some(rf.as_str()) {
+                    continue;
+                }
+            }
+            let c = s.chat.core().lock().await;
+            if c.busy {
+                continue;
+            }
+            if s.verify.as_deref() == Some("pending") {
+                v.push(*id);
+            } else if let Some(wstate) = &c.waiting {
+                if wstate.kind != "repo" && !wstate.blocked_by.iter().any(|b| busy.contains(b)) {
+                    w.push(*id);
+                }
+            } else if s.chat.transport() == "acp"
+                && c.saved_session_id.is_some()
+                && !s.chat.has_proc().await
+            {
+                r.push(*id);
+            }
+        }
+        (v, r, w)
+    };
+    // 検証待ち → 検証ターン起動（send が session/load を兼ねる）
+    let mut n_verify = 0usize;
+    for id in verify_ids {
+        if app.start_verify(id).await {
+            n_verify += 1;
+        }
+    }
+    // 再開可 → 再接続（send 内で session/load）して中断作業の続行を促す
+    let mut n_resumed = 0usize;
+    for id in resume_ids {
+        if let Err(e) = app
+            .send_to_chat(
+                id,
+                "セッションが切断されました。中断していた作業を続行してください。"
+                    .to_string(),
+                Some("[処理再開] 中断していた作業を続行してください".to_string()),
+            )
+            .await
+        {
+            let chats = app.chats.lock().await;
+            if let Some(s) = chats.get(&id) {
+                s.chat.push_sys(&format!("[処理再開失敗] {}", e)).await;
+            }
+        } else {
+            n_resumed += 1;
+        }
+    }
+    // 宙ぶらの実行待機 → 再開後の busy 集合で再判定し、解放して保留を再送
+    // （release_waiters と同じ経路。解放前に再開した blocker は busy に
+    //   戻っているため待機は維持される）
+    let mut n_released = 0usize;
+    {
+        let chats = app.chats.lock().await;
+        let mut busy = HashSet::new();
+        for (id, s) in chats.iter() {
+            if s.chat.core().lock().await.busy {
+                busy.insert(*id);
+            }
+        }
+        let mut work: Vec<(i64, String)> = Vec::new();
+        for id in &waiter_ids {
+            let Some(s) = chats.get(id) else { continue };
+            let mut c = s.chat.core().lock().await;
+            let Some(wstate) = c.waiting.as_mut() else { continue };
+            if wstate.kind == "repo" {
+                continue;
+            }
+            wstate.blocked_by.retain(|b| busy.contains(b));
+            if !wstate.blocked_by.is_empty() {
+                continue;
+            }
+            if let Some(text) = c.leave_wait() {
+                let cwd = s.chat.cwd().read().await.clone();
+                setup_claims_core(&mut c, &text, &cwd);
+                work.push((*id, text));
+            }
+        }
+        drop(chats);
+        for (id, text) in work {
+            let chats2 = app.chats.lock().await;
+            if let Some(s) = chats2.get(&id) {
+                let chat = s.chat.clone();
+                drop(chats2);
+                let _ = app.evt_tx.send(CtrlEvt::Changed { id });
+                if let Err(e) = chat.send(text, None).await {
+                    chat.push_sys(&format!("[再開失敗] {}", e)).await;
+                } else {
+                    n_released += 1;
+                }
+            }
+        }
+    }
+    if n_verify + n_resumed + n_released > 0 {
+        conlog(
+            "control",
+            "sys",
+            &format!(
+                "処理再開: 続行 {}・検証起動 {}・待機解放 {}",
+                n_resumed, n_verify, n_released
+            ),
+        );
+    }
+    app.sse("chats", &json!({}));
+    j(json!({"ok": true, "resumed": n_resumed, "verify": n_verify, "released": n_released}))
+}
+
 async fn api_chat_verify(State(app): State<Shared>, b: Bytes) -> Response {
     let a = body_json(b).await;
     let id = qi(&a, "id").unwrap_or(0);
@@ -2776,6 +2907,7 @@ pub fn router(app: Shared) -> Router {
         .route("/api/chat/clear", post(api_chat_clear))
         .route("/api/chat/reset", post(api_chat_reset))
         .route("/api/chat/resume", post(api_chat_resume))
+        .route("/api/chat/resume-all", post(api_chat_resume_all))
         .route("/api/chat/verify", post(api_chat_verify))
         .route("/api/chat/close", post(api_chat_close))
         .route("/api/chat/close-completed", post(api_chat_close_completed))

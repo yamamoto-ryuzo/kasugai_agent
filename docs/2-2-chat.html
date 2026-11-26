@@ -28,7 +28,7 @@
 <h3>他のタブ・表示</h3>
 <ul><li><strong>console タブ</strong> — 実行体の stderr・control 自身の stdio を表示</li><li><strong>リポジトリ確認バー</strong> — prompt が他 repo 向けと判定されると確認バーが出る （切替えて送信 / このまま送信）</li><li><strong>ファイル競合</strong> — 他 busy chat が触れているファイルに触れる指示は 実行待機（waiting）になり、ブロッカー解除で自動再送される</li></ul>
 <h3>セッション再接続</h3>
-<p>ACP 型の実行体はセッション常駐です。control 再起動後は resumable chat を<br>自動で <code>session/load</code> 再接続し、処理状況「再開可」列の「再開」ボタンでも<br>手動再接続できます。</p>
+<p>ACP 型の実行体はセッション常駐です。control 再起動後は resumable chat を<br>自動で <code>session/load</code> 再接続し、処理状況「再開可」列の「再開」ボタンでも<br>手動再接続できます。処理状況ボード上部の「処理再開」ボタンは、止まった<br>処理（再開可・検証待ち・ブロッカーが消えた実行待機）を一括で再開します<br>（再開可 chat には再接続後に中断作業の続行 prompt を送ります）。</p>
     </main>
   </div>
 </body>

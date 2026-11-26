@@ -307,6 +307,11 @@ flowchart LR
 - `POST /api/chat/close-completed` — 完了（live）列の chat を一括削除
   （処理状況ビュー完了列ヘッダの「すべて削除」ボタンが呼ぶ。
   `{repo}` 指定時はその slug に属する chat のみ対象）
+- `POST /api/chat/resume-all` — 止まった処理の一括再開（処理状況ビュー
+  上部の「処理再開」ボタンが呼ぶ。再開可 chat は `session/load` で
+  再接続したうえで中断作業の続行 prompt を送り、検証待ちは検証ターンを
+  起動し、ブロッカーが消えた実行待機は解放して保留 prompt を再送する。
+  busy 中と repo 確認待ちは対象外。`{repo}` 指定時はその slug のみ対象）
 - `POST /api/control/restart` — control 手動再起動（設定ビューの
   「システム再起動」ボタンもこれを呼ぶ。実行中 run が残る間は空くまで延期し、
   `{force:true}` なら実行中の chat を中断して即時再起動する。
@@ -600,6 +605,11 @@ ACP プロセスも保存セッションも無い chat（未着手）も列に�
 `POST /api/chat/resume` により `session/load` でその場で再接続する
 （次の送信を待たない。起動時の自動再接続と同じ経路で、
 load 失敗時は `session/new` へフォールバックする）。
+ボード上部には「処理再開」ボタンを置き（停止中の件数を併記・0件は無効）、
+押下で確認のうえ `POST /api/chat/resume-all` により止まった処理を一括再開する
+（再開可 chat は再接続＋中断作業の続行 prompt 送信、検証待ちは検証ターン起動、
+ブロッカーが消えた実行待機は解放して保留 prompt を再送。実行中の chat と
+repo 確認待ちは対象外）。
 
 doc が本文中で参照しているファイル（`` ` `` 囲みのパス表記・glob・
 ディレクトリ参照）は、`GET /api/refs` で実ファイルへ解決する。
@@ -640,7 +650,7 @@ flowchart LR
     L -->|マニュアルナビ<br/>中央ペインを iframe 表示| C
     C -->|GET /docs/* 静的配信| MAN[docs/ マニュアルサイト<br/>正本=diagrams/docs/<br/>（1ページ1.md・frontmatter title<br/>nav.json=章立て<br/>template.html/style.css=書式<br/>Canvas docs 参考）<br/>tools/sync-docs.mjs が生成]
     L -->|git ナビ（設定下の区切り線以下・ナビ末尾）<br/>コミット=メッセージ入力→<br/>POST /api/git/commit<br/>（git add -A + commit・変更なしは noop）<br/>プッシュ=確認後<br/>POST /api/git/push（人ゲートの承認）| GIT[カレント repo で git を spawn<br/>60s timeout<br/>出力は conlog 集約<br/>→ console タブへ SSE push]
-    L -->|設定ナビ<br/>タブ: 接続AI / リポジトリ / システム<br/>（登録済み + IDE管理下検出 + ユーザー検出:<br/>ワークスペース/repoScanDirs 直下の .git 無し dir・<br/>ユーザーディレクトリ/repoScanDirs 直下の .git dir<br/>※GitHub 非依存のローカル repo も対象）<br/>GET /api/chat-agents<br/>GET /api/repos| C
+    L -->|設定ナビ<br/>タブ: 接続AI / リポジトリ / システム<br/>（登録済み + IDE管理下検出 + ユーザー検出:<br/>ワークスペース/repoScanDirs 直下の .git 無し dir・<br/>ユーザーディレクトリ/repoScanDirs 直下の .git dir<br/>※GitHub 非依存のローカル repo も対象）<br/>リポジトリタブ内はサブタブでグループ化<br/>（slug の GitHub owner ごと /<br/>ユーザー / (owner なし)。選択は永続化・<br/>グループ説明は data-tip ポップアップ）<br/>GET /api/chat-agents<br/>GET /api/repos| C
     C -->|接続AI 追加/更新/解除<br/>active 切替<br/>POST /api/chat-agents/*| AC[config.json の<br/>chatAgents + chatAgent<br/>SSE push で即時反映]
     AC -->|新規 chat の実行体<br/>（chat 作成時に固定し<br/>chats.json へ永続化）| ACPX[接続AI 実行体<br/>acp=CLI spawn /<br/>agent=/agent HTTP /<br/>openai=chat/completions]
     ACPX -->|stderr / 非JSON stdout<br/>（acp 型の spawn のみ）| CON[conlog.rs<br/>実行体出力 + control 自身の<br/>stdio をリングバッファ集約]
@@ -657,6 +667,7 @@ flowchart LR
     C -->|完了列カードの×ボタン<br/>POST /api/chat/close| DEL[chat 削除<br/>SSE push で即時反映]
     C -->|完了列ヘッダの「すべて削除」<br/>POST /api/chat/close-completed<br/>カレントrepoの完了列を一括削除| DEL
     C -->|再開可列カードの再開ボタン<br/>POST /api/chat/resume| RLOAD[session/load で再接続<br/>SSE push で即時反映]
+    C -->|ボード上部の「処理再開」ボタン<br/>（停止中の件数を併記・0件は無効）<br/>POST /api/chat/resume-all| RALL[止まった処理を一括再開<br/>再開可→session/load再接続+<br/>中断作業の続行prompt送信<br/>検証待ち→検証ターン起動<br/>ブロッカー消失の実行待機→<br/>解放して保留prompt再送<br/>（busy中・repo確認待ちは触らない）<br/>SSE push で即時反映]
     R -->|doc一覧 GET /api/agents<br/>GET /api/skills<br/>SKILL は global scope を<br/>一覧から除外| REG[doc registry<br/>agents.rs /<br/>skills.rs]
     R -->|doc/参照ファイル選択<br/>GET /api/doc| C
     R -->|GET /api/refs<br/>AGENTS: 切替時に全doc分を<br/>マージして一覧化<br/>SKILL: doc選択時| RF[参照ファイル抽出<br/>registry/refs.rs<br/>秘匿・未作成は無効表示]

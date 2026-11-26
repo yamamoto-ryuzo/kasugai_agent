@@ -23,7 +23,7 @@
 <h3>列の意味</h3>
 <table><thead><tr><th>列</th><th>状態</th></tr></thead><tbody><tr><td>idle</td><td>待機中（セッション未開始・完了）</td></tr><tr><td>exec</td><td>busy（実行中）+ waiting（実行待機中）を統合。カードのピルで区別</td></tr><tr><td>verify</td><td>実装ターン終了で自動遷移（touched あり → autoVerify）。検証中も列に留まる</td></tr><tr><td>resume</td><td>ACP 切断・次の送信で再開可能</td></tr><tr><td>live</td><td>ACP セッション接続中</td></tr></tbody></table>
 <h3>カード操作</h3>
-<ul><li><strong>クリック</strong> — 該当 chat を選択表示</li><li><strong>検証</strong>（verify 列・検証待ち） — 実機検証ターンを起動 （対象 EXE 起動＋Playwright 等の実機確認を指示）</li><li><strong>再開</strong>（resume 列） — <code>session/load</code> で即時再接続</li><li><strong>×</strong>（live 列） — chat を削除</li><li><strong>すべて削除</strong>（live 列ヘッダ） — 完了列の chat を一括削除 （カレント repo のみ。<code>POST /api/chat/close-completed</code>）</li></ul>
+<ul><li><strong>クリック</strong> — 該当 chat を選択表示</li><li><strong>検証</strong>（verify 列・検証待ち） — 実機検証ターンを起動 （対象 EXE 起動＋Playwright 等の実機確認を指示）</li><li><strong>再開</strong>（resume 列） — <code>session/load</code> で即時再接続</li><li><strong>×</strong>（live 列） — chat を削除</li><li><strong>すべて削除</strong>（live 列ヘッダ） — 完了列の chat を一括削除 （カレント repo のみ。<code>POST /api/chat/close-completed</code>）</li><li><strong>処理再開</strong>（ボード上部） — 止まった処理を一括再開 （<code>POST /api/chat/resume-all</code>。再開可 chat は再接続＋中断作業の 続行 prompt、検証待ちは検証ターン起動、ブロッカーが消えた実行待機は 解放して再送。busy 中と repo 確認待ちは対象外。ボタンには停止中の 件数を併記し、0 件では無効）</li></ul>
 <p>いずれも SSE push で全パネルへ即時反映されます。</p>
 <h3>verify の流れ</h3>
 <p>再検証（verify）と push は一体の仕事です。検証を通っていないコミットは<br>リモートへ公開せず、帰属不明・rejected のコミットは <code>git revert</code> で<br>除去してから push します。検証 NG の場合は課題を分離して差し戻し<br>（<code>verifyBackLimit</code> まで再試行）。</p>
