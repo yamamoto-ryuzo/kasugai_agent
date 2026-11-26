@@ -333,5 +333,7 @@
   "st.open": "abiertos",
   "st.doneRate": "tasa de éxito",
   "cand.df.rate-limit": "diferido (rate-limit)",
-  "cand.df.observing": "observando"
+  "cand.df.observing": "observando",
+  "cand.df.cooldown": "enfriamiento",
+  "iss.backoff": "espera"
 }

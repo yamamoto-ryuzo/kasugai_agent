@@ -105,7 +105,10 @@ flowchart TD
     NORM --&gt; HASH[issue key =&lt;br/&gt;source+repo+symptomHash]
     HASH --&gt; EXIST{既出?}
     EXIST --&gt;|yes| BUMP[既存課題の&lt;br/&gt;lastSeen 更新のみ]
-    EXIST --&gt;|no| OBS{observing 昇格?&lt;br/&gt;intakeObserveMinutes 継続&lt;br/&gt;or intakeObserveMinHits 回&lt;br/&gt;再検出&lt;br/&gt;（manual/derived は即起票）}
+    EXIST --&gt;|no| CD{クールダウン?&lt;br/&gt;同一バケット&lt;br/&gt;intakeCooldownBy&lt;br/&gt;（既定 source+repo+kind）の&lt;br/&gt;reject/verify NG から&lt;br/&gt;intakeCooldownMinutes 未満}
+    CD --&gt;|抑止中| CDH[candidate に留め置く&lt;br/&gt;deferred=cooldown&lt;br/&gt;課題は作らない]
+    CDH -.-&gt;|窓経過で再試行| OBS
+    CD --&gt;|経過| OBS{observing 昇格?&lt;br/&gt;intakeObserveMinutes 継続&lt;br/&gt;or intakeObserveMinHits 回&lt;br/&gt;再検出&lt;br/&gt;（manual/derived は即起票）}
     OBS --&gt;|未昇格&lt;br/&gt;単発・窓内消滅| OHOLD[candidate に留め置く&lt;br/&gt;deferred=observing&lt;br/&gt;課題は作らない]
     OBS --&gt;|昇格| RATE{起票レート超過?&lt;br/&gt;intakeMaxPerHour&lt;br/&gt;source+repo 単位&lt;br/&gt;0=無制限}
     OHOLD -.-&gt;|再検出・duration 蓄積で&lt;br/&gt;次回 emit/reconcile が昇格判定| OBS
@@ -117,6 +120,7 @@ flowchart TD
     GATE --&gt;|no| Q[queued&lt;br/&gt;一覧の対応ボタンで&lt;br/&gt;人が dispatch]
     GATE --&gt;|yes| G[gated&lt;br/&gt;候補一覧で人が&lt;br/&gt;dispatch 判断]
     DEFER --&gt; INBOX
+    CDH --&gt; INBOX
     OHOLD --&gt; INBOX
     Q --&gt; INBOX
     G --&gt; INBOX

@@ -288,6 +288,49 @@ fn span_seconds(cand: &Value) -> f64 {
     emitted.max(span).max(0.0)
 }
 
+/// 起票クールダウン（detect-pipeline.mmd CD）: バケット単位で
+/// 「直近の reject/verify NG から X 分は再 emit を抑止」する
+/// （EDA throttle.once_within 相当）。バケットは dedupe hash とは
+/// 別次元のパラメータで、config.intakeCooldownBy（既定
+/// ["source","repo","kind"]）の属性等値でグルーピングする。
+/// バケット内の課題が rejected/failed へ遷移してから
+/// config.intakeCooldownMinutes（既定60分、0=無効）未満なら抑止する。
+fn bucket_cooling(cfg: &Value, issues: &[Value], cand: &Value) -> bool {
+    let minutes = cfg_f64(cfg, "intakeCooldownMinutes", 60.0);
+    if minutes <= 0.0 {
+        return false;
+    }
+    let mut by: Vec<String> = cfg_arr(cfg, "intakeCooldownBy")
+        .iter()
+        .filter_map(|v| v.as_str().map(String::from))
+        .collect();
+    if by.is_empty() {
+        by = vec!["source".into(), "repo".into(), "kind".into()];
+    }
+    let cutoff = chrono::Utc::now() - chrono::Duration::seconds((minutes * 60.0) as i64);
+    issues.iter().any(|i| {
+        if !matches!(
+            i.get("status").and_then(|v| v.as_str()),
+            Some(ST_REJECTED) | Some(ST_FAILED)
+        ) {
+            return false;
+        }
+        let recent = i
+            .get("updatedAt")
+            .and_then(|v| v.as_str())
+            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+            .map(|t| t >= cutoff)
+            .unwrap_or(false);
+        if !recent {
+            return false;
+        }
+        by.iter().all(|attr| {
+            cand.get(attr.as_str()).and_then(|v| v.as_str()).unwrap_or("")
+                == i.get(attr.as_str()).and_then(|v| v.as_str()).unwrap_or("")
+        })
+    })
+}
+
 /// observing（保留観測。detect-pipeline.mmd OBS）の保留判定。
 /// 一過性 flap の起票を構造的に排除するため、detector 由来の candidate は
 /// 「N 分継続 or M 回再検出」を満たすまで課題化せず保留する:
@@ -397,6 +440,12 @@ fn intake_inner(root: &Path, cand: &Value, force: bool) -> IntakeOutcome {
     }
 
     let cfg = load_config(root);
+    // 起票クールダウン（detect-pipeline.mmd CD）: 同一バケットの課題が
+    // reject/verify NG で終端へ落ちた直後の再 emit は課題を作らない
+    if !force && bucket_cooling(&cfg, &issues, cand) {
+        return IntakeOutcome::Deferred("cooldown".into());
+    }
+
     // observing（detect-pipeline.mmd OBS）: 一過性症状を即起票しない。
     // 昇格条件（再検出回数・持続時間）未満は課題を作らず candidate に留め置く
     if !force && observing_hold(&cfg, cand) {
@@ -467,6 +516,8 @@ fn intake_inner(root: &Path, cand: &Value, force: bool) -> IntakeOutcome {
 
 /// queued 課題を起動してよいか。同一 repo に running|verifying の課題があれば
 /// Err(ブロック中の key)。実機リソースの排他は locks.rs の責務。
+/// verify NG 差し戻しの指数バックオフ（retryAfter）中も Err を返す
+/// （verify NG ループを構造的に空転させない。manual-6c3ed946）。
 pub fn can_dispatch(issues: &[Value], key: &str) -> Result<(), String> {
     let Some(issue) = issues
         .iter()
@@ -476,6 +527,14 @@ pub fn can_dispatch(issues: &[Value], key: &str) -> Result<(), String> {
     };
     if issue.get("status").and_then(|v| v.as_str()) != Some(ST_QUEUED) {
         return Err("not queued".into());
+    }
+    if let Some(ra) = issue.get("retryAfter").and_then(|v| v.as_str()) {
+        if chrono::DateTime::parse_from_rfc3339(ra)
+            .map(|t| t > chrono::Utc::now())
+            .unwrap_or(false)
+        {
+            return Err(format!("retry backoff until {}", ra));
+        }
     }
     let repo = issue.get("repo").and_then(|v| v.as_str()).unwrap_or("");
     if let Some(b) = issues.iter().find(|x| {
@@ -625,6 +684,76 @@ mod tests {
         assert_eq!(queued_keys(&root), vec![key.clone()]);
         assert!(request_transition(&root, "no-such-key", ST_QUEUED).is_err());
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn bucket_cooldown_defers_after_terminal_issue() {
+        let root = temp_root("cooldown");
+        // 同一バケット（source+repo+kind）に rejected 課題が直近にある
+        store::save_issues(
+            &root,
+            &[json!({
+                "key": "ci-failure:me/repo:old",
+                "source": "ci-failure", "repo": "me/repo", "kind": "build",
+                "symptomHash": "old", "status": ST_REJECTED,
+                "updatedAt": now_iso(),
+            })],
+        );
+        // 別症状・同バケットの再 emit は cooldown で留め置く
+        let mut c = det_cand("another build failure", "b");
+        c["kind"] = json!("build");
+        c["hits"] = json!(99);
+        match intake(&root, &c) {
+            IntakeOutcome::Deferred(r) => assert_eq!(r, "cooldown"),
+            _ => panic!("expected cooldown deferral"),
+        }
+        assert!(store::load_issues(&root).len() == 1);
+        // 別 kind は別バケット → 起票できる
+        let mut c2 = det_cand("test failure", "b");
+        c2["kind"] = json!("test");
+        c2["hits"] = json!(99);
+        match intake(&root, &c2) {
+            IntakeOutcome::Created(_) => {}
+            _ => panic!("different bucket should file"),
+        }
+        // クールダウン窓を過ぎた終端課題は抑止しない（同バケットでも起票できる）
+        let old = (chrono::Utc::now() - chrono::Duration::hours(2))
+            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        store::save_issues(
+            &root,
+            &[json!({
+                "key": "ci-failure:me/repo:old",
+                "source": "ci-failure", "repo": "me/repo", "kind": "build",
+                "symptomHash": "old", "status": ST_FAILED,
+                "updatedAt": old,
+            })],
+        );
+        let mut c3 = det_cand("later build failure", "b");
+        c3["kind"] = json!("build");
+        c3["hits"] = json!(99);
+        match intake(&root, &c3) {
+            IntakeOutcome::Created(_) => {}
+            IntakeOutcome::Deferred(r) => panic!("cooldown expired, got {}", r),
+            _ => panic!("expected Created after cooldown window"),
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn can_dispatch_honors_retry_after() {
+        let future = (chrono::Utc::now() + chrono::Duration::minutes(5))
+            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        let past = (chrono::Utc::now() - chrono::Duration::minutes(5))
+            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        let issues = vec![
+            json!({"key": "a", "repo": "me/r", "status": ST_QUEUED, "retryAfter": future}),
+            json!({"key": "b", "repo": "me/r", "status": ST_QUEUED, "retryAfter": past}),
+            json!({"key": "c", "repo": "me/r", "status": ST_QUEUED}),
+        ];
+        let e = can_dispatch(&issues, "a").unwrap_err();
+        assert!(e.contains("backoff"), "got: {}", e);
+        assert!(can_dispatch(&issues, "b").is_ok());
+        assert!(can_dispatch(&issues, "c").is_ok());
     }
 
     #[test]

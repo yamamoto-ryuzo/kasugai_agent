@@ -333,5 +333,7 @@
   "st.open": "abertos",
   "st.doneRate": "taxa concluída",
   "cand.df.rate-limit": "adiado (rate-limit)",
-  "cand.df.observing": "observando"
+  "cand.df.observing": "observando",
+  "cand.df.cooldown": "espera",
+  "iss.backoff": "backoff"
 }

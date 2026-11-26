@@ -333,5 +333,7 @@
   "st.open": "미완료",
   "st.doneRate": "완료율",
   "cand.df.rate-limit": "보류 (rate-limit)",
-  "cand.df.observing": "관측 중"
+  "cand.df.observing": "관측 중",
+  "cand.df.cooldown": "쿨다운",
+  "iss.backoff": "백오프"
 }

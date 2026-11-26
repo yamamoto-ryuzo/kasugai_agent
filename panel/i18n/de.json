@@ -333,5 +333,7 @@
   "st.open": "offen",
   "st.doneRate": "Erfolgsrate",
   "cand.df.rate-limit": "zurückgestellt (rate-limit)",
-  "cand.df.observing": "Beobachtung"
+  "cand.df.observing": "Beobachtung",
+  "cand.df.cooldown": "Abklingzeit",
+  "iss.backoff": "Backoff"
 }

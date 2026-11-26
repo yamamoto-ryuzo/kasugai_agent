@@ -6,7 +6,10 @@ flowchart TD
     NORM --> HASH[issue key =<br/>source+repo+symptomHash]
     HASH --> EXIST{既出?}
     EXIST -->|yes| BUMP[既存課題の<br/>lastSeen 更新のみ]
-    EXIST -->|no| OBS{observing 昇格?<br/>intakeObserveMinutes 継続<br/>or intakeObserveMinHits 回<br/>再検出<br/>（manual/derived は即起票）}
+    EXIST -->|no| CD{クールダウン?<br/>同一バケット<br/>intakeCooldownBy<br/>（既定 source+repo+kind）の<br/>reject/verify NG から<br/>intakeCooldownMinutes 未満}
+    CD -->|抑止中| CDH[candidate に留め置く<br/>deferred=cooldown<br/>課題は作らない]
+    CDH -.->|窓経過で再試行| OBS
+    CD -->|経過| OBS{observing 昇格?<br/>intakeObserveMinutes 継続<br/>or intakeObserveMinHits 回<br/>再検出<br/>（manual/derived は即起票）}
     OBS -->|未昇格<br/>単発・窓内消滅| OHOLD[candidate に留め置く<br/>deferred=observing<br/>課題は作らない]
     OBS -->|昇格| RATE{起票レート超過?<br/>intakeMaxPerHour<br/>source+repo 単位<br/>0=無制限}
     OHOLD -.->|再検出・duration 蓄積で<br/>次回 emit/reconcile が昇格判定| OBS
@@ -18,6 +21,7 @@ flowchart TD
     GATE -->|no| Q[queued<br/>一覧の対応ボタンで<br/>人が dispatch]
     GATE -->|yes| G[gated<br/>候補一覧で人が<br/>dispatch 判断]
     DEFER --> INBOX
+    CDH --> INBOX
     OHOLD --> INBOX
     Q --> INBOX
     G --> INBOX

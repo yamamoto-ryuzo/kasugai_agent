@@ -333,5 +333,7 @@
   "st.open": "open",
   "st.doneRate": "done rate",
   "cand.df.rate-limit": "deferred (rate-limit)",
-  "cand.df.observing": "observing"
+  "cand.df.observing": "observing",
+  "cand.df.cooldown": "cooldown",
+  "iss.backoff": "backoff"
 }

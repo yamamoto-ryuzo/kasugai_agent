@@ -576,10 +576,28 @@ async fn send_back(app: &Shared, key: &str, reason: &str) {
         .await;
     } else {
         let _ = pipeline::request_transition(root, key, pipeline::ST_QUEUED);
+        // 指数バックオフ（manual-6c3ed946）: verify NG の再試行は
+        // verifyBackoffMinutes × 2^(backs-1)（上限 verifyBackoffMaxMinutes）
+        // だけ待機させる。retryAfter 経過前の再 dispatch は can_dispatch が止める
+        let base = cfg_f64(&app.cfg().await, "verifyBackoffMinutes", 5.0);
+        let cap = cfg_f64(&app.cfg().await, "verifyBackoffMaxMinutes", 60.0);
+        let wait = (base * 2f64.powi(backs as i32 - 1)).min(cap);
+        if wait > 0.0 {
+            let until = chrono::Utc::now() + chrono::Duration::seconds((wait * 60.0) as i64);
+            let _ = pipeline::set_field(
+                root,
+                key,
+                "retryAfter",
+                json!(until.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)),
+            );
+        }
         conlog(
             "runner",
             "sys",
-            &format!("{}: verify NG → 差し戻し ({}/{}): {}", key, backs, limit, reason),
+            &format!(
+                "{}: verify NG → 差し戻し ({}/{}・再試行は {:.0}分後まで待機): {}",
+                key, backs, limit, wait, reason
+            ),
         );
     }
     app.sse("issues", &json!({}));
@@ -1417,6 +1435,33 @@ mod tests {
         assert_eq!(it["verifyBacks"], json!(1));
         assert_eq!(it["runs"].as_array().unwrap().len(), 1);
         assert!(it["verifyNote"].is_string());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn send_back_sets_exponential_retry_after() {
+        // verify NG 差し戻しは指数バックオフの retryAfter を課題へ記録し、
+        // 経過前の再 dispatch は can_dispatch が止める（manual-6c3ed946）
+        let root = temp_root("backoff");
+        let repo = make_repo(&root, "repo", false);
+        let key = "manual:t/r:backoff1";
+        let app = test_app(&root, cfg_for(&repo, "cmd", json!(["/C", "echo", "x"]), false));
+        let mut issue = queued_issue(key, "t/r", 0);
+        issue["status"] = json!(pipeline::ST_VERIFYING);
+        seed(&root, &issue);
+
+        send_back(&app, key, "検証失敗").await;
+        let it = find_issue(&root, key).unwrap();
+        assert_eq!(it["status"], json!(pipeline::ST_QUEUED));
+        assert_eq!(it["verifyBacks"], json!(1));
+        let t = chrono::DateTime::parse_from_rfc3339(it["retryAfter"].as_str().unwrap())
+            .unwrap();
+        // 1回目の NG = base（既定5分）× 2^0 ≈ 5分後
+        let ahead = (t.with_timezone(&chrono::Utc) - chrono::Utc::now()).num_seconds();
+        assert!(ahead > 60 && ahead <= 5 * 60 + 30, "ahead={}", ahead);
+        let issues = store::load_issues(&root);
+        let e = pipeline::can_dispatch(&issues, key).unwrap_err();
+        assert!(e.contains("backoff"), "got: {}", e);
         let _ = std::fs::remove_dir_all(&root);
     }
 }

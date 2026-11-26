@@ -333,5 +333,7 @@
   "st.open": "未完了",
   "st.doneRate": "完了率",
   "cand.df.rate-limit": "保留（rate-limit）",
-  "cand.df.observing": "観測中"
+  "cand.df.observing": "観測中",
+  "cand.df.cooldown": "クールダウン",
+  "iss.backoff": "バックオフ"
 }

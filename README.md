@@ -149,7 +149,10 @@ flowchart TD
     NORM --> HASH[issue key =<br/>source+repo+symptomHash]
     HASH --> EXIST{既出?}
     EXIST -->|yes| BUMP[既存課題の<br/>lastSeen 更新のみ]
-    EXIST -->|no| OBS{observing 昇格?<br/>intakeObserveMinutes 継続<br/>or intakeObserveMinHits 回<br/>再検出<br/>（manual/derived は即起票）}
+    EXIST -->|no| CD{クールダウン?<br/>同一バケット<br/>intakeCooldownBy<br/>（既定 source+repo+kind）の<br/>reject/verify NG から<br/>intakeCooldownMinutes 未満}
+    CD -->|抑止中| CDH[candidate に留め置く<br/>deferred=cooldown<br/>課題は作らない]
+    CDH -.->|窓経過で再試行| OBS
+    CD -->|経過| OBS{observing 昇格?<br/>intakeObserveMinutes 継続<br/>or intakeObserveMinHits 回<br/>再検出<br/>（manual/derived は即起票）}
     OBS -->|未昇格<br/>単発・窓内消滅| OHOLD[candidate に留め置く<br/>deferred=observing<br/>課題は作らない]
     OBS -->|昇格| RATE{起票レート超過?<br/>intakeMaxPerHour<br/>source+repo 単位<br/>0=無制限}
     OHOLD -.->|再検出・duration 蓄積で<br/>次回 emit/reconcile が昇格判定| OBS
@@ -161,6 +164,7 @@ flowchart TD
     GATE -->|no| Q[queued<br/>一覧の対応ボタンで<br/>人が dispatch]
     GATE -->|yes| G[gated<br/>候補一覧で人が<br/>dispatch 判断]
     DEFER --> INBOX
+    CDH --> INBOX
     OHOLD --> INBOX
     Q --> INBOX
     G --> INBOX
@@ -169,6 +173,16 @@ flowchart TD
 
 - detector は `server/src/detectors/*.rs` に置き、統一 candidate 形式を stdout/ファイルで emit
 - dedupe は入口の1箇所のみ（detector 個別に持たせない）
+- **起票クールダウン**: バケット（`intakeCooldownBy` 既定
+  `["source","repo","kind"]` の等値グループ。dedupe hash とは別次元の
+  「何を同一とみなすか」パラメータ）内の課題が rejected/failed へ遷移して
+  から `intakeCooldownMinutes`（既定60分、0=無効）未満の再 emit は課題を
+  作らず `deferred:"cooldown"` で留め置く（reject/verify NG 直後の
+  once_within 抑圧）
+- **verify NG 再試行の指数バックオフ**: 差し戻しで queued に戻る課題には
+  `retryAfter`（`verifyBackoffMinutes` 既定5分 × 2^(verifyBacks-1)、上限
+  `verifyBackoffMaxMinutes` 既定60分）を記録し、経過前の再 dispatch は
+  `can_dispatch` が止める。`verifyBackLimit` 超過は failed（要人対応）
 - **observing（保留観測）**: 一過性 flap の起票を排除するため、detector
   由来の candidate は「`intakeObserveMinutes`（既定10分）継続 or
   `intakeObserveMinHits`（既定2）回再検出」を満たすまで課題化せず

@@ -2336,6 +2336,7 @@ async function loadMgmt() {
     return `<div class="item${i.key === curItemKey && centerMode === 'issue' ? ' sel' : ''}"` +
       ` onclick="openIssue('${esc(i.key)}')" data-tip="${esc(tipText((i.title ? i.title + '\n\n' : '') + (i.body ? i.body + '\n\n' : '') + t('prop.open.tip')))}"><div>` +
       `<span class="pill ${issuePill[st] || ''}">${esc(tx('iss.st.' + st, st))}</span>` +
+      `${i.retryAfter && new Date(i.retryAfter) > new Date() ? `<span class="pill def">${esc(t('iss.backoff'))}</span>` : ''}` +
       `${(i.priority ?? 1) >= 2 ? `<span class="pill prio">P${i.priority}</span>` : ''}<b>${esc(i.title)}</b></div>` +
       `<div class="muted">${esc(tx('src.' + (i.source || ''), i.source || ''))}${lvl} · ${esc(fmtTs(i.updatedAt))}</div>` +
       (btns.length ? `<div class="pbtns">${btns.join('')}</div>` : '') + `</div>`;
@@ -2532,6 +2533,8 @@ function renderItemHead(it, isIssue) {
     (st ? `<span class="pill ${pillCls}">${esc(tx('iss.st.' + st, st))}</span>` : '') +
     (!isIssue && !st ? `<span class="pill wait">${esc(t('cand.unfiled'))}</span>` : '') +
     (!isIssue ? dfPill(it) : '') +
+    (isIssue && it.retryAfter && new Date(it.retryAfter) > new Date()
+      ? `<span class="pill def">${esc(t('iss.backoff'))}: ${esc(fmtTs(it.retryAfter))}</span>` : '') +
     `<span class="pill">${esc(tx('src.' + (it.source || ''), it.source || ''))}</span>` +
     (isIssue && it.verifyLevel != null ? `<span class="pill">L${it.verifyLevel}</span>` : '') +
     (isIssue && it.priority != null ? `<span class="pill">P${it.priority}</span>` : '') +
