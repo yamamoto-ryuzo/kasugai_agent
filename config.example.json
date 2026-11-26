@@ -49,6 +49,9 @@
   "intakeObserveMinutes": 10,
   "intakeObserveMinHits": 2,
   "observingExempt": ["manual", "derived"],
+  "stormBatchMin": 5,
+  "stormWindowMinutes": 10,
+  "maxConcurrentRuns": 4,
   "retentionDays": 0,
   "repos": [
     {

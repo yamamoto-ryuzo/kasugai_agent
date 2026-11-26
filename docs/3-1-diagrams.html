@@ -120,7 +120,10 @@ flowchart TD
     OHOLD -.-&gt;|再検出・duration 蓄積で&lt;br/&gt;次回 emit/reconcile が昇格判定| OBS
     RATE --&gt;|超過| DEFER[candidate に留め置く&lt;br/&gt;deferred=rate-limit&lt;br/&gt;課題は作らない]
     DEFER -.-&gt;|次回 reconcile で再試行| BF
-    RATE --&gt;|以内| NEW[課題レコード作成&lt;br/&gt;＋assess&lt;br/&gt;verifyLevel・受入条件・&lt;br/&gt;priority・自律可否&lt;br/&gt;起票＝本システムの課題&lt;br/&gt;（GitHub 登録は別機構）]
+    RATE --&gt;|以内| STORM{ストーム?&lt;br/&gt;同一 source+repo で&lt;br/&gt;stormWindowMinutes 内に&lt;br/&gt;stormBatchMin 件+の起票&lt;br/&gt;or open の storm 事案あり}
+    STORM --&gt;|集中| SAGG[一括事案へ集約&lt;br/&gt;（source=storm・gated・&lt;br/&gt;自律対象外）個別課題は作らず&lt;br/&gt;deferred=storm:&lt;事案key&gt;&lt;br/&gt;人レビューで採否]
+    SAGG -.-&gt;|事案が終端で&lt;br/&gt;個別起票に復帰| STORM
+    STORM --&gt;|非集中| NEW[課題レコード作成&lt;br/&gt;＋assess&lt;br/&gt;verifyLevel・受入条件・&lt;br/&gt;priority・自律可否&lt;br/&gt;起票＝本システムの課題&lt;br/&gt;（GitHub 登録は別機構）]
     BF[drain 定期 reconcile:&lt;br/&gt;candidate に課題が無ければ&lt;br/&gt;intake で補起票] -.-&gt;|自動起票の保証| NEW
     NEW --&gt; GATE{external 等&lt;br/&gt;自律対象外?}
     GATE --&gt;|no| Q[queued&lt;br/&gt;一覧の対応ボタンで&lt;br/&gt;人が dispatch]
@@ -130,6 +133,7 @@ flowchart TD
     CDH --&gt; INBOX
     IHOLD --&gt; INBOX
     OHOLD --&gt; INBOX
+    SAGG --&gt; INBOX
     Q --&gt; INBOX
     G --&gt; INBOX
     INBOX[候補一覧 = 判断待ち inbox&lt;br/&gt;未起票・gated・queued・failed のみ表示&lt;br/&gt;（実行中・終端の課題行は出さない）&lt;br/&gt;全行 対応/却下ボタンで人が一括判断:&lt;br/&gt;対応=起票/承認/再実行を兼ねた即時 dispatch&lt;br/&gt;（未起票は rate-limit を人判断で bypass）&lt;br/&gt;却下=rejected（未起票は起票して即 rejected）]

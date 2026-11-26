@@ -2305,8 +2305,9 @@ const tx = (key, raw) => { const v = t(key); return v === key ? String(raw ?? ''
 const dfPill = (c) => {
   if (!c.deferred) return '';
   const tag = String(c.deferred).split(':')[0];
-  const by = tag === 'inhibited' && c.inhibitedBy
-    ? ` ${esc(String(c.inhibitedBy).split(':').pop())}` : '';
+  const ref_ = tag === 'inhibited' ? c.inhibitedBy
+    : tag === 'storm' ? c.stormKey : '';
+  const by = ref_ ? ` ${esc(String(ref_).split(':').pop())}` : '';
   return `<span class="pill def">${esc(tx('cand.df.' + tag, tag))}${by}</span>`;
 };
 // data-tip 用に長文を丸める（ホバーポップアップが巨大化しないよう打切り）
@@ -2625,6 +2626,12 @@ function renderIssue(i) {
       (i.verifyNote ? `<div class="muted">${esc(t('iss.verifyNote'))}: ${esc(i.verifyNote)}</div>` : '') +
       `<div class="muted">retries: ${i.retries ?? 0} &middot; verifyBacks: ${i.verifyBacks ?? 0}</div>` +
       '</div>' : '';
+  const members = (i.stormMembers || []).length
+    ? '<div class="rcard" style="max-width:none"><b>' +
+      esc(t('iss.stormMembers', { count: i.stormMembers.length })) + '</b>' +
+      i.stormMembers.map((m) =>
+        `<div class="muted">${esc(m.title)} <span class="muted">${esc(m.key)}</span></div>`)
+        .join('') + '</div>' : '';
   const runs = (i.runs || []).length
     ? '<div class="rcard" style="max-width:none"><b>' + esc(t('iss.runs')) + '</b>' +
       (i.runs || []).map((r) =>
@@ -2632,7 +2639,7 @@ function renderIssue(i) {
         (r.sessionLog ? ` &middot; ${esc(r.sessionLog)}` : '') + '</div>').join('') +
       '</div>' : '';
   const box = document.getElementById('box');
-  box.innerHTML = renderItemHead(i, true) + info + runs + renderItemBody(i.body);
+  box.innerHTML = renderItemHead(i, true) + info + members + runs + renderItemBody(i.body);
   Viewer.drawMermaid(box);
   box.scrollTop = 0;
 }

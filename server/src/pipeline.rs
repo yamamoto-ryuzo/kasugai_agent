@@ -443,6 +443,115 @@ fn inhibited_by(cfg: &Value, issues: &[Value], cand: &Value) -> Option<String> {
     None
 }
 
+/// 課題ストームの一括事案化（detect-pipeline.mmd STORM。manual-a7e8d412）:
+/// 同一 source+repo で stormWindowMinutes（既定10分）内に stormBatchMin
+/// （既定5・0=無効）件以上の起票が集中したら、それ以上は個別起票せず
+/// 1件の「一括事案」課題（source="storm"・status=gated・人レビュー要求）
+/// へ集約する。open の storm 課題がある間は後続候補もその事案の
+/// stormMembers に追加する（上流障害サインを1件で見せる）。
+/// 戻り値は集約先 storm 課題の key。
+fn storm_aggregate(cfg: &Value, issues: &mut Vec<Value>, cand: &Value) -> Option<String> {
+    let min = cfg_f64(cfg, "stormBatchMin", 5.0) as i64;
+    if min <= 0 {
+        return None;
+    }
+    let win_min = cfg_f64(cfg, "stormWindowMinutes", 10.0) as i64;
+    let src = cand.get("source").and_then(|v| v.as_str()).unwrap_or("");
+    let repo = cand.get("repo").and_then(|v| v.as_str()).unwrap_or("");
+    let since = chrono::Utc::now() - chrono::Duration::minutes(win_min);
+    let detected = |i: &Value| {
+        i.get("detectedAt")
+            .and_then(|v| v.as_str())
+            .and_then(|v| chrono::DateTime::parse_from_rfc3339(v).ok())
+            .map(|t| t.with_timezone(&chrono::Utc))
+    };
+    // 集中判定: 窓内に起票された同一 source+repo の非 storm 課題数
+    let n = issues
+        .iter()
+        .filter(|i| {
+            i.get("storm").and_then(|v| v.as_bool()) != Some(true)
+                && i.get("source").and_then(|v| v.as_str()) == Some(src)
+                && i.get("repo").and_then(|v| v.as_str()) == Some(repo)
+                && detected(i).map(|t| t > since).unwrap_or(false)
+        })
+        .count();
+    // 集約先: open の storm 課題（同じ上流 source+repo）。人が終端へ落とす
+    // まで後続候補は全てこの事案へ入る
+    let open_storm = issues.iter().position(|i| {
+        i.get("storm").and_then(|v| v.as_bool()) == Some(true)
+            && is_open(i)
+            && i.get("repo").and_then(|v| v.as_str()) == Some(repo)
+            && i.get("stormSource").and_then(|v| v.as_str()) == Some(src)
+    });
+    if open_storm.is_none() && n < min as usize {
+        return None;
+    }
+    let csh = cand
+        .get("symptomHash")
+        .and_then(|v| v.as_str())
+        .map(String::from)
+        .unwrap_or_else(|| {
+            store::symptom_hash(
+                cand.get("title").and_then(|v| v.as_str()).unwrap_or(""),
+                cand.get("body").and_then(|v| v.as_str()).unwrap_or(""),
+            )
+        });
+    let ck = store::issue_key(src, repo, &csh);
+    let now = now_iso();
+    let pos = open_storm.unwrap_or_else(|| {
+        let skey = store::issue_key("storm", repo, &format!("{}", crate::util::rand_hex(4)));
+        issues.push(json!({
+            "key": skey,
+            "source": "storm",
+            "stormSource": src,
+            "repo": repo,
+            "slug": cand.get("slug").cloned().unwrap_or(json!(repo)),
+            "title": format!(
+                "課題ストーム: {} @ {} （{}分で{}件+の集中起票）",
+                src, repo, win_min, min),
+            "body": format!(
+                "同一 source+repo の課題が {} 分以内に {} 件以上起票されました。\n\
+                 上流障害または detector 暴走のサインです。\n\
+                 stormMembers の内容を確認して対応を判断してください。\n\
+                 open の間、後続の同桶候補はこの事案へ集約されます。",
+                win_min, min),
+            "symptomHash": format!("storm-{}", crate::util::rand_hex(4)),
+            "detectedAt": now, "lastSeen": now, "updatedAt": now,
+            "status": ST_GATED,
+            "autonomous": false,
+            "storm": true,
+            "stormMembers": [],
+            "labels": ["storm"],
+            "priority": 1,
+            "verifyLevel": 0,
+            "runs": [],
+        }));
+        issues.len() - 1
+    });
+    let skey = issues[pos]
+        .get("key")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let o = issues[pos].as_object_mut().unwrap();
+    let mut mem: Vec<Value> = o
+        .get("stormMembers")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    if !mem.iter().any(|m| m.get("key").and_then(|v| v.as_str()) == Some(ck.as_str())) {
+        mem.push(json!({
+            "key": ck,
+            "title": cand.get("title").and_then(|v| v.as_str()).unwrap_or(""),
+            "detectedAt": cand.get("detectedAt").cloned().unwrap_or(json!(now)),
+        }));
+        o.insert("stormMembers".into(), json!(mem));
+        o.insert("lastSeen".into(), json!(now));
+        o.insert("updatedAt".into(), json!(now));
+    }
+    Some(skey)
+}
+
 /// observing（保留観測。detect-pipeline.mmd OBS）の保留判定。
 /// 一過性 flap の起票を構造的に排除するため、detector 由来の candidate は
 /// 「N 分継続 or M 回再検出」を満たすまで課題化せず保留する:
@@ -602,6 +711,15 @@ fn intake_inner(root: &Path, cand: &Value, force: bool) -> IntakeOutcome {
         return IntakeOutcome::Deferred("rate-limit".into());
     }
 
+    // 課題ストームの一括事案化（detect-pipeline.mmd STORM）: 同一
+    // source+repo の集中起票は個別課題でなく1件の gated 事案へ集約する
+    if !force {
+        if let Some(skey) = storm_aggregate(&cfg, &mut issues, cand) {
+            store::save_issues(root, &issues);
+            return IntakeOutcome::Deferred(format!("storm:{}", skey));
+        }
+    }
+
     let now = now_iso();
     let mut issue = json!({
         "key": key,
@@ -662,7 +780,9 @@ fn intake_inner(root: &Path, cand: &Value, force: bool) -> IntakeOutcome {
 /// Err(ブロック中の key)。実機リソースの排他は locks.rs の責務。
 /// verify NG 差し戻しの指数バックオフ（retryAfter）中も Err を返す
 /// （verify NG ループを構造的に空転させない。manual-6c3ed946）。
-pub fn can_dispatch(issues: &[Value], key: &str) -> Result<(), String> {
+/// config.maxConcurrentRuns（既定4・0=無制限）超の同時 running|verifying
+/// でも Err（ブラスト半径上限。manual-a7e8d412）。
+pub fn can_dispatch(cfg: &Value, issues: &[Value], key: &str) -> Result<(), String> {
     let Some(issue) = issues
         .iter()
         .find(|x| x.get("key").and_then(|v| v.as_str()) == Some(key))
@@ -678,6 +798,22 @@ pub fn can_dispatch(issues: &[Value], key: &str) -> Result<(), String> {
             .unwrap_or(false)
         {
             return Err(format!("retry backoff until {}", ra));
+        }
+    }
+    // 同時実行上限（medik8s maxUnhealthy 相当のクォーラム）
+    let max_runs = cfg_f64(cfg, "maxConcurrentRuns", 4.0) as i64;
+    if max_runs > 0 {
+        let active = issues
+            .iter()
+            .filter(|x| {
+                matches!(
+                    x.get("status").and_then(|v| v.as_str()),
+                    Some(ST_RUNNING) | Some(ST_VERIFYING)
+                )
+            })
+            .count();
+        if active >= max_runs as usize {
+            return Err(format!("maxConcurrentRuns {} reached", max_runs));
         }
     }
     let repo = issue.get("repo").and_then(|v| v.as_str()).unwrap_or("");
@@ -1087,10 +1223,124 @@ mod tests {
             json!({"key": "b", "repo": "me/r", "status": ST_QUEUED, "retryAfter": past}),
             json!({"key": "c", "repo": "me/r", "status": ST_QUEUED}),
         ];
-        let e = can_dispatch(&issues, "a").unwrap_err();
+        let e = can_dispatch(&json!({}), &issues, "a").unwrap_err();
         assert!(e.contains("backoff"), "got: {}", e);
-        assert!(can_dispatch(&issues, "b").is_ok());
-        assert!(can_dispatch(&issues, "c").is_ok());
+        assert!(can_dispatch(&json!({}), &issues, "b").is_ok());
+        assert!(can_dispatch(&json!({}), &issues, "c").is_ok());
+    }
+
+    // ---- 課題ストームの一括事案化（ブラスト半径） ----
+
+    #[test]
+    fn storm_aggregates_burst_into_gated_case() {
+        let root = temp_root("storm");
+        std::fs::write(
+            root.join("config.json"),
+            r#"{"stormBatchMin": 3, "stormWindowMinutes": 10}"#,
+        )
+        .unwrap();
+        // 3件目まで個別起票（窓内集中で stormBatchMin=3 に到達）
+        for i in 1..=3 {
+            let mut c = det_cand(&format!("failure {}", i), "b");
+            c["hits"] = json!(99);
+            match intake(&root, &c) {
+                IntakeOutcome::Created(_) => {}
+                IntakeOutcome::Deferred(r) => panic!("issue {} deferred: {}", i, r),
+                _ => panic!("expected Created"),
+            }
+        }
+        // 4件目以降は一括事案へ集約（個別課題は作らない）
+        let mut c = det_cand("failure 4", "b");
+        c["hits"] = json!(99);
+        let skey = match intake(&root, &c) {
+            IntakeOutcome::Deferred(r) => {
+                assert!(r.starts_with("storm:"), "got {}", r);
+                r.strip_prefix("storm:").unwrap().to_string()
+            }
+            _ => panic!("expected storm deferral"),
+        };
+        let storm = store::load_issues(&root)
+            .into_iter()
+            .find(|i| i["key"] == json!(skey))
+            .expect("storm issue");
+        // 一括事案は gated（人レビュー要求）で自律対象外
+        assert_eq!(storm["status"], json!(ST_GATED));
+        assert_eq!(storm["storm"], json!(true));
+        assert_eq!(storm["autonomous"], json!(false));
+        assert_eq!(storm["stormMembers"].as_array().unwrap().len(), 1);
+        // 後続候補も open の間は同じ事案へ集約される
+        let mut c2 = det_cand("failure 5", "b");
+        c2["hits"] = json!(99);
+        match intake(&root, &c2) {
+            IntakeOutcome::Deferred(r) => assert_eq!(r, format!("storm:{}", skey)),
+            _ => panic!("expected aggregation to same storm"),
+        }
+        let storm = store::load_issues(&root)
+            .into_iter()
+            .find(|i| i["key"] == json!(skey))
+            .unwrap();
+        assert_eq!(storm["stormMembers"].as_array().unwrap().len(), 2);
+        // storm 事案が終端（rejected）なら集約終了 → 個別起票に戻る
+        // （stormBatchMin=3 の集中は継続するので新 storm が立つこともある。
+        //  ここでは窓外として検証するため detectedAt を過去にずらす）
+        let mut iss = store::load_issues(&root);
+        for i in iss.iter_mut() {
+            if i["key"] == json!(skey) {
+                i["status"] = json!(ST_REJECTED);
+            } else {
+                i["detectedAt"] = json!("2020-01-01T00:00:00.000Z");
+            }
+        }
+        store::save_issues(&root, &iss);
+        let mut c3 = det_cand("failure 6", "b");
+        c3["hits"] = json!(99);
+        match intake(&root, &c3) {
+            IntakeOutcome::Created(_) => {}
+            IntakeOutcome::Deferred(r) => panic!("expected Created, got {}", r),
+            _ => panic!("expected Created"),
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn storm_disabled_when_min_zero() {
+        let root = temp_root("storm0");
+        std::fs::write(
+            root.join("config.json"),
+            r#"{"stormBatchMin": 0}"#,
+        )
+        .unwrap();
+        for i in 1..=6 {
+            let mut c = det_cand(&format!("failure {}", i), "b");
+            c["hits"] = json!(99);
+            match intake(&root, &c) {
+                IntakeOutcome::Created(_) => {}
+                IntakeOutcome::Deferred(r) => panic!("issue {} deferred: {}", i, r),
+                _ => panic!("expected Created"),
+            }
+        }
+        assert!(store::load_issues(&root).iter().all(|i| {
+            i.get("storm").and_then(|v| v.as_bool()) != Some(true)
+        }));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn can_dispatch_enforces_max_concurrent_runs() {
+        let cfg = json!({"maxConcurrentRuns": 2});
+        let mk = |key: &str, status: &str, repo: &str| {
+            json!({"key": key, "status": status, "repo": repo})
+        };
+        let issues = vec![
+            mk("r1", ST_RUNNING, "a/x"),
+            mk("r2", ST_VERIFYING, "b/y"),
+            mk("q", ST_QUEUED, "c/z"),
+        ];
+        let e = can_dispatch(&cfg, &issues, "q").unwrap_err();
+        assert!(e.contains("maxConcurrentRuns"), "got: {}", e);
+        // 0 = 無制限
+        let cfg0 = json!({"maxConcurrentRuns": 0});
+        assert!(can_dispatch(&cfg0, &issues, "q").is_ok());
     }
 
     #[test]
@@ -1101,13 +1351,13 @@ mod tests {
             json!({"key": "c", "repo": "me/r2", "status": ST_QUEUED}),
         ];
         // 同一 repo に running 課題 → Err(blocked by <key>)
-        let e = can_dispatch(&issues, "b").unwrap_err();
+        let e = can_dispatch(&json!({}), &issues, "b").unwrap_err();
         assert!(e.starts_with("blocked by"), "got: {}", e);
         // 他 repo の queued は影響なし
-        assert!(can_dispatch(&issues, "c").is_ok());
+        assert!(can_dispatch(&json!({}), &issues, "c").is_ok());
         // queued 以外・未存在は Err
-        assert!(can_dispatch(&issues, "a").is_err());
-        assert!(can_dispatch(&issues, "missing").is_err());
+        assert!(can_dispatch(&json!({}), &issues, "a").is_err());
+        assert!(can_dispatch(&json!({}), &issues, "missing").is_err());
     }
 
     #[test]

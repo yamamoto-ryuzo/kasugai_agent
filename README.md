@@ -164,7 +164,10 @@ flowchart TD
     OHOLD -.->|再検出・duration 蓄積で<br/>次回 emit/reconcile が昇格判定| OBS
     RATE -->|超過| DEFER[candidate に留め置く<br/>deferred=rate-limit<br/>課題は作らない]
     DEFER -.->|次回 reconcile で再試行| BF
-    RATE -->|以内| NEW[課題レコード作成<br/>＋assess<br/>verifyLevel・受入条件・<br/>priority・自律可否<br/>起票＝本システムの課題<br/>（GitHub 登録は別機構）]
+    RATE -->|以内| STORM{ストーム?<br/>同一 source+repo で<br/>stormWindowMinutes 内に<br/>stormBatchMin 件+の起票<br/>or open の storm 事案あり}
+    STORM -->|集中| SAGG[一括事案へ集約<br/>（source=storm・gated・<br/>自律対象外）個別課題は作らず<br/>deferred=storm:<事案key><br/>人レビューで採否]
+    SAGG -.->|事案が終端で<br/>個別起票に復帰| STORM
+    STORM -->|非集中| NEW[課題レコード作成<br/>＋assess<br/>verifyLevel・受入条件・<br/>priority・自律可否<br/>起票＝本システムの課題<br/>（GitHub 登録は別機構）]
     BF[drain 定期 reconcile:<br/>candidate に課題が無ければ<br/>intake で補起票] -.->|自動起票の保証| NEW
     NEW --> GATE{external 等<br/>自律対象外?}
     GATE -->|no| Q[queued<br/>一覧の対応ボタンで<br/>人が dispatch]
@@ -174,6 +177,7 @@ flowchart TD
     CDH --> INBOX
     IHOLD --> INBOX
     OHOLD --> INBOX
+    SAGG --> INBOX
     Q --> INBOX
     G --> INBOX
     INBOX[候補一覧 = 判断待ち inbox<br/>未起票・gated・queued・failed のみ表示<br/>（実行中・終端の課題行は出さない）<br/>全行 対応/却下ボタンで人が一括判断:<br/>対応=起票/承認/再実行を兼ねた即時 dispatch<br/>（未起票は rate-limit を人判断で bypass）<br/>却下=rejected（未起票は起票して即 rejected）]
@@ -206,6 +210,17 @@ flowchart TD
   抑制中は原因課題の `inhibits` に候補 key を追記し、原因課題が終端へ
   落ちると次回 emit で自動解除される。候補が `inhibitedBy:<issueKey>` を
   明示する emit でも抑制できる
+- **課題ストームの一括事案化**: 同一 `source`+`repo` で
+  `stormWindowMinutes`（既定10分）内に `stormBatchMin`（既定5・0=無効）
+  件以上の起票が集中したら、以後は個別課題を作らず1件の一括事案
+  （`source:"storm"`・`status:"gated"`・自律対象外）へ候補を集約する
+  （上流障害・detector 暴走のサインを1件で人レビューへ）。
+  集約された候補は事案の `stormMembers` に記録され、
+  `deferred:"storm:<事案key>"` で一覧に表示される。事案が終端へ
+  落ちると個別起票に復帰する
+- **同時実行数の上限**: `maxConcurrentRuns`（既定4・0=無制限）を超える
+  running|verifying の課題がある間は `can_dispatch` が dispatch を止める
+  （同一 repo 排他に加えた全体クォーラム）
 - **observing（保留観測）**: 一過性 flap の起票を排除するため、detector
   由来の candidate は「`intakeObserveMinutes`（既定10分）継続 or
   `intakeObserveMinHits`（既定2）回再検出」を満たすまで課題化せず

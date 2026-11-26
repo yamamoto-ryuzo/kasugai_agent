@@ -170,7 +170,7 @@ pub async fn dispatch_issue(app: &Shared, key: &str) -> Result<Value, String> {
         return Err("already running".into());
     }
     let issues = store::load_issues(&app.root);
-    pipeline::can_dispatch(&issues, key)?;
+    pipeline::can_dispatch(&app.cfg().await, &issues, key)?;
     let issue = issues
         .into_iter()
         .find(|i| key_of(i) == key)
@@ -1460,7 +1460,7 @@ mod tests {
         let ahead = (t.with_timezone(&chrono::Utc) - chrono::Utc::now()).num_seconds();
         assert!(ahead > 60 && ahead <= 5 * 60 + 30, "ahead={}", ahead);
         let issues = store::load_issues(&root);
-        let e = pipeline::can_dispatch(&issues, key).unwrap_err();
+        let e = pipeline::can_dispatch(&json!({}), &issues, key).unwrap_err();
         assert!(e.contains("backoff"), "got: {}", e);
         let _ = std::fs::remove_dir_all(&root);
     }

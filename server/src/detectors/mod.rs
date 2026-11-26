@@ -64,6 +64,7 @@ fn set_candidate_deferred(root: &Path, key: &str, deferred: Option<&str>) {
                 if o.remove("deferred").is_some()
                     | o.remove("deferredAt").is_some()
                     | o.remove("inhibitedBy").is_some()
+                    | o.remove("stormKey").is_some()
                 {
                     touched = true;
                 }
@@ -99,12 +100,15 @@ fn patch_candidate(root: &Path, key: &str, fields: &[(&str, Value)]) {
 
 /// Deferred の理由文字列（"tag:detail"）を tag に正規化して
 /// set_candidate_deferred に渡す。tag=inhibited の detail は
-/// 原因課題の key として inhibitedBy へ併記する
+/// 原因課題の key として inhibitedBy へ、tag=storm の detail は
+/// 集約先事案の key として stormKey へ併記する
 fn mark_deferred(root: &Path, key: &str, reason: &str) {
     let (tag, detail) = reason.split_once(':').unwrap_or((reason, ""));
     set_candidate_deferred(root, key, Some(tag));
     if tag == "inhibited" && !detail.is_empty() {
         patch_candidate(root, key, &[("inhibitedBy", json!(detail))]);
+    } else if tag == "storm" && !detail.is_empty() {
+        patch_candidate(root, key, &[("stormKey", json!(detail))]);
     }
 }
 
