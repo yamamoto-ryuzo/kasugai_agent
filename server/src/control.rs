@@ -3559,6 +3559,12 @@ pub async fn event_loop(app: Shared, mut rx: tokio::sync::mpsc::UnboundedReceive
                 app.persist_chats().await;
             }
             CtrlEvt::TurnStart { id, turn, text } => {
+                // busy 立ち上がりを即時記録する。瞬時応答する実行体では
+                // Changed 到着前に busy=false へ戻り、notify_chat の
+                // busy_prev エッジ検出が立ち上がりを見ないまま
+                // on_chat_done（親への集約等）を取りこぼすため
+                // （同一チャネルの順序で TurnStart は Changed より先に処理される）
+                app.busy_prev.lock().await.insert(id, true);
                 let chats = app.chats.lock().await;
                 if let Some(s) = chats.get(&id) {
                     s.snaps.lock().unwrap().begin_turn(turn, &text);
