@@ -335,5 +335,6 @@
   "cand.df.rate-limit": "zurückgestellt (rate-limit)",
   "cand.df.observing": "Beobachtung",
   "cand.df.cooldown": "Abklingzeit",
+  "cand.df.inhibited": "unterdrückt",
   "iss.backoff": "Backoff"
 }

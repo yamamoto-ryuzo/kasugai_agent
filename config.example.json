@@ -39,6 +39,13 @@
   "intakeMaxPerHour": 0,
   "intakeCooldownMinutes": 60,
   "intakeCooldownBy": ["source", "repo", "kind"],
+  "inhibitRules": [
+    {
+      "cause": {"source": "ci-failure", "kind": "build"},
+      "effect": {"source": "ci-failure", "kind": "test"},
+      "match": ["repo"]
+    }
+  ],
   "intakeObserveMinutes": 10,
   "intakeObserveMinHits": 2,
   "observingExempt": ["manual", "derived"],

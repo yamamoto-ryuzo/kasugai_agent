@@ -335,5 +335,6 @@
   "cand.df.rate-limit": "保留（rate-limit）",
   "cand.df.observing": "観測中",
   "cand.df.cooldown": "クールダウン",
+  "cand.df.inhibited": "抑制中",
   "iss.backoff": "バックオフ"
 }

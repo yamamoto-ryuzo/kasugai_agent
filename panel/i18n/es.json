@@ -335,5 +335,6 @@
   "cand.df.rate-limit": "diferido (rate-limit)",
   "cand.df.observing": "observando",
   "cand.df.cooldown": "enfriamiento",
+  "cand.df.inhibited": "inhibido",
   "iss.backoff": "espera"
 }

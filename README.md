@@ -151,8 +151,11 @@ flowchart TD
     EXIST -->|yes| BUMP[既存課題の<br/>lastSeen 更新のみ]
     EXIST -->|no| CD{クールダウン?<br/>同一バケット<br/>intakeCooldownBy<br/>（既定 source+repo+kind）の<br/>reject/verify NG から<br/>intakeCooldownMinutes 未満}
     CD -->|抑止中| CDH[candidate に留め置く<br/>deferred=cooldown<br/>課題は作らない]
-    CDH -.->|窓経過で再試行| OBS
-    CD -->|経過| OBS{observing 昇格?<br/>intakeObserveMinutes 継続<br/>or intakeObserveMinHits 回<br/>再検出<br/>（manual/derived は即起票）}
+    CDH -.->|窓経過で再試行| INH
+    CD -->|経過| INH{inhibition?<br/>config.inhibitRules の<br/>原因課題が open<br/>（cause/effect matcher +<br/>match 属性等値。<br/>inhibitedBy 明示も可）}
+    INH -->|抑制中| IHOLD[candidate に留め置く<br/>deferred=inhibited<br/>inhibitedBy=原因課題<br/>原因課題の inhibits に追記]
+    IHOLD -.->|原因課題が終端で<br/>次回 emit が解除| INH
+    INH -->|非抑制| OBS{observing 昇格?<br/>intakeObserveMinutes 継続<br/>or intakeObserveMinHits 回<br/>再検出<br/>（manual/derived は即起票）}
     OBS -->|未昇格<br/>単発・窓内消滅| OHOLD[candidate に留め置く<br/>deferred=observing<br/>課題は作らない]
     OBS -->|昇格| RATE{起票レート超過?<br/>intakeMaxPerHour<br/>source+repo 単位<br/>0=無制限}
     OHOLD -.->|再検出・duration 蓄積で<br/>次回 emit/reconcile が昇格判定| OBS
@@ -165,6 +168,7 @@ flowchart TD
     GATE -->|yes| G[gated<br/>候補一覧で人が<br/>dispatch 判断]
     DEFER --> INBOX
     CDH --> INBOX
+    IHOLD --> INBOX
     OHOLD --> INBOX
     Q --> INBOX
     G --> INBOX
@@ -183,6 +187,14 @@ flowchart TD
   `retryAfter`（`verifyBackoffMinutes` 既定5分 × 2^(verifyBacks-1)、上限
   `verifyBackoffMaxMinutes` 既定60分）を記録し、経過前の再 dispatch は
   `can_dispatch` が止める。`verifyBackLimit` 超過は failed（要人対応）
+- **inhibition（課題間抑制）**: `config.inhibitRules`（Alertmanager の
+  inhibit_rules 相当）。`cause` matcher に合う原因課題が open（終端以外）
+  の間、`effect` matcher に合う下流候補は別課題として起票せず
+  `deferred:"inhibited"`・`inhibitedBy=<原因課題key>` で留め置く。
+  `match`（既定 `["repo"]`）は原因課題と候補で値が一致すべき属性。
+  抑制中は原因課題の `inhibits` に候補 key を追記し、原因課題が終端へ
+  落ちると次回 emit で自動解除される。候補が `inhibitedBy:<issueKey>` を
+  明示する emit でも抑制できる
 - **observing（保留観測）**: 一過性 flap の起票を排除するため、detector
   由来の candidate は「`intakeObserveMinutes`（既定10分）継続 or
   `intakeObserveMinHits`（既定2）回再検出」を満たすまで課題化せず

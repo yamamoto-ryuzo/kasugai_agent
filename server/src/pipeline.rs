@@ -331,6 +331,74 @@ fn bucket_cooling(cfg: &Value, issues: &[Value], cand: &Value) -> bool {
     })
 }
 
+/// 課題が open（終端 = done/failed/rejected/dropped 以外）か
+fn is_open(issue: &Value) -> bool {
+    !matches!(
+        issue.get("status").and_then(|v| v.as_str()),
+        Some(ST_DONE) | Some(ST_FAILED) | Some(ST_REJECTED) | Some(ST_DROPPED)
+    )
+}
+
+/// inhibition（detect-pipeline.mmd INH。Alertmanager inhibit_rules 相当）:
+/// 原因課題が open の間、その影響で出る下流症状を別課題として起票しない
+/// （例: ビルド破壊課題 open 中の派生 CI-failure）。
+/// ルールは config.inhibitRules:
+///   [{"cause": {source?,repo?,kind?,slug?}, "effect": {...同}, "match": ["repo"]}]
+/// cause/effect は属性等値の matcher（未指定属性はワイルドカード）、
+/// match は原因課題と下流候補の間で値が一致すべき属性
+/// （Alertmanager の equal。既定 ["repo"]）。
+/// 候補が inhibitedBy:<issueKey> を明示する場合はその課題が open なら抑制。
+/// 戻り値は抑制している原因課題の key（抑制しないなら None）。
+fn inhibited_by(cfg: &Value, issues: &[Value], cand: &Value) -> Option<String> {
+    // 明示指定: candidate が原因課題 key を名指しする
+    if let Some(k) = cand.get("inhibitedBy").and_then(|v| v.as_str()) {
+        if !k.is_empty() {
+            return issues
+                .iter()
+                .find(|i| i.get("key").and_then(|v| v.as_str()) == Some(k) && is_open(i))
+                .map(|_| k.to_string());
+        }
+    }
+    let matcher = |m: &Value, v: &Value| -> bool {
+        ["source", "repo", "slug", "kind", "severity"]
+            .iter()
+            .all(|attr| match m.get(*attr).and_then(|x| x.as_str()) {
+                Some(w) if !w.is_empty() => {
+                    v.get(*attr).and_then(|x| x.as_str()).unwrap_or("") == w
+                }
+                _ => true,
+            })
+    };
+    for rule in cfg_arr(cfg, "inhibitRules") {
+        let effect = rule.get("effect").cloned().unwrap_or(json!({}));
+        if !matcher(&effect, cand) {
+            continue;
+        }
+        let match_attrs: Vec<String> = rule
+            .get("match")
+            .and_then(|v| v.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|x| x.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_else(|| vec!["repo".to_string()]);
+        let cause = rule.get("cause").cloned().unwrap_or(json!({}));
+        let found = issues.iter().find(|i| {
+            is_open(i)
+                && matcher(&cause, i)
+                && match_attrs.iter().all(|attr| {
+                    cand.get(attr.as_str()).and_then(|v| v.as_str()).unwrap_or("")
+                        == i.get(attr.as_str()).and_then(|v| v.as_str()).unwrap_or("")
+                })
+        });
+        if let Some(i) = found {
+            return i.get("key").and_then(|v| v.as_str()).map(String::from);
+        }
+    }
+    None
+}
+
 /// observing（保留観測。detect-pipeline.mmd OBS）の保留判定。
 /// 一過性 flap の起票を構造的に排除するため、detector 由来の candidate は
 /// 「N 分継続 or M 回再検出」を満たすまで課題化せず保留する:
@@ -444,6 +512,30 @@ fn intake_inner(root: &Path, cand: &Value, force: bool) -> IntakeOutcome {
     // reject/verify NG で終端へ落ちた直後の再 emit は課題を作らない
     if !force && bucket_cooling(&cfg, &issues, cand) {
         return IntakeOutcome::Deferred("cooldown".into());
+    }
+
+    // inhibition（detect-pipeline.mmd INH）: 原因課題が open の間は下流症状を
+    // 別課題にしない。抑制中は原因課題の inhibits に候補を追記し、
+    // candidate は inhibitedBy=<原因課題key> として一覧に表示する
+    if !force {
+        if let Some(cause_key) = inhibited_by(&cfg, &issues, cand) {
+            if let Some(ci) = issues.iter_mut().find(|i| {
+                i.get("key").and_then(|v| v.as_str()) == Some(cause_key.as_str())
+            }) {
+                let o = ci.as_object_mut().unwrap();
+                let mut inh: Vec<Value> = o
+                    .get("inhibits")
+                    .and_then(|v| v.as_array())
+                    .cloned()
+                    .unwrap_or_default();
+                if !inh.iter().any(|v| v.as_str() == Some(key.as_str())) {
+                    inh.push(json!(key));
+                    o.insert("inhibits".into(), json!(inh));
+                    store::save_issues(root, &issues);
+                }
+            }
+            return IntakeOutcome::Deferred(format!("inhibited:{}", cause_key));
+        }
     }
 
     // observing（detect-pipeline.mmd OBS）: 一過性症状を即起票しない。
@@ -735,6 +827,108 @@ mod tests {
             IntakeOutcome::Created(_) => {}
             IntakeOutcome::Deferred(r) => panic!("cooldown expired, got {}", r),
             _ => panic!("expected Created after cooldown window"),
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // ---- inhibition（原因課題 open 中の下流抑制） ----
+
+    #[test]
+    fn inhibition_defers_downstream_while_cause_open() {
+        let root = temp_root("inhibit");
+        std::fs::write(
+            root.join("config.json"),
+            r#"{"inhibitRules": [{"cause": {"kind": "build"},
+                "effect": {"kind": "test"}, "match": ["repo"]}]}"#,
+        )
+        .unwrap();
+        // 原因課題（kind=build・queued）が open
+        store::save_issues(
+            &root,
+            &[json!({
+                "key": "ci-failure:me/repo:cause",
+                "source": "ci-failure", "repo": "me/repo", "kind": "build",
+                "symptomHash": "cause", "status": ST_QUEUED,
+                "updatedAt": now_iso(),
+            })],
+        );
+        let mut c = det_cand("test job failed", "b");
+        c["kind"] = json!("test");
+        c["hits"] = json!(99);
+        match intake(&root, &c) {
+            IntakeOutcome::Deferred(r) => {
+                assert_eq!(r, "inhibited:ci-failure:me/repo:cause")
+            }
+            _ => panic!("expected inhibited deferral"),
+        }
+        // 原因課題の inhibits に候補が追記される
+        let cause = &store::load_issues(&root)[0];
+        let want = store::issue_key(
+            "ci-failure",
+            "me/repo",
+            &store::symptom_hash("test job failed", "b"),
+        );
+        assert_eq!(cause["inhibits"], json!([want]));
+        // 原因課題が終端なら抑制解除 → 起票できる
+        store::save_issues(
+            &root,
+            &[json!({
+                "key": "ci-failure:me/repo:cause",
+                "source": "ci-failure", "repo": "me/repo", "kind": "build",
+                "symptomHash": "cause", "status": ST_DONE,
+                "updatedAt": now_iso(),
+            })],
+        );
+        match intake(&root, &c) {
+            IntakeOutcome::Created(_) => {}
+            IntakeOutcome::Deferred(r) => panic!("expected Created, got {}", r),
+            _ => panic!("expected Created"),
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn inhibition_explicit_inhibited_by_and_repo_mismatch() {
+        let root = temp_root("inhibit2");
+        // 明示 inhibitedBy: open 課題を名指し
+        store::save_issues(
+            &root,
+            &[json!({
+                "key": "manual:me/repo:parent",
+                "source": "manual", "repo": "me/repo",
+                "symptomHash": "parent", "status": ST_RUNNING,
+                "updatedAt": now_iso(),
+            })],
+        );
+        let mut c = det_cand("child symptom", "b");
+        c["inhibitedBy"] = json!("manual:me/repo:parent");
+        match intake(&root, &c) {
+            IntakeOutcome::Deferred(r) => assert_eq!(r, "inhibited:manual:me/repo:parent"),
+            _ => panic!("expected inhibited"),
+        }
+        // 存在しない・終端の key は抑制しない
+        let mut c2 = det_cand("other symptom", "b");
+        c2["inhibitedBy"] = json!("manual:me/repo:gone");
+        c2["hits"] = json!(99);
+        match intake(&root, &c2) {
+            IntakeOutcome::Created(_) => {}
+            IntakeOutcome::Deferred(r) => panic!("expected Created, got {}", r),
+            _ => panic!("expected Created"),
+        }
+        // match 属性（repo）不一致は抑制しない
+        std::fs::write(
+            root.join("config.json"),
+            r#"{"inhibitRules": [{"cause": {"source": "ci-failure"},
+                "effect": {"source": "ci-failure"}, "match": ["repo"]}]}"#,
+        )
+        .unwrap();
+        let mut c3 = det_cand("other repo failure", "b");
+        c3["repo"] = json!("other/repo");
+        c3["hits"] = json!(99);
+        match intake(&root, &c3) {
+            IntakeOutcome::Created(_) => {}
+            IntakeOutcome::Deferred(r) => panic!("repo mismatch, got {}", r),
+            _ => panic!("expected Created"),
         }
         let _ = std::fs::remove_dir_all(&root);
     }
