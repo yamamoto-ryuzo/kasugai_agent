@@ -169,7 +169,12 @@ flowchart TD
   source+repo 単位の新規起票は課題を作らず candidate に `deferred:"rate-limit"`
   を付けて留め置く。drain の reconcile が窓の空いた次回以降に補起票する
   （detector 暴走時の queued 溢れ防止）
-- GitHub Issue は `gh issue list` ポーリング。`autoTrigger` または `devin` ラベルで候補化
+- GitHub Issue は `gh issue list` ポーリングで open issue を全件候補化
+  （ラベル選別しない）。**起票＝本システムの課題（issues.json）の作成**を指し、
+  GitHub Issue への登録は別機構として後続検討する
+- GitHub の既存 Issue（open+closed 全件）の一括取込は
+  `kasugai-agent --import-github` または `POST /api/control/import-github`。
+  closed は終端課題として起票する（COMPLETED→done / NOT_PLANNED→rejected）
 
 ### 5.2 assess
 
@@ -358,7 +363,7 @@ flowchart LR
 - `POST /api/repos` — 監視リポジトリ登録（`{path, slug?}` を `config.json` の
   `repos` へ追記。SSE `repos` で全パネルへ即時反映）
 - `POST /api/repos/update` — 登録済み repo の設定更新
-  （`autoTrigger` / `triggerLabel` / `requirePushApproval` → `config.json` へ反映）
+  （`requirePushApproval` → `config.json` へ反映）
 - `POST /api/repos/remove` — `config.repos` からの登録解除
 - `GET /api/fs/dirs?path=` — 登録フォームの path 選択用。指定ディレクトリ直下の
   サブディレクトリと `.git` 有無を返す（`path` 省略時はドライブルート一覧。
@@ -599,10 +604,10 @@ doc browser / フォルダツリー、それ以外（右ペインに出すもの
   サブディレクトリを辿る簡易ピッカー。`.git` 付きにはバッジを表示）。
   `config.json` の `repos` へ追記され、SSE push で左ペインの選択肢へ
   即時反映される。slug 省略時は `git remote get-url origin` から推定する
-  （推定不能時はディレクトリ名）。新規登録リポジトリは `autoTrigger:false`・
+  （推定不能時はディレクトリ名）。新規登録リポジトリは
   `requirePushApproval:true` の保守的既定で追加する。
   `GET /api/repos` の一覧をカード表示し、登録済みは
-  `autoTrigger` / `triggerLabel` / `requirePushApproval` を編集して
+  `requirePushApproval` を編集して
   `POST /api/repos/update` で保存、`POST /api/repos/remove` で登録解除する。
   IDE ワークスペース直下の `.git` 付きディレクトリは「IDE管理下」バッジ付きで
   一覧し、登録ボタンで `POST /api/repos` へ流せる。
@@ -979,6 +984,7 @@ kasugai_agent/
       store.rs         # 課題系 JSON 永続化（issues/candidates/work-queue）・issue key/symptomHash
       runner.rs        # 課題 run の実行体（dispatch→run→verify→push・retry 差し戻し。drain は reconcile/再開のみ）
       verify.rs        # L0-L4 検証 prompt・kasugai-verify 結果判定・差し戻し
+      housekeep.rs     # drain 定期 retention 掃除（housekeep.mmd・§11）
       knowledge.rs     # 知見蓄積 → proposals
       proposals.rs     # proposals 格納・vet（機械検査・採否の前提）
       github.rs        # gh CLI ラッパ
