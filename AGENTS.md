@@ -90,6 +90,10 @@
 
 ## 起票と dispatch（人ゲート）
 
+- **起票＝本システムの課題（issues.json）の作成**。GitHub Issue への登録は
+  別機構（後続検討）。GitHub Issue は open が全件候補化され、closed は
+  `--import-github` / `POST /api/control/import-github` の一括取込で
+  終端起票する（COMPLETED→done / NOT_PLANNED→rejected）
 - **起票は自動・dispatch は人判断のみ**: detector / 派生 / manual の課題は
   intake で自動起票（queued）されるが、実行の開始は candidates /
   ISSUES 一覧の「対応」ボタンだけが行う。drain は補起票・中断 verify の

@@ -877,7 +877,7 @@ function renderEmpty() {
   lastMsgs = []; endRevise();
   document.getElementById('restorebtn').style.display = 'none';
   document.getElementById('delbtn').style.display = 'none';
-  document.getElementById('ctitle').classList.remove('withdel');
+  document.getElementById('ctitlerow').classList.remove('withdel');
   document.getElementById('repoask').style.display = 'none';
   const alabel = agentRows.find((a) => a.id === activeAgent)?.label || 'AI';
   document.getElementById('ctitle').textContent = t('chat.new');
@@ -935,7 +935,7 @@ async function loadChat(toEnd) {         // toEnd: 選択時など末尾（最�
     !j.backPending && !j.needsHuman &&
     j.doneKind !== 'ng' && j.doneKind !== 'unverified';
   document.getElementById('delbtn').style.display = deletable ? '' : 'none';
-  document.getElementById('ctitle').classList.toggle('withdel', deletable);
+  document.getElementById('ctitlerow').classList.toggle('withdel', deletable);
   document.getElementById('restorebtn').style.display =
     (j.snapPoints || []).length ? '' : 'none';
   lastMsgs = j.messages || [];
