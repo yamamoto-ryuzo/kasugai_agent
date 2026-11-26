@@ -1,0 +1,22 @@
+---
+title: 環境起動（docs ナビの起動ボタン）
+---
+flowchart TD
+    BTN[docs ナビの起動ボタン] --> UP{対象ポート応答?}
+    UP -->|yes| OPEN[そのまま対象ポートを開く]
+    UP -->|no| API[POST /api/control/launch]
+    API --> APIOK{応答?}
+    APIOK -->|yes| PS[detached spawn<br/>server/target/release/kasugai-agent.exe<br/>無ければ現行 exe・PORT=8586]
+    APIOK -->|API 無し・失敗<br/>（control 全停止・旧版・静的配信）| PROTO[kasugai-agent:launch?port=..<br/>へ遷移（カスタムプロトコル）]
+    PROTO --> PROTREG{protocol 登録済み?<br/>exe が起動時に HKCU 自己登録}
+    PROTREG -->|yes| URI[exe --uri で起動<br/>同一 launch_env ロジックへ]
+    PROTREG -->|未登録| WARN[起動不可をボタン上に表示<br/>exe または npm run dev が必要]
+    URI --> PS
+    PS --> WAIT[ブラウザ側で対象ポートの<br/>応答をポーリング]
+    WAIT -->|応答 or タイムアウト| OPEN
+
+    subgraph COLD[冷起動の入口（control 全停止時）]
+        TS[ログオン自動起動<br/>HKCU Run キー KasugaiAgentDispatcher<br/>ログオンで prod 常駐<br/>--install-task / パネル設定で登録]
+        MANUAL[exe 直起動 / cargo run<br/>（npm run dev）]
+        PROTO2[kasugai-agent:// プロトコル<br/>（本図のフォールバック経路）]
+    end

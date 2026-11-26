@@ -101,8 +101,13 @@ export class AcpChat {
 
   ensureProc() {
     if (this.proc) return;
+    // devin acp は実親ではなく WINDSURF_EXT_HOST_PID の pid を親として監視する。
+    // control が IDE 配下で起動された経緯で死んだホスト pid を継承していると、
+    // spawn した実行体が「親死亡」を検知して即自死するため env から除去する
+    const env = { ...process.env };
+    delete env.WINDSURF_EXT_HOST_PID;
     this.proc = spawn(this.agent.exe, this.agent.args ?? [], {
-      cwd: this.cwd, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true,
+      cwd: this.cwd, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, env,
     });
     this.onConsole('sys',
       `[spawn] ${this.agent.exe} ${(this.agent.args ?? []).join(' ')}` +

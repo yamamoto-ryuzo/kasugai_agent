@@ -3,12 +3,12 @@ title: SkillOps/AgentOps
 ---
 flowchart LR
     U[管理 chat / 手動操作] --> RT[router<br/>入力→対象特定]
-    SR[skill registry<br/>src/registry/skills.mjs]
-    AR[agent registry<br/>src/registry/agents.mjs]
-    PR[proposals.mjs<br/>skills/prompts/config 差分生成]
+    SR[skill registry<br/>server/src/registry/skills.rs]
+    AR[agent registry<br/>server/src/registry/agents.rs]
+    PR[proposals.rs<br/>skills/prompts/config 差分生成]
     HG{人の採否}
     CONF[.devin/skills<br/>prompts/config]
-    PIPE[pipeline.mjs<br/>状態遷移]
+    PIPE[pipeline.rs<br/>状態遷移]
     RUN[runner/worker]
     VER[verify]
     EV[evidence/]

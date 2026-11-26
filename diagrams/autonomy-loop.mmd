@@ -1,0 +1,16 @@
+---
+title: 自律ループ全景（meta-loop 含む）
+---
+flowchart TB
+    D[detectors<br/>課題候補 emit] --> N[normalize + dedupe]
+    N --> A[assess<br/>verifyLevel 決定]
+    A --> G{人ゲート}
+    G -->|却下| X[rejected]
+    G -->|承認| R[dispatch<br/>runner = 接続AI]
+    R --> V[verify L0〜L4<br/>実機検証・証跡・push]
+    V -->|NG 差し戻し| R
+    V -->|合格| K[learn<br/>SKILL 蓄積 → .devin/skills/<br/>（draft・mermaid 図を必ず明示）]
+    K --> P[proposals<br/>skills / prompts / config]
+    P --> G
+    G -->|採用| SELF[agent 自身を更新]
+    SELF -.->|次のループを改良| N

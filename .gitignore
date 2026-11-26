@@ -28,3 +28,12 @@ Thumbs.db
 node_modules/
 chat-snapshots/
 .tmp_verify/
+
+# Rust dev/ビルド成果物
+server/target/
+
+# CDN 適用アセット・配布物（ローカル生成）
+assets/
+dist/
+.verify-tmp/
+control.log

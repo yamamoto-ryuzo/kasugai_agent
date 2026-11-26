@@ -2,7 +2,7 @@
 title: 自動再起動（code drift）
 ---
 flowchart TD
-    WATCH[src/*.mjs 変更検知] --> EN{autoRestartOnDrift?}
+    WATCH[実行 exe の更新検知<br/>（cargo build 成果物の mtime）] --> EN{autoRestartOnDrift?}
     EN -->|off| END[何もしない]
     MAN[手動再起動<br/>設定ビューのボタン or<br/>POST /api/control/restart] --> BUSY
     EN -->|on| BUSY{実行中 run あり?}

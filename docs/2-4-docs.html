@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>2-4 doc browser — KASUGAI Agent マニュアル</title>
   <link rel="stylesheet" href="style.css">
+  <script src="nav.js" defer></script>
   <script type="module">
     import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
     mermaid.initialize({ startOnLoad: true });
@@ -16,13 +17,9 @@
       <h1>KASUGAI Agent マニュアル <span class="version-badge">v0.2.0</span></h1>
       <p>課題の検出 → 評価 → 対応 → 実機検証 → 学習 の自律ループ常駐システム</p>
     </header>
-    <div class="layout">
-      <nav class="side"><div class="sec"><div class="sec-name">概要</div><a href="index.html">1-1 概要</a></div>
-<div class="sec"><div class="sec-name">使い方</div><a href="2-1-panel.html">2-1 パネル構成</a><a href="2-2-chat.html">2-2 AIチャット</a><a href="2-3-status.html">2-3 処理状況</a><a href="2-4-docs.html" class="active">2-4 doc browser</a><a href="2-5-settings.html">2-5 設定</a></div>
-<div class="sec"><div class="sec-name">設計</div><a href="3-1-diagrams.html">3-1 統一モデル図</a></div></nav>
-      <main>
-        <h2 class="ptitle">2-4 doc browser</h2>
-        <p>右ペインの doc browser は、registry が収集した文書とその参照ファイルを<br>一覧・閲覧するビューです。</p>
+    <main>
+      <h2 class="ptitle">2-4 doc browser</h2>
+      <p>右ペインの doc browser は、registry が収集した文書とその参照ファイルを<br>一覧・閲覧するビューです。</p>
 <h3>AGENTS / SKILL</h3>
 <ul><li><strong>AGENTS</strong> — agent 定義・ルール文書。doc 一覧ではなく、収集した全 doc の 参照ファイルをマージして1つの一覧にする（AGENTS.md は1枚前提）</li><li><strong>SKILL</strong> — <code>SKILL.md</code> 一覧（global scope は一覧から除外。 収集・参照解決の対象ではある）</li><li><strong>参照ファイル</strong> — doc 本文中のパス参照を抽出。実在・非秘匿なら クリックで開き、秘匿系は 🔒・未作成は無効表示</li></ul>
 <h3>doc 本文の表示（中央ペイン）</h3>
@@ -30,8 +27,7 @@
 <ul><li><strong>原文 / プレビュー切替</strong> — kind 判定（md / html / mmd / その他）</li><li><strong>md</strong> — Markdown + mermaid 描画</li><li><strong>html</strong> — sandboxed iframe で描画</li><li><strong>mmd</strong> — mermaid 図として描画。縦⇄横ボタンで図の向きを表示のみ切替</li><li><strong>拡縮</strong> — mermaid 図は ＋−ボタン / ホイールで拡縮（カーソル位置維持）、 ドラッグで視野移動</li></ul>
 <h3>マニュアル</h3>
 <p>「マニュアル」ナビは本サイト（<code>docs/</code>）を中央ペインの iframe で開きます。<br>右ペインの構成は変えないため、chat 一覧を見ながら参照できます。</p>
-      </main>
-    </div>
+    </main>
   </div>
 </body>
 </html>

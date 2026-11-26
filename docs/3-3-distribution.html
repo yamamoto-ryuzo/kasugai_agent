@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>3-3 配布とアセット更新（CDN） — KASUGAI Agent マニュアル</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="nav.js" defer></script>
+  <script type="module">
+    import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+    mermaid.initialize({ startOnLoad: true });
+  </script>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>KASUGAI Agent マニュアル <span class="version-badge">v0.2.0</span></h1>
+      <p>課題の検出 → 評価 → 対応 → 実機検証 → 学習 の自律ループ常駐システム</p>
+    </header>
+    <main>
+      <h2 class="ptitle">3-3 配布とアセット更新（CDN）</h2>
+      <p>KASUGAI Agent の配布形態と、CDN によるアセット更新の仕組みです。<br>正本は <code>diagrams/asset-update.mmd</code> と README §13 です。</p>
+<h3>配布形態</h3>
+<ul><li><strong>基本は zip 一式</strong> — exe + <code>config.example.json</code> + <code>panel/</code> + <code>docs/</code> + <code>prompts/</code>。exe 隣接に <code>config.json</code> を置くと、そこが root と判定される （配布版モード）。exe 単体では動きません</li><li><strong>CDN は上乗せ</strong> — panel・docs・prompts 等の更新をネット経由で配る チャネルです。Rust コアの変更だけが exe 再配布を必要とし、 アセット更新では exe を配り直さなくて済みます</li></ul>
+<h3>更新フロー</h3>
+<!-- diagram: asset-update -->
+<pre class="mermaid">
+---
+title: アセット更新（CDN 配布）
+---
+flowchart TD
+    TRIG[更新確認&lt;br/&gt;起動時 / 定期 cdnCheckMinutes /&lt;br/&gt;POST /api/assets/check] --&gt; EN{cdnBaseUrl 設定?}
+    EN --&gt;|未設定| SKIP[何もしない&lt;br/&gt;（ZIP・ローカル配布のみ）]
+    EN --&gt;|設定済| MF[manifest.json 取得&lt;br/&gt;channels / version / minExeVersion /&lt;br/&gt;files + sha256]
+    MF --&gt;|取得失敗| KEEP[現行継続&lt;br/&gt;オフライン耐性・lastError を SSE push]
+    MF --&gt; PIN{cdnManifestSha256&lt;br/&gt;ピン指定あり?}
+    PIN --&gt;|あり・不一致| KEEP
+    PIN --&gt;|なし or 一致| CMP{exe version &gt;=&lt;br/&gt;minExeVersion?}
+    CMP --&gt;|no| NEED[exe 更新が必要&lt;br/&gt;SSE assets で通知のみ・適用しない]
+    CMP --&gt;|yes| DIFF{チャネルごと&lt;br/&gt;remote != installed?}
+    DIFF --&gt;|同一| DONE[最新・何もしない]
+    DIFF --&gt;|差分あり| GATE{assetAutoApply.&amp;#60;ch&amp;#62;?}
+    GATE --&gt;|on&lt;br/&gt;panel/docs 既定| DL[.staging/&amp;#60;ch&amp;#62;/ へ全ファイル DL&lt;br/&gt;各 sha256 を検証]
+    DL --&gt;|1件でも不一致| DISCARD[staging 破棄・現行維持]
+    DL --&gt;|全件一致| SWAP[assets/&amp;#60;ch&amp;#62;/ を差替&lt;br/&gt;現行は &amp;#60;ch&amp;#62;.bak/ へ退避]
+    SWAP --&gt; SSE[installed 版を assets/state.json へ記録&lt;br/&gt;SSE assets push&lt;br/&gt;都度ディスク配信なので再起動不要]
+    GATE --&gt;|off&lt;br/&gt;prompts 既定=人ゲート| PROP[proposal 起票&lt;br/&gt;kind=prompt・changes=prompts/*&lt;br/&gt;同 version の起票済なら重複しない]
+    PROP --&gt; HUMAN{人の採否}
+    HUMAN --&gt;|採用| APPLY[proposal 適用&lt;br/&gt;root 配下へ書込み]
+    HUMAN --&gt;|却下| DROP[記録して破棄]
+    SSE -.-&gt;|rollback API| RB[&amp;#60;ch&amp;#62;.bak/ を復元&lt;br/&gt;version/prevVersion を入替&lt;br/&gt;巻き戻した版を held＝自動適用抑制&lt;br/&gt;（より新しい版が来れば解除）]
+</pre>
+<h4>3層モデル</h4>
+<table><thead><tr><th>層</th><th>役割</th></tr></thead><tbody><tr><td>ローカル（<code>panel/</code>・<code>docs/</code>）</td><td>zip 初回配布の基底。オフラインでも動く</td></tr><tr><td><code>assets/&lt;ch&gt;/</code>（オーバーレイ）</td><td>CDN から検証済みで取得した最新版。存在すれば優先配信</td></tr><tr><td>CDN</td><td>更新の「配信元」。ランタイムに直接配信させず、取得→検証→ローカル配置</td></tr></tbody></table>
+<p>panel の JS は制御 API 全権を持つ信頼コードなので、**CDN をブラウザから<br>直接参照させません**。exe が取得し、sha256 を全件検証してから<br><code>assets/&lt;ch&gt;/</code> に配置し、そこから loopback で配信します。</p>
+<h4>チャネルと人ゲート</h4>
+<table><thead><tr><th>チャネル</th><th><code>assetAutoApply</code> 既定</th><th>適用経路</th></tr></thead><tbody><tr><td><code>panel</code></td><td>on</td><td>自動: staging DL → sha256 検証 → 差替 → SSE push</td></tr><tr><td><code>docs</code></td><td>on</td><td>同上</td></tr><tr><td><code>prompts</code></td><td><strong>off</strong></td><td>proposal 起票 → 人の採否（採用で root 配下へ書込み）</td></tr></tbody></table>
+<p><code>prompts</code> のような行動系アセットは自律動作を左右するため人ゲートです。<br>同じ version の proposal は重複起票しません。</p>
+<h3>manifest 形式</h3>
+<p><code>{cdnBaseUrl}/manifest.json</code>:</p>
+<pre><code class="lang-json">{
+  "minExeVersion": "0.2.0",
+  "channels": {
+    "panel": {
+      "version": "0.2.0-20261126",
+      "files": { "index.html": "&lt;sha256&gt;", "i18n/ja.json": "&lt;sha256&gt;" }
+    }
+  }
+}</code></pre>
+<ul><li>ファイル URL は <code>{cdnBaseUrl}/&lt;channel&gt;/&lt;rel&gt;</code></li><li>exe 版が <code>minExeVersion</code> 未満なら適用せず通知のみ（版スキュー防止）</li><li><code>cdnManifestSha256</code> に manifest 自体の sha256 をピンすると信頼起点になる</li></ul>
+<h3>config / API</h3>
+<table><thead><tr><th>config キー</th><th>既定</th><th>意味</th></tr></thead><tbody><tr><td><code>cdnBaseUrl</code></td><td><code>""</code>（無効）</td><td>CDN のベース URL</td></tr><tr><td><code>cdnCheckMinutes</code></td><td><code>0</code>（手動のみ）</td><td>定期確認の間隔。起動時は設定済なら常に1回確認</td></tr><tr><td><code>cdnManifestSha256</code></td><td><code>""</code></td><td>manifest ピン（任意）</td></tr><tr><td><code>assetAutoApply</code></td><td>panel/docs on・prompts off</td><td>チャネル別の自動適用</td></tr></tbody></table>
+<table><thead><tr><th>API</th><th>用途</th></tr></thead><tbody><tr><td><code>GET /api/assets</code></td><td>状態（installed/latest/update/hasBackup/lastError）</td></tr><tr><td><code>POST /api/assets/check</code></td><td>manifest 確認 + 自動適用 + gated proposal 起票</td></tr><tr><td><code>POST /api/assets/apply</code> <code>{channel}</code></td><td>手動適用（gated でも人の明示操作なら可）</td></tr><tr><td><code>POST /api/assets/rollback</code> <code>{channel}</code></td><td><code>&lt;ch&gt;.bak/</code> へ1世代戻す</td></tr></tbody></table>
+<p>設定ビュー「システム」タブのアセット更新カードで確認・適用・ロールバック<br>ができます。状態変化は SSE <code>assets</code> で即時反映されます。</p>
+<h3>配布物の作り方</h3>
+<pre><code class="lang-bat">node tools/make-dist.mjs</code></pre>
+<p><code>dist/kasugai-agent-&lt;ver&gt;.zip</code>（初回配布用）と <code>dist/cdn/</code>（manifest +<br>チャネルファイル、そのまま静的ホスティングへ公開）を生成します。<br>出力末尾に manifest の sha256 を表示するので、<code>cdnManifestSha256</code><br>ピンに利用できます。</p>
+    </main>
+  </div>
+</body>
+</html>

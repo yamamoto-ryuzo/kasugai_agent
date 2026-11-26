@@ -25,9 +25,15 @@
 - マニュアル（`docs/*.html`）の書式・正本は **`diagrams/docs/`**
   （書式は KASUGAI Canvas の `docs/` を参考）
   - `<page>.md` — 1ページ1ファイル。先頭の frontmatter `title` が必須
-  - `nav.json` — サイト名・章立て（`groups[].items[].page` = md 名）
-  - `template.html` / `style.css` — 共通書式
-- `docs/*.html`・`docs/style.css` は `node tools/sync-docs.mjs` が生成する写し。
+  - `nav.json` — サイト名・章立て・外部リンク（`demos[]`）。
+    `groups[].items[].page` = md 名。`label`（章ラベル）・`children`
+    （項目の子リンク）・`sectionPage`/`labelPage`（ラベルのリンク先）を
+    任意で持てる。`demos[]` の項目は `{action:"launch", target, port}` で
+    `POST /api/control/launch` を呼ぶ環境起動ボタンにもできる
+  - `template.html` / `style.css` / `nav.js` — 共通書式
+    （nav.js は Canvas docs/nav.js 準拠のサイドバーナビ）
+- `docs/*.html`・`docs/style.css`・`docs/nav.js` は
+  `node tools/sync-docs.mjs` が生成する写し。
   **直接編集禁止**。検証は `--check`（乖離時 exit 1）
 - md 内の `<!-- diagram: <name> -->` + ```mermaid ブロックは
   sync-diagrams.mjs が同期する（図の正本は従来どおり `diagrams/*.mmd`）
@@ -36,9 +42,9 @@
 
 ## コード構成
 
-- **1ファイル1責務**。`src/` の責務分界は README §10 に従う
-- **状態遷移は `pipeline.mjs` だけが行う**。他モジュールは遷移要求を投げるだけ
-- Node.js 標準ライブラリのみ（依存を増やさない）
+- **1ファイル1責務**。`server/src/` の責務分界は README §10 に従う
+- **状態遷移は `server/src/pipeline.rs` だけが行う**。他モジュールは遷移要求を投げるだけ
+- 実装言語は Rust（axum + tokio、`server/` が正本）。`tools/*.mjs`（図・docs 同期）は Node.js 標準ライブラリのみ
 - 制御は loopback bind。外部公開しない
 
 ## 状態変更は必ず UI へ反映する（リロード強制）
@@ -53,7 +59,7 @@
 - 左ペイン title 直下のセレクトは **カレントリポジトリの指定のみ**を行う
 - **`すべてのリポジトリ` 相当の選択肢は置かない**。常に1リポジトリを指し、
   未選択（全体表示）状態を作らない
-- 選択はパネル全体のスコープ（新規 chat の cwd・課題化の repo・
+- 選択はパネル全体のスコープ（新規 chat の cwd・
   各一覧の絞込）になり、localStorage に永続化する
 - **リポジトリ名の表示はこのセレクトのみ**。選択リポジトリで絞られた一覧・
   画面（chat sessions・処理状況・candidates・ヘッダ status 等）では
@@ -84,22 +90,42 @@
 
 ## detector プラグイン規約
 
-- detector は `src/detectors/` 配下に置き、統一 candidate 形式
+- detector は `server/src/detectors/` 配下に置き、統一 candidate 形式
   `{source, repo, title, body, symptomHash, detectedAt}` を emit する
 - dedupe は入口で共通実施（source+repo+symptomHash）。detector 個別には持たせない
 - detector は検出のみ行い、起動・判定には関与しない
 
 ## 自動再起動（code drift）
 
-- `src/*.mjs` の変更検知時、`autoRestartOnDrift`（既定 ON）ならタスク空きを待って
-  自動再起動する。手動は `POST /api/control/restart`
+- 実行中 exe の更新（cargo build 成果物）検知時、`autoRestartOnDrift`（既定 ON）
+  ならタスク空きを待って自動再起動する。手動は `POST /api/control/restart`
 - 再起動は必ず「実行系停止 → control 再起動」の順
 - 判断フローの正本は `diagrams/restart-flow.mmd`（README §8 に埋め込み）
+- **開発ループ**: `npm run dev`（`cargo run`）で debug ビルドをフォアグラウンド実行
+  （kasugai_qgis の `run.py` 方式に倣う。EXE の別配置・常駐 dev インスタンスは持たない）。
+  prod と同時稼働させたい場合のみ `PORT=8587 cargo run` で第二インスタンスにする
+
+## 配布とアセット更新（CDN）
+
+- 正本は `diagrams/asset-update.mmd`（README §13 埋め込み）。仕様変更は図を先に直す
+- **配布の基本は zip 一式**（exe + `config.example.json` + `panel/` + `docs/` +
+  `prompts/`）。exe 単体では動かない（アセットは exe 隣接のディスクから配信）
+- **CDN は「配信元」であってランタイム配信先ではない**。
+  取得 → sha256 検証 → `assets/<ch>/` へ配置 → loopback でローカル配信。
+  検証なしの外部 JS/コンテンツを panel へ流さない（panel JS は制御 API 全権）
+- `assets/<ch>/` は `panel/`・`docs/` へのオーバーレイ（存在すれば優先配信）。
+  repo の正本ファイルは CDN 適用で汚さない
+- **行動系チャネル（prompts 等）は `assetAutoApply.<ch>` 既定 off**。
+  proposals 起票 → 人の採否（採用時に root 配下へ書込む機構で適用）
+- 版スキューは manifest の `minExeVersion` で防ぐ。exe 版不足時は適用せず通知のみ
+- 配布物生成は `node tools/make-dist.mjs`（zip + `dist/cdn/` の manifest 一式）
 
 ## 知見の還流
 
 - 生の知見は課題 key 単位で無条件に蓄積する（`knowledge/`）
 - agent 自身への反映（prompts/config/skills）は proposals 機構で人が採否する
+- proposals は採否の前に **vet（機械検査）** を通る: path 許可範囲・secret 混入・
+  構文（JSON/frontmatter）を静的検査し、不合格は accept 不能
 - リポジトリ正本への反映は新規課題として起票し、通常パイプで対応する
 
 ## シークレット

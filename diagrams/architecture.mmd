@@ -7,16 +7,15 @@ flowchart LR
         D2[ci-failure]
         D3[local-health]
         D4[spec-drift]
-        D5[manual/chat]
     end
 
-    subgraph Core[コア src/]
-        N[normalize + dedupe<br/>store.mjs]
-        A[assess<br/>pipeline.mjs]
+    subgraph Core[コア server/src/]
+        N[normalize + dedupe<br/>store.rs]
+        A[assess<br/>pipeline.rs]
         G[gate<br/>人ゲート]
-        R[runner<br/>session.mjs]
-        V[verify<br/>verify.mjs]
-        K[knowledge<br/>knowledge.mjs]
+        R[runner<br/>session.rs]
+        V[verify<br/>verify.rs]
+        K[knowledge<br/>knowledge.rs]
     end
 
     subgraph IO[外部]
@@ -25,8 +24,8 @@ flowchart LR
         RP[監視対象リポジトリ]
     end
 
-    C[control.mjs<br/>HTTP :8586 + SSE] --> P[panel/<br/>ブラウザUI]
-    D1 & D2 & D3 & D4 & D5 --> N --> A --> G --> R --> V --> K
+    C[control.rs<br/>HTTP :8586 + SSE] --> P[panel/<br/>ブラウザUI]
+    D1 & D2 & D3 & D4 --> N --> A --> G --> R --> V --> K
     R --> DV
     A & R & V --> GH
     R & V --> RP

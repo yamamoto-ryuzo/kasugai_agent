@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>3-2 自律ループと実装方式 — KASUGAI Agent マニュアル</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="nav.js" defer></script>
+  <script type="module">
+    import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+    mermaid.initialize({ startOnLoad: true });
+  </script>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>KASUGAI Agent マニュアル <span class="version-badge">v0.2.0</span></h1>
+      <p>課題の検出 → 評価 → 対応 → 実機検証 → 学習 の自律ループ常駐システム</p>
+    </header>
+    <main>
+      <h2 class="ptitle">3-2 自律ループと実装方式</h2>
+      <p>KASUGAI Agent の中核は「LOOP」——課題が生まれてから学習で自分自身を改良する<br>までの閉じた業務サイクルです。本ページでは LOOP の意味、SDK やプラグイン<br>ではなく Rust 自前実装を選んだ理由、自律性の位置づけを整理します。</p>
+<h3>自律ループ（LOOP）とは</h3>
+<p>LOOP はプログラムの for/while ではなく、<br><strong>課題の検出から学習までを一巡りする運用サイクル</strong>です。<br>常駐サーバが外部世界を観測し続け、課題が現れるたびにこのサイクルを<br>回します。</p>
+<!-- diagram: autonomy-loop -->
+<pre class="mermaid">
+---
+title: 自律ループ全景（meta-loop 含む）
+---
+flowchart TB
+    D[detectors&lt;br/&gt;課題候補 emit] --&gt; N[normalize + dedupe]
+    N --&gt; A[assess&lt;br/&gt;verifyLevel 決定]
+    A --&gt; G{人ゲート}
+    G --&gt;|却下| X[rejected]
+    G --&gt;|承認| R[dispatch&lt;br/&gt;runner = 接続AI]
+    R --&gt; V[verify L0〜L4&lt;br/&gt;実機検証・証跡・push]
+    V --&gt;|NG 差し戻し| R
+    V --&gt;|合格| K[learn&lt;br/&gt;SKILL 蓄積 → .devin/skills/&lt;br/&gt;（draft・mermaid 図を必ず明示）]
+    K --&gt; P[proposals&lt;br/&gt;skills / prompts / config]
+    P --&gt; G
+    G --&gt;|採用| SELF[agent 自身を更新]
+    SELF -.-&gt;|次のループを改良| N
+</pre>
+<table><thead><tr><th>段階</th><th>内容</th></tr></thead><tbody><tr><td>detect</td><td>detector（github-issues / ci-failure / local-health / manual-chat）が課題候補を emit</td></tr><tr><td>normalize/dedupe</td><td>統一 candidate 形式に正規化し <code>source+repo+symptomHash</code> で重複排除</td></tr><tr><td>assess</td><td>課題の性質と検証深度（verifyLevel L0〜L4）を決定</td></tr><tr><td>gate</td><td>external 起票・proposal 採否・push 可否など人だけが越えられる判定地点</td></tr><tr><td>dispatch</td><td>runner（接続AI 実行体）に実装を委譲</td></tr><tr><td>verify</td><td>実機起動・証跡採取・push 可否。NG なら retry に差し戻し</td></tr><tr><td>learn</td><td>結果・証跡を SKILL（draft・mermaid 図必須）として <code>.devin/skills/</code> へ蓄積し proposals を生成</td></tr></tbody></table>
+<p>LOOP が「要」なのは、これが<strong>自律性そのもの</strong>だからです。</p>
+<ul><li><strong>終わらない</strong> — 常駐サーバが観測を続け、課題ごとにサイクルを回す</li><li><strong>閉じている</strong> — verify が「実装したつもり」を実機で弾き、learn が結果を 次のループの入力に還流する</li><li><strong>自己書換えする</strong> — learn → proposals → 採用 で agent 自身が更新され、 ループがループを改良する（meta-loop）</li></ul>
+<h3>実装方式の比較（Rust 自前 / SDK / プラグイン）</h3>
+<table><thead><tr><th>観点</th><th>Rust 自前（本システム）</th><th>SDK 利用</th><th>プラグイン（MCP/skill 等）</th></tr></thead><tbody><tr><td>自律ループの制御</td><td>完全。state machine を自前で保有</td><td>部分的。課題ライフサイクルは別途自作</td><td>不可。ループはホスト側のもの</td></tr><tr><td>常駐・スケジューリング</td><td>自前デーモン + 自動再起動</td><td>プロセス管理は自前</td><td>ホストの起動中のみ</td></tr><tr><td>状態の正</td><td>control が state/issues/queue を保有し SSE push</td><td>SDK セッション状態と二重管理になりやすい</td><td>ホストの永続機構に依存</td></tr><tr><td>実機検証（L0〜L4）</td><td>EXE 起動・証跡・排他ロックまで実装可能</td><td>SDK の責務外。結局自前で書く</td><td>ホストのツール呼出に限定</td></tr><tr><td>AI 実行体の交換性</td><td>chatAgents 設定で ACP/HTTP/OpenAI互換を選択。<strong>プロバイダ非依存</strong></td><td>SDK 提供者のモデルに実質ロック</td><td>ホストが選んだ AI に従う</td></tr><tr><td>UI / 可視化</td><td>panel + SSE でリアルタイム表示</td><td>UI は丸ごと自作</td><td>ホスト UI 制約内</td></tr><tr><td>セキュリティ</td><td>loopback・secrets 一元・人ゲートを code に直接埋め込める</td><td>SDK 内部の送信先・ツール実行はブラックボックス</td><td>ホストの権限モデルに従う</td></tr><tr><td>開発・保守コスト</td><td>最大</td><td>中（エージェント部は SDK が吸収）</td><td>最小</td></tr></tbody></table>
+<p>本システムが Rust 自前を選んだのは「SDK を使わないことで速い」からではなく、<br><strong>SDK に依存しない分だけ、自律ループと検証ポリシーを完全に自分の仕様にできる</strong><br>からです。AI を内蔵するのではなく、外付けの実行体としてオーケストレート<br>する形です。</p>
+<h3>自律性の位置づけ</h3>
+<table><thead><tr><th>自律性の要件</th><th>本システム</th><th>完全自立との差</th></tr></thead><tbody><tr><td>世界を継続観測する</td><td>detectors が常駐ポーリング</td><td>観測対象は定義済みソースのみ</td></tr><tr><td>自分で課題を立てる</td><td>candidate → issue key で自動起票</td><td>「何を課題とみなすか」の枠組みは人が定義</td></tr><tr><td>実行して結果を得る</td><td>runner が接続AIに委譲</td><td>「頭脳」は外付けセッション。本体は意志を持たない</td></tr><tr><td>現実と照合する</td><td>verify L0〜L4 で実機検証・証跡</td><td>多くの自律実験が欠く部分を実装済み</td></tr><tr><td>自分を改良する</td><td>learn → proposals → prompts/skills/config を更新</td><td>採否は人ゲート。意図的に自立を止めている</td></tr><tr><td>失敗から回復する</td><td>retry・drift 自動再起動・snapshot 復元</td><td>ドメイン内の回復のみ</td></tr></tbody></table>
+<h4>評価</h4>
+<ul><li><strong>入口としては正しい</strong> — 観測→行動→実機検証→学習還流という骨格は 自律システムの正しい形</li><li><strong>完全自立ではない</strong> — 人ゲートは除去不能な仕様。課題の枠組みは人が 定義し、判断・実装の「頭脳」は外付けAIに委譲している</li><li><strong>現実的な位置づけ</strong> — 「人の監督下で自己改良する閉域自律システム」</li></ul>
+<p>完全自立に向かう次の壁は「proposals の採否を機械化する = 自己改良の<br>検証器を作る」ことです。その第一歩として <strong>vet（機械検査）</strong> を実装済み<br>（<code>server/src/proposals.rs</code>）—— path 許可範囲・secret 混入・構文を静的に<br>検査し、不合格は accept 不能とする採否の前提検査です。採否そのものは<br>人ゲートのままです。採否自体の機械化は verify を自分自身のコードに適用<br>する問題になり、L4（Issue 主旨との照合）よりはるかに難しい領域です。</p>
+    </main>
+  </div>
+</body>
+</html>

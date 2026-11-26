@@ -11,8 +11,8 @@
 `node tools/sync-diagrams.mjs` が生成する写し（直接編集禁止）。
 
 - バージョン: v0.2.0（旧版 agent → kasugai_agent v0.1 の知見を踏まえ全面再構築）
-- 実行環境: Windows / Node.js（標準ライブラリのみ）+ gh CLI + ACP 対応 CLI（devin 等）
-- 制御ポート: `8586` / タスクスケジューラ名: `KasugaiAgentDispatcher`
+- 実行環境: Windows / Rust（axum + tokio。`server/` が実装正本）+ gh CLI + ACP 対応 CLI（devin 等）。`tools/*.mjs` はビルド時のみ Node.js
+- 制御ポート: `8586` / 自動起動名: `KasugaiAgentDispatcher`（HKCU Run キー）
 
 ---
 
@@ -28,7 +28,7 @@
 
 **非目的**
 
-- チャットだけの会話相手になること（会話は課題化の入口の1つ）
+- チャットだけの会話相手になること
 - 検証を通っていない成果物を push すること（絶対しない）
 
 ## 2. 用語
@@ -89,16 +89,15 @@ flowchart LR
         D2[ci-failure]
         D3[local-health]
         D4[spec-drift]
-        D5[manual/chat]
     end
 
-    subgraph Core[コア src/]
-        N[normalize + dedupe<br/>store.mjs]
-        A[assess<br/>pipeline.mjs]
+    subgraph Core[コア server/src/]
+        N[normalize + dedupe<br/>store.rs]
+        A[assess<br/>pipeline.rs]
         G[gate<br/>人ゲート]
-        R[runner<br/>session.mjs]
-        V[verify<br/>verify.mjs]
-        K[knowledge<br/>knowledge.mjs]
+        R[runner<br/>session.rs]
+        V[verify<br/>verify.rs]
+        K[knowledge<br/>knowledge.rs]
     end
 
     subgraph IO[外部]
@@ -107,8 +106,8 @@ flowchart LR
         RP[監視対象リポジトリ]
     end
 
-    C[control.mjs<br/>HTTP :8586 + SSE] --> P[panel/<br/>ブラウザUI]
-    D1 & D2 & D3 & D4 & D5 --> N --> A --> G --> R --> V --> K
+    C[control.rs<br/>HTTP :8586 + SSE] --> P[panel/<br/>ブラウザUI]
+    D1 & D2 & D3 & D4 --> N --> A --> G --> R --> V --> K
     R --> DV
     A & R & V --> GH
     R & V --> RP
@@ -116,9 +115,9 @@ flowchart LR
 ```
 
 - **detectors は検出のみ**。起動・判定・重複排除には関与しない
-- **control.mjs はハブ**。状態の唯一の正（state store）・SSE push・パネル配信・
+- **control.rs はハブ**。状態の唯一の正（state store）・SSE push・パネル配信・
   スケジューラ（ポーリングタイマ）を持つ。重い処理はモジュールに分離
-- **pipeline.mjs がライフサイクルの state machine**。状態遷移はここだけが行う
+- **pipeline.rs がライフサイクルの state machine**。状態遷移はここだけが行う
 
 ## 5. パイプライン詳細
 
@@ -137,7 +136,7 @@ flowchart TD
     EXIST -->|no| NEW[課題レコード作成<br/>status=assessed へ]
 ```
 
-- detector は `detectors/*.mjs` に置き、統一 candidate 形式を stdout/ファイルで emit
+- detector は `server/src/detectors/*.rs` に置き、統一 candidate 形式を stdout/ファイルで emit
 - dedupe は入口の1箇所のみ（detector 個別に持たせない）
 - GitHub Issue は `gh issue list` ポーリング。`autoTrigger` または `devin` ラベルで候補化
 
@@ -162,7 +161,7 @@ flowchart TD
 
 ### 5.4 dispatch（runner）
 
-- runner は `session.mjs` が管理。既定実装は `devin -p` 非対話セッション
+- runner は `session.rs` が管理。既定実装は `devin -p` 非対話セッション
 - **起動可否は論理競合ベース**（同時起動数の上限は設けない）:
   同一リポジトリの未完了 run、排他ロック中の実機リソースがある課題は待機
 - セッションには課題・受入条件・知見をプロンプトとして注入
@@ -222,14 +221,20 @@ flowchart TD
 title: learn（知見の還流）
 ---
 flowchart LR
-    RUN[run 結果・証跡] --> KN[knowledge/<br/>課題key単位で蓄積]
+    RUN[run 結果・証跡] --> KN[SKILL 蓄積<br/>.devin/skills/<br/>課題key単位・draft・mermaid 図必須]
     KN --> PROP[proposals 生成<br/>skills/prompts/config/<br/>正本ドキュメント]
-    PROP --> HUMAN{人の採否}
+    PROP --> VET[vet<br/>機械検査<br/>path許可 / secret混入 /<br/>構文 / frontmatter]
+    VET -->|fail| VF[vet 不合格<br/>accept 不能・要修正]
+    VET -->|pass| HUMAN{人の採否}
     HUMAN -->|採用| SELF[agent 自身へ反映<br/>or 正本へ課題起票]
     HUMAN -->|却下| DROP[記録して破棄]
 ```
 
-- 生の知見は無条件蓄積、**反映は必ず proposals 経由の人ゲート**
+- 知見は SKILL（draft・mermaid 図必須）として `.devin/skills/` へ無条件蓄積、
+  **反映は必ず proposals 経由の人ゲート**
+- **vet（機械検査）**: proposals は登録時・採否時に静的検査される
+  （path 許可範囲 / secret 混入 / JSON・frontmatter 構文）。
+  vet 不合格は accept 不能（server/src/proposals.rs）。採否そのものは人が行う
 - リポジトリ正本（`.devin/skills`・AGENTS.md）への反映は新規課題として起票し、
   通常パイプで対応する
 
@@ -247,6 +252,7 @@ flowchart LR
 | `evidence/` | 検証証跡（shots・ログ・応答） | 対象外 |
 | `locks/` | リソースロックファイル | 対象外 |
 | `chat-snapshots/` | chat が変更したファイルの turn 単位変更前スナップショット | 対象外 |
+| `assets/` | CDN から適用したアセット（panel/docs のオーバーレイ・state.json） | 対象外 |
 | `logs/` | 稼働ログ | 対象外 |
 | `secrets.json` | API キー等 | **対象外・唯一の保管場所** |
 
@@ -255,7 +261,7 @@ flowchart LR
 
 ## 7. API / パネル
 
-`control.mjs` が `:8586` で提供（loopback のみ）。
+`control.rs` が `:8586` で提供（loopback のみ）。
 
 - `GET /api/state` — 全体状態 / `GET /api/issues` / `GET /api/candidates`
 - `GET /api/agents` / `GET /api/skills` — registry が収集した doc 一覧。
@@ -268,10 +274,12 @@ flowchart LR
   秘匿系は `denied` として返すが本文は返さない）
 - `POST /api/issues/:key/dispatch` / `POST /api/issues/:key/approve` / `reject`
 - `GET /api/proposals` / `POST /api/proposals/:id/accept|decline`
-- `POST /api/candidates` — 手動課題化（manual detector 相当の入口）
 - `GET /api/repos` — repos 一覧。`config.repos` 登録済みに加え、IDE ワークスペース
   （control の ROOT 親ディレクトリ。`config.workspaceRoot` で上書き可）直下の
-  `.git` 付きディレクトリを `IDE管理下`（unregistered）として検出して返す
+  `.git` 付きディレクトリを `IDE管理下`（unregistered）として検出して返す。
+  GitHub を利用していないユーザーリポジトリも `ユーザー`（unregistered）として
+  検出する: ワークスペース直下の `.git` 無しディレクトリ、ユーザーディレクトリ
+  直下の `.git` 付きディレクトリ、`config.repoScanDirs` 各直下の全ディレクトリ
 - `POST /api/repos` — 監視リポジトリ登録（`{path, slug?}` を `config.json` の
   `repos` へ追記。SSE `repos` で全パネルへ即時反映）
 - `POST /api/repos/update` — 登録済み repo の設定更新
@@ -303,12 +311,20 @@ flowchart LR
   「システム再起動」ボタンもこれを呼ぶ。実行中 run が残る間は空くまで延期し、
   `{force:true}` なら実行中の chat を中断して即時再起動する。
   SSE `restart` で pending/restarting を push）
+- `POST /api/control/launch` — 環境起動（docs ナビの「環境を起動」ボタンが
+  呼ぶ。`{target:"prod"}` → `server/target/release/kasugai-agent.exe`
+  （無ければ現行 exe、既定 :8586）を detached 起動。対象ポートが既に応答して
+  いれば `already:true` を返して起動しない。`{port}` でポート上書き可。
+  判定フローは §8 末尾の図を参照）
+- `GET/POST /api/control/autostart` — ログオン自動起動（HKCU Run キー
+  `KasugaiAgentDispatcher`）の状態取得 / `{action:"install"|"uninstall"}`
+  で登録・解除（変更は SSE `autostart` で push）
 - `GET /api/events` — SSE（状態push・チャット進行表示）
 - `GET /docs/*` — マニュアルサイトの静的配信（`docs/` ディレクトリ。
   パネル左ペインの「マニュアル」ナビが中央ペイン iframe で開く。
   正本は `diagrams/docs/` で `tools/sync-docs.mjs` が生成する）
 
-### チャット（manual detector の会話入口）
+### チャット
 
 チャットは接続AIを実行体に持つ対話面。接続先は `config.json` の
 **`chatAgents`**（実行体レジストリ）と **`chatAgent`**（active id）で設定し、
@@ -332,8 +348,7 @@ flowchart LR
 
 実行体は chat 作成時の active エージェントに固定され `chats.json` に
 永続化する（active 切替は以後の新規 chat に適用）。
-課題レコードとは独立した会話だが、「課題化」操作で
-`POST /api/candidates` へ流してパイプラインへ乗せる。
+会話は課題レコードとは独立しており、chat 内で実行体が直接作業する。
 
 <!-- diagram: chat-sequence -->
 ```mermaid
@@ -342,12 +357,13 @@ title: chat 送受信シーケンス
 ---
 sequenceDiagram
     participant UI as panel (browser)
-    participant C as control.mjs
+    participant C as control.rs
     participant A as 接続AI<br/>（config.chatAgent・図は type=acp の例）
     Note over C,A: type=agent/openai は単発 HTTP（POST → reply 受信）。<br/>常駐セッション・session/load 再接続は acp 型のみ
     Note over C,A: control 起動時は resumable chat を自動で session/load 再接続（§8）
     UI->>C: POST /api/chat/send {id?, text, mode?}
-    C->>C: リポジトリ不整合チェック（repomatch.mjs）:<br/>prompt 文中のパス・repo 名 × chat のカレント repo
+    Note over C: 新規 chat の execMode 既定=parallel<br/>（mode 未指定時。分割子 chat は direct 固定）
+    C->>C: リポジトリ不整合チェック（repomatch.rs）:<br/>prompt 文中のパス・repo 名 × chat のカレント repo
     alt 他 repo 向けの内容と判定<br/>（busy 中・keep 回答済みの候補は確認しない）
         C->>C: waiting(kind=repo) へ。<br/>prompt は保留キューへ
         C-->>UI: SSE push（repo 確認待ち。切替/このまま送信ボタン）
@@ -366,24 +382,26 @@ sequenceDiagram
         else 競合なし
             C->>A: session/new or session/load → session/prompt
             Note over C,A: execMode=parallel の初回 prompt には<br/>分割指示プリアンブルを前置<br/>（セッション内で指示が残るため1回のみ）
-            A-->>C: session/update stream (message/tool_call/plan)
+            A-->>C: session/update stream (message/tool_call/plan/usage_update)
             Note over C,A: 編集系 tool_call の対象パスは touched として記録し、<br/>turn 単位で変更前スナップショットを<br/>chat-snapshots/ へ採取。<br/>他 busy chat のクレームと重なったら<br/>session/cancel して waiting へ
-            C-->>UI: SSE push (chat 更新通知)
+            Note over C,A: usage_update {used,size,cost?} は chat 別の<br/>コンテキスト消費量として保持。<br/>type=openai は応答 usage.total_tokens から採取<br/>（size 不明のため使用数のみ）
+            C-->>UI: SSE push (chat 更新通知・ctx 消費量も随時反映)
         end
     end
     alt execMode=parallel: ターン終了時に<br/>kasugai-split ブロックを検出
-        C->>C: split.mjs が [{title,prompt}] を抽出<br/>（parallelMaxChildren 上限・重複抑止）
+        C->>C: split.rs が [{title,prompt}] を抽出<br/>（parallelMaxChildren 上限・重複抑止）
         C->>A: 子 chat を生成（parent=親id・direct 固定・<br/>同 repo cwd・同 agent）して session/prompt
         Note over C: 子 chat の busy 解除 → 最終回答を<br/>ダイジェストとして親 chat へ投函。<br/>親は統合・さらなる分割を続けられる
     end
     Note over C: blocker chat の busy 解除 → 待機を解き<br/>保留 prompt を session/prompt へ再送
-    Note over C,A: spawn した実行体の stderr・非JSON stdout と<br/>control 自身の stdio は conlog.mjs の<br/>リングバッファへ集約 → コンソールタブへ SSE push
+    Note over C,A: acp spawn 時は WINDSURF_EXT_HOST_PID を<br/>env から除去（devin は実親でなくこの変数の pid を<br/>親監視するため、死んだ IDE ホストの値が残ると<br/>実行体が起動直後に自死する）
+    Note over C,A: spawn した実行体の stderr・非JSON stdout と<br/>control 自身の stdio は conlog.rs の<br/>リングバッファへ集約 → コンソールタブへ SSE push
     UI->>C: GET /api/chat?id=N
     C-->>UI: messages/busy/waiting/options/snapPoints スナップショット
     UI->>C: POST /api/chat/resume {id}
     C->>A: session/load（resumable chat の手動再接続）
     UI->>C: POST /api/chat/mode {id, mode}
-    C->>C: execMode を direct/parallel へ切替<br/>（chats.json へ永続化・SSE push）
+    C->>C: execMode を direct/parallel へ切替<br/>（chats.json へ永続化・SSE push。既定=parallel）
     UI->>C: POST /api/chat/revise {id, text}
     C->>A: session/cancel（busy 時のみ）
     C->>C: 最後の user 送信以降の表示を破棄
@@ -426,7 +444,7 @@ sequenceDiagram
   解除時にまとめて再送される。cancel で待機を手動解除できる（保留は破棄）。
   関数単位の競合はファイル単位クレームに包含して検出する
 - **リポジトリ不整合チェック**: send 時に prompt 内容と chat の
-  カレントリポジトリの整合を検査する（`src/repomatch.mjs`）。
+  カレントリポジトリの整合を検査する（`server/src/repomatch.rs`）。
   prompt 文中のパスが他の登録 repo の path 配下を指す、またはカレント
   repo 名への言及が無いまま他 repo 名に言及している場合、その送信を
   保留して waiting（`kind: 'repo'`）へ入り、パネルに
@@ -438,14 +456,14 @@ sequenceDiagram
   `action: 'keep'` は候補 repo をその chat の `repoDeclined` へ記録し
   （chats.json へ永続化・同じ候補は再確認しない）、カレント repo のまま
   再送する。busy 中の steer には確認を挟まない
-- **処理モード（execMode）**: chat ごとに `direct`（既定・従来どおり逐次処理）
-  か `parallel` を持ち、`POST /api/chat/mode` か入力行のセレクトで切替、
+- **処理モード（execMode）**: chat ごとに `parallel`（既定）か
+  `direct`（従来どおり逐次処理）を持ち、`POST /api/chat/mode` か入力行のセレクトで切替、
   `chats.json` へ永続化する。`parallel` では初回 prompt に分割指示
   プリアンブルが前置され（セッション内に残るため1回のみ。ACP 履歴には
   載るが表示はユーザ文のみ）、エージェントは作業の中で独立タスクへ
   分割できると判断した時点で `` ```kasugai-split `` コードブロックに
   `[{title, prompt}]` を出力する。control はターン終了時に新着の agent
-  メッセージを走査し（split.mjs）、ブロックを見つけると各要素を
+  メッセージを走査し（split.rs）、ブロックを見つけると各要素を
   **子 chat**（`parent`=親 id・`direct` 固定・同 repo cwd・同 agent）として
   自動起動する。`prompt` は文脈を引き継がない独立セッションで動くため
   自己完結で書くようプリアンブルで指示する。暴走防止に
@@ -469,7 +487,7 @@ raw HTML は表示時にエスケープする（XSS 防止）。
 
 - 右ペインの chat sessions / doc browser、左ペインの管理セクション
   （candidates）を選択リポジトリで絞り込む
-- 新規チャットの cwd・「課題化」で登録する repo にも適用する
+- 新規チャットの cwd にも適用する
 - 常にいずれか1リポジトリを指す。**`すべて` 選択肢は置かず**、
   未選択（全体表示）状態を作らない。選択は localStorage に永続化する
 - リポジトリ名の表示はこのセレクトだけに限定する。選択リポジトリで絞られた
@@ -492,7 +510,11 @@ raw HTML は表示時にエスケープする（XSS 防止）。
   `autoTrigger` / `triggerLabel` / `requirePushApproval` を編集して
   `POST /api/repos/update` で保存、`POST /api/repos/remove` で登録解除する。
   IDE ワークスペース直下の `.git` 付きディレクトリは「IDE管理下」バッジ付きで
-  一覧し、登録ボタンで `POST /api/repos` へ流せる。一覧はカレントリポジトリ
+  一覧し、登録ボタンで `POST /api/repos` へ流せる。
+  GitHub を使わないユーザーリポジトリも「ユーザー」バッジ付きで検出する
+  （ワークスペース直下の `.git` 無しディレクトリ・ユーザーディレクトリ直下の
+  `.git` 付きディレクトリ・`config.repoScanDirs` 各直下の全ディレクトリ）。
+  一覧はカレントリポジトリ
   選択で絞らず全件表示する（repo 一覧そのものが表示対象）
 - 「接続AI」タブ（既定タブ）では `config.json` の
   `chatAgents` に登録されたエージェント（`acp`/`agent`/`openai` 各 type の
@@ -509,7 +531,7 @@ raw HTML は表示時にエスケープする（XSS 防止）。
 （選択は localStorage に永続化）。
 コンソールタブは裏側プロセスの出力をモニターする画面で、
 spawn した接続AI（acp 型）の stderr・非JSON stdout と
-control 自身の stdio を `src/conlog.mjs` のリングバッファへ集約し、
+control 自身の stdio を `server/src/conlog.rs` のリングバッファへ集約し、
 `GET /api/console`（履歴）+ SSE `console` push（追加分）で
 ライブ表示する。行は `{seq, ts, src, stream, text}` 形式で、
 `src` は `#<chat id> <agent label>` または `control`。
@@ -523,8 +545,8 @@ chat sessions 一覧に戻し、エディターはカレント repo のフォル
 展開する（dir は `GET /api/fs/tree` で lazy 展開、file 選択で
 `GET /api/fs/file` の本文を中央ペインに表示。登録 repo 配下・非秘匿のみ）。
 AGENTS / SKILL は
-doc browser に切り替えて registry（`src/registry/agents.mjs` /
-`skills.mjs`）が収集した agent 定義・ルール文書（`AGENTS.md`・
+doc browser に切り替えて registry（`server/src/registry/agents.rs` /
+`skills.rs`）が収集した agent 定義・ルール文書（`AGENTS.md`・
 `.devin/agents`・`.devin/rules` 等）や skill 定義（各種 `skills/` 配下の
 `SKILL.md`）をボタン一覧で表示する。
 skill の走査範囲はリポジトリ内に加え、グローバル配置
@@ -605,9 +627,11 @@ flowchart LR
     G --> R
     RS[カレントrepo選択<br/>左ペイン title 直下<br/>「すべて」選択肢なし<br/>repo名の表示はここのみ<br/>localStorage 永続化] -->|表示スコープ| L
     RS -->|表示スコープ| R
-    RS -->|新規chatの cwd<br/>課題化の repo| C
+    RS -->|新規chatの cwd<br/>スコープ外の chat選択・doc表示の解除<br/>（実行中chatはバックグラウンド継続）| C
+    C -->|ヘッダレイアウト<br/>1行目=タイトル（概要）が全幅<br/>2行目=plink/status/最新/<br/>options/言語select/操作ボタン| HD[flex-wrap で<br/>自然折返し]
     C -->|最新ボタン| NEW[updatedAt 最大の<br/>chat を選択]
     C -->|言語 select<br/>localStorage 永続化| I18N[panel/i18n.js<br/>i18n/*.json 辞書<br/>en がフォールバック<br/>data-i18n 属性 + t()<br/>切替時は全ペイン再描画]
+    C -->|設定システムタブの<br/>タイムゾーン入力<br/>（IANA名・空欄=ブラウザ既定<br/>datalist に代表ゾーン）<br/>localStorage 永続化| TZ[表示タイムゾーン<br/>fmtTs/fmtTm が Intl で変換<br/>chat・console・一覧の時刻表示<br/>保存 ts は UTC のまま]
     L --> M1[loop state]
     L --> M2[candidates/proposals]
     L -->|エディターナビ<br/>（処理状況の直下）| FT[フォルダツリー<br/>右ペインに展開<br/>カレントrepo の path を根<br/>dir は lazy 展開<br/>GET /api/fs/tree<br/>.git/node_modules 等は除外<br/>秘匿系は 🔒 で選択不可]
@@ -616,26 +640,26 @@ flowchart LR
     L -->|マニュアルナビ<br/>中央ペインを iframe 表示| C
     C -->|GET /docs/* 静的配信| MAN[docs/ マニュアルサイト<br/>正本=diagrams/docs/<br/>（1ページ1.md・frontmatter title<br/>nav.json=章立て<br/>template.html/style.css=書式<br/>Canvas docs 参考）<br/>tools/sync-docs.mjs が生成]
     L -->|git ナビ（設定下の区切り線以下・ナビ末尾）<br/>コミット=メッセージ入力→<br/>POST /api/git/commit<br/>（git add -A + commit・変更なしは noop）<br/>プッシュ=確認後<br/>POST /api/git/push（人ゲートの承認）| GIT[カレント repo で git を spawn<br/>60s timeout<br/>出力は conlog 集約<br/>→ console タブへ SSE push]
-    L -->|設定ナビ<br/>タブ: 接続AI / リポジトリ / システム<br/>（登録済み + IDE管理下検出）<br/>GET /api/chat-agents<br/>GET /api/repos| C
+    L -->|設定ナビ<br/>タブ: 接続AI / リポジトリ / システム<br/>（登録済み + IDE管理下検出 + ユーザー検出:<br/>ワークスペース/repoScanDirs 直下の .git 無し dir・<br/>ユーザーディレクトリ/repoScanDirs 直下の .git dir<br/>※GitHub 非依存のローカル repo も対象）<br/>GET /api/chat-agents<br/>GET /api/repos| C
     C -->|接続AI 追加/更新/解除<br/>active 切替<br/>POST /api/chat-agents/*| AC[config.json の<br/>chatAgents + chatAgent<br/>SSE push で即時反映]
     AC -->|新規 chat の実行体<br/>（chat 作成時に固定し<br/>chats.json へ永続化）| ACPX[接続AI 実行体<br/>acp=CLI spawn /<br/>agent=/agent HTTP /<br/>openai=chat/completions]
-    ACPX -->|stderr / 非JSON stdout<br/>（acp 型の spawn のみ）| CON[conlog.mjs<br/>実行体出力 + control 自身の<br/>stdio をリングバッファ集約]
+    ACPX -->|stderr / 非JSON stdout<br/>（acp 型の spawn のみ）| CON[conlog.rs<br/>実行体出力 + control 自身の<br/>stdio をリングバッファ集約]
     C -->|console タブ<br/>GET /api/console +<br/>SSE console push| CON
-    C -->|処理モード select<br/>（入力行の先頭・添付ボタンの左<br/>目立たせるため強調表示）<br/>POST /api/chat/mode| EM[execMode<br/>direct=逐次 /<br/>parallel=kasugai-split で<br/>子chat自動起動・結果を親へ集約<br/>sessions一覧は親子でグループ表示]
+    C -->|処理モード select<br/>（入力行の先頭・添付ボタンの左<br/>目立たせるため強調表示）<br/>POST /api/chat/mode| EM[execMode<br/>（既定=parallel）<br/>direct=逐次 /<br/>parallel=kasugai-split で<br/>子chat自動起動・結果を親へ集約<br/>sessions一覧は親子でグループ表示]
     C -->|repo設定 保存/登録解除<br/>POST /api/repos/update<br/>POST /api/repos/remove| RC[config.json の repos<br/>SSE push で即時反映]
     C -->|repo登録（設定ビューの<br/>path入力・参照ピッカー /<br/>IDE管理下の登録ボタン）<br/>POST /api/repos| RC
     C -->|path 参照<br/>GET /api/fs/dirs| FS[ローカルFSブラウザ<br/>サブdir + .git 検出<br/>loopback 限定]
     RC -->|選択肢へ追加し<br/>SSE即時反映| RS
-    L -->|処理状況ナビ<br/>idle/exec/verify/resume/live<br/>の順の状態別カンバン列<br/>exec列は busy+waiting を統合<br/>カードに実行中/実行待機中ピル<br/>verify列は実装ターン終了で自動遷移<br/>（touched あり → autoVerify で検証<br/>prompt 送信・検証中も列に留まる）| C
+    L -->|処理状況ナビ<br/>idle/exec/verify/resume/live<br/>の順の状態別カンバン列<br/>exec列は busy+waiting を統合<br/>カードに実行中/実行待機中ピル<br/>カードに ctx 消費量ピル（usage_update 由来。<br/>行は最小表示のため詳細は data-tip）<br/>verify列は実装ターン終了で自動遷移<br/>（touched あり → autoVerify で検証<br/>prompt 送信・検証中も列に留まる）| C
     C -->|statusカードクリック| PICK[該当 chat を選択表示]
     C -->|検証列カードの検証ボタン<br/>POST /api/chat/verify| VR[検証ターン起動<br/>対象EXE起動+Playwright等の<br/>実機確認を指示<br/>SSE push で即時反映]
     C -->|verify=running/pending| VSH[chat 画面にも検証中/検証待ちを明示<br/>ヘッダ status＋メッセージ末尾の<br/>インジケータ＋送信ボタン<br/>SSE push で即時反映]
     C -->|完了列カードの×ボタン<br/>POST /api/chat/close| DEL[chat 削除<br/>SSE push で即時反映]
     C -->|完了列ヘッダの「すべて削除」<br/>POST /api/chat/close-completed<br/>カレントrepoの完了列を一括削除| DEL
     C -->|再開可列カードの再開ボタン<br/>POST /api/chat/resume| RLOAD[session/load で再接続<br/>SSE push で即時反映]
-    R -->|doc一覧 GET /api/agents<br/>GET /api/skills<br/>SKILL は global scope を<br/>一覧から除外| REG[doc registry<br/>agents.mjs /<br/>skills.mjs]
+    R -->|doc一覧 GET /api/agents<br/>GET /api/skills<br/>SKILL は global scope を<br/>一覧から除外| REG[doc registry<br/>agents.rs /<br/>skills.rs]
     R -->|doc/参照ファイル選択<br/>GET /api/doc| C
-    R -->|GET /api/refs<br/>AGENTS: 切替時に全doc分を<br/>マージして一覧化<br/>SKILL: doc選択時| RF[参照ファイル抽出<br/>registry/refs.mjs<br/>秘匿・未作成は無効表示]
+    R -->|GET /api/refs<br/>AGENTS: 切替時に全doc分を<br/>マージして一覧化<br/>SKILL: doc選択時| RF[参照ファイル抽出<br/>registry/refs.rs<br/>秘匿・未作成は無効表示]
 ```
 
 ### SkillOps/AgentOps（スキル/エージェント管理）
@@ -651,12 +675,12 @@ title: SkillOps/AgentOps
 ---
 flowchart LR
     U[管理 chat / 手動操作] --> RT[router<br/>入力→対象特定]
-    SR[skill registry<br/>src/registry/skills.mjs]
-    AR[agent registry<br/>src/registry/agents.mjs]
-    PR[proposals.mjs<br/>skills/prompts/config 差分生成]
+    SR[skill registry<br/>server/src/registry/skills.rs]
+    AR[agent registry<br/>server/src/registry/agents.rs]
+    PR[proposals.rs<br/>skills/prompts/config 差分生成]
     HG{人の採否}
     CONF[.devin/skills<br/>prompts/config]
-    PIPE[pipeline.mjs<br/>状態遷移]
+    PIPE[pipeline.rs<br/>状態遷移]
     RUN[runner/worker]
     VER[verify]
     EV[evidence/]
@@ -708,7 +732,7 @@ stateDiagram-v2
 title: 自動再起動（code drift）
 ---
 flowchart TD
-    WATCH[src/*.mjs 変更検知] --> EN{autoRestartOnDrift?}
+    WATCH[実行 exe の更新検知<br/>（cargo build 成果物の mtime）] --> EN{autoRestartOnDrift?}
     EN -->|off| END[何もしない]
     MAN[手動再起動<br/>設定ビューのボタン or<br/>POST /api/control/restart] --> BUSY
     EN -->|on| BUSY{実行中 run あり?}
@@ -725,9 +749,10 @@ flowchart TD
 ```
 
 - 順序は必ず「実行系停止 → control 再起動」（孤児プロセスとロック競合を防ぐ）
-- `src/*.mjs` の変更を `fs.watch` で検知（code drift）し、
+- 実行中 exe の更新を監視して検知（code drift。Rust はコンパイル言語のため、
+  ソース保存ではなく `cargo build` の成果物更新が契機）し、
   `autoRestartOnDrift`（既定 true）なら手動と同じ経路（busy 解消待ち →
-  実行系停止 → 再起動）で自動再起動する。エディタの連続保存は
+  実行系停止 → 再起動）で自動再起動する。連続した更新は
   デバウンスで1回に吸収する
 - 手動再起動は設定ビューの「システム再起動」ボタンまたは
   `POST /api/control/restart`。busy/waiting な chat が残る間は空くまで延期し、
@@ -738,6 +763,44 @@ flowchart TD
   （savedSessionId 保持・ACP プロセスなし）を全て `session/load` で自動再接続する
   （`autoResumeOnStart`、既定 true）。load 失敗時は `session/new` へフォールバックし、
   認証不能等で繋がらない場合も chat は resumable のまま残る
+
+### 環境起動（docs ナビの起動ボタン）
+
+<!-- diagram: env-launch -->
+```mermaid
+---
+title: 環境起動（docs ナビの起動ボタン）
+---
+flowchart TD
+    BTN[docs ナビの起動ボタン] --> UP{対象ポート応答?}
+    UP -->|yes| OPEN[そのまま対象ポートを開く]
+    UP -->|no| API[POST /api/control/launch]
+    API --> APIOK{応答?}
+    APIOK -->|yes| PS[detached spawn<br/>server/target/release/kasugai-agent.exe<br/>無ければ現行 exe・PORT=8586]
+    APIOK -->|API 無し・失敗<br/>（control 全停止・旧版・静的配信）| PROTO[kasugai-agent:launch?port=..<br/>へ遷移（カスタムプロトコル）]
+    PROTO --> PROTREG{protocol 登録済み?<br/>exe が起動時に HKCU 自己登録}
+    PROTREG -->|yes| URI[exe --uri で起動<br/>同一 launch_env ロジックへ]
+    PROTREG -->|未登録| WARN[起動不可をボタン上に表示<br/>exe または npm run dev が必要]
+    URI --> PS
+    PS --> WAIT[ブラウザ側で対象ポートの<br/>応答をポーリング]
+    WAIT -->|応答 or タイムアウト| OPEN
+
+    subgraph COLD[冷起動の入口（control 全停止時）]
+        TS[ログオン自動起動<br/>HKCU Run キー KasugaiAgentDispatcher<br/>ログオンで prod 常駐<br/>--install-task / パネル設定で登録]
+        MANUAL[exe 直起動 / cargo run<br/>（npm run dev）]
+        PROTO2[kasugai-agent:// プロトコル<br/>（本図のフォールバック経路）]
+    end
+```
+
+- docs ナビの「環境を起動」ボタンは
+  `POST /api/control/launch` を呼び、対象ポートの応答を待ってからそのポートを
+  新規タブで開く。**起動は稼働中の control が行う**ため、control が落ちている
+  状態では `kasugai-agent:launch?port=..` プロトコルへフォールバックし、
+  OS に登録済みのハンドラ（exe が起動時に `HKCU\Software\Classes\kasugai-agent`
+  へ自己登録）が `kasugai-agent.exe --uri` で同一ロジックを起動する。
+  プロトコル未登録（exe 未起動の環境）では起動できずボタン上に警告を表示する。
+  冷起動の入口はログオン自動起動（Run キー）・exe 直起動・`npm run dev`・
+  プロトコル経由の4系統
 
 ## 9. セキュリティ
 
@@ -752,26 +815,29 @@ kasugai_agent/
   README.md            # 統一モデル正本（本ファイル）
   AGENTS.md            # 開発規約
   config.example.json
-  src/
-    control.mjs        # HTTP/SSE ハブ・状態の正・スケジューラ
-    conlog.mjs         # 実行体/control のコンソール出力リングバッファ（console タブ用）
-    claims.mjs         # ファイルクレーム・実装待機の競合判定
-    snapshots.mjs      # chat 変更ファイルの turn 単位スナップショット・復元
-    pipeline.mjs       # 課題ライフサイクル state machine
-    store.mjs          # JSON 永続化（state/issues/candidates/queue）
-    session.mjs        # runner 抽象（devin CLI 実装）
-    verify.mjs         # L0-L4 検証・証跡採取・push
-    knowledge.mjs      # 知見蓄積 → proposals
-    github.mjs         # gh CLI ラッパ
-    locks.mjs          # リソース排他ロック
-    detectors/
-      github-issues.mjs
-      local-health.mjs
-      manual.mjs
-    registry/
-      agents.mjs       # agent定義・ルール文書スキャン（read-only）
-      skills.mjs       # skills/*/SKILL.md スキャン（read-only）
-      refs.mjs         # doc参照ファイルの抽出・実ファイル解決（read-only）
+  server/              # Rust 実装（cargo ワークスペース。kasugai-agent.exe）
+    src/
+      main.rs          # エントリ・状態初期化・drift 監視・自動再接続
+      control.rs       # HTTP/SSE ハブ・状態の正・スケジューラ
+      conlog.rs        # 実行体/control のコンソール出力リングバッファ（console タブ用）
+      claims.rs        # ファイルクレーム・実装待機の競合判定
+      snapshots.rs     # chat 変更ファイルの turn 単位スナップショット・復元
+      chat/            # 接続AI 実行体（acp.rs=ACP CLI spawn / http.rs=/agent HTTP・OpenAI互換）
+      pipeline.rs      # 課題ライフサイクル state machine
+      store.rs         # JSON 永続化（state/issues/candidates/queue）
+      session.rs       # runner 抽象（devin CLI 実装）
+      verify.rs        # L0-L4 検証・証跡採取・push
+      knowledge.rs     # 知見蓄積 → proposals
+      proposals.rs     # proposals 格納・vet（機械検査・採否の前提）
+      github.rs        # gh CLI ラッパ
+      locks.rs         # リソース排他ロック
+      detectors/
+        github-issues.rs
+        local-health.rs
+      registry/
+        agents.rs      # agent定義・ルール文書スキャン（read-only）
+        skills.rs      # skills/*/SKILL.md スキャン（read-only）
+        refs.rs        # doc参照ファイルの抽出・実ファイル解決（read-only）
   panel/
     index.html
   prompts/             # assess/dispatch/verify 等のプロンプトテンプレ
@@ -789,7 +855,11 @@ kasugai_agent/
 
 ## 11. 運用
 
-- ログオン時自動起動: タスクスケジューラ `KasugaiAgentDispatcher`（再登録は実装後）
+- ログオン時自動起動: HKCU Run キー `KasugaiAgentDispatcher`（ログオンで現行
+  exe を起動）。タスクスケジューラは非管理者登録不可のため Run キーを使う。
+  登録/解除は `kasugai-agent --install-task` / `--uninstall-task`、または
+  設定ビュー「システム」タブの自動起動カード
+  （`GET/POST /api/control/autostart`）から行う
 - 監視対象は `config.json` の `repos`。初期は本リポジトリ自身のみ（自己監視で
   ループを育ててから他リポジトリへ拡大）。パネルの設定ビュー
   （左ペインナビ「設定」→ 中央ペイン）からも登録できる（`POST /api/repos`）
@@ -805,3 +875,51 @@ kasugai_agent/
 3. **M2 検証強化** — L2/L3・証跡・リソースロック・帰属 revert
 4. **M3 学習還流** — knowledge/proposals・人ゲート・自己監視拡大
 5. **M4 パネル完成** — チャット・ボード・設定・SSE 進行表示
+
+## 13. 配布とアセット更新（CDN）
+
+- 配布の基本は **zip 一式**（exe + `config.example.json` + `panel/` + `docs/` +
+  `prompts/`）。exe 隣接に `config.json` があるとそこを root とみなす
+  （`server/src/main.rs` の配布版判定）。exe 単体では動かない
+- 上乗せとして **CDN からのアセット更新**を持つ。CDN はランタイムに直接
+  配信させず「取得 → sha256 検証 → `assets/<ch>/` へ配置 → そこから
+  loopback でローカル配信」。panel の JS は制御 API 全権を持つ信頼コード
+  なので、検証なしの外部配信はしない
+- `assets/<ch>/` が存在すれば `serve_static` が `panel/`・`docs/` より優先して
+  配信する（オーバーレイ）。更新で repo の `panel/`・`docs/` は汚れない
+- `GET /api/assets`（状態）/ `POST /api/assets/check`（確認+自動適用）/
+  `POST /api/assets/apply`（手動適用）/ `POST /api/assets/rollback`（1世代戻し）
+- manifest は `{minExeVersion, channels:{<ch>:{version, files:{<rel>:<sha256>}}}}`。
+  exe 版が `minExeVersion` 未満なら適用せず通知のみ（版スキュー防止）
+- `prompts` など行動系チャネルは `assetAutoApply.<ch>` 既定 off で
+  **proposal 起票→人の採否**。採用時に proposal 適用が root 配下へ書込む
+- config: `cdnBaseUrl`（空=無効）/ `cdnCheckMinutes`（0=手動のみ）/
+  `cdnManifestSha256`（manifest ピン・任意）/ `assetAutoApply`
+
+<!-- diagram: asset-update -->
+```mermaid
+---
+title: アセット更新（CDN 配布）
+---
+flowchart TD
+    TRIG[更新確認<br/>起動時 / 定期 cdnCheckMinutes /<br/>POST /api/assets/check] --> EN{cdnBaseUrl 設定?}
+    EN -->|未設定| SKIP[何もしない<br/>（ZIP・ローカル配布のみ）]
+    EN -->|設定済| MF[manifest.json 取得<br/>channels / version / minExeVersion /<br/>files + sha256]
+    MF -->|取得失敗| KEEP[現行継続<br/>オフライン耐性・lastError を SSE push]
+    MF --> PIN{cdnManifestSha256<br/>ピン指定あり?}
+    PIN -->|あり・不一致| KEEP
+    PIN -->|なし or 一致| CMP{exe version >=<br/>minExeVersion?}
+    CMP -->|no| NEED[exe 更新が必要<br/>SSE assets で通知のみ・適用しない]
+    CMP -->|yes| DIFF{チャネルごと<br/>remote != installed?}
+    DIFF -->|同一| DONE[最新・何もしない]
+    DIFF -->|差分あり| GATE{assetAutoApply.&#60;ch&#62;?}
+    GATE -->|on<br/>panel/docs 既定| DL[.staging/&#60;ch&#62;/ へ全ファイル DL<br/>各 sha256 を検証]
+    DL -->|1件でも不一致| DISCARD[staging 破棄・現行維持]
+    DL -->|全件一致| SWAP[assets/&#60;ch&#62;/ を差替<br/>現行は &#60;ch&#62;.bak/ へ退避]
+    SWAP --> SSE[installed 版を assets/state.json へ記録<br/>SSE assets push<br/>都度ディスク配信なので再起動不要]
+    GATE -->|off<br/>prompts 既定=人ゲート| PROP[proposal 起票<br/>kind=prompt・changes=prompts/*<br/>同 version の起票済なら重複しない]
+    PROP --> HUMAN{人の採否}
+    HUMAN -->|採用| APPLY[proposal 適用<br/>root 配下へ書込み]
+    HUMAN -->|却下| DROP[記録して破棄]
+    SSE -.->|rollback API| RB[&#60;ch&#62;.bak/ を復元<br/>version/prevVersion を入替<br/>巻き戻した版を held＝自動適用抑制<br/>（より新しい版が来れば解除）]
+```

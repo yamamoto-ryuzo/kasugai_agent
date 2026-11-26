@@ -27,11 +27,9 @@ detector が課題候補（candidate）を emit し、入口で正規化・重�
 人ゲート待ち、それ以外はキュー → runner 起動 → 実装 → verify（L0〜L4 の
 実機検証）→ push まで自動で進みます。詳細は「3-1 統一モデル図」を参照。
 
-- **manual detector**: このパネルのチャットが会話入口（「課題化」ボタンで
-  会話を課題候補に登録）
 - **verify**: L2 以上は対象 EXE を実機で起動して応答確認。証跡は `evidence/` へ
-- **learn**: 実行結果・証跡は `knowledge/` へ蓄積し、agent 自身への反映は
-  proposals 機構で人が採否する
+- **learn**: 実行結果・証跡は SKILL（draft・mermaid 図必須）として
+  `.devin/skills/` へ蓄積し、agent 自身への反映は proposals 機構で人が採否する
 
 ## 関連ドキュメント
 

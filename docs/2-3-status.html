@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>2-3 処理状況 — KASUGAI Agent マニュアル</title>
   <link rel="stylesheet" href="style.css">
+  <script src="nav.js" defer></script>
   <script type="module">
     import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
     mermaid.initialize({ startOnLoad: true });
@@ -16,13 +17,9 @@
       <h1>KASUGAI Agent マニュアル <span class="version-badge">v0.2.0</span></h1>
       <p>課題の検出 → 評価 → 対応 → 実機検証 → 学習 の自律ループ常駐システム</p>
     </header>
-    <div class="layout">
-      <nav class="side"><div class="sec"><div class="sec-name">概要</div><a href="index.html">1-1 概要</a></div>
-<div class="sec"><div class="sec-name">使い方</div><a href="2-1-panel.html">2-1 パネル構成</a><a href="2-2-chat.html">2-2 AIチャット</a><a href="2-3-status.html" class="active">2-3 処理状況</a><a href="2-4-docs.html">2-4 doc browser</a><a href="2-5-settings.html">2-5 設定</a></div>
-<div class="sec"><div class="sec-name">設計</div><a href="3-1-diagrams.html">3-1 統一モデル図</a></div></nav>
-      <main>
-        <h2 class="ptitle">2-3 処理状況</h2>
-        <p>左ペイン「処理状況」ナビで、カレント repo の chat を状態別カンバン列で<br>一覧します。列は <code>idle → exec → verify → resume → live</code> の順です。</p>
+    <main>
+      <h2 class="ptitle">2-3 処理状況</h2>
+      <p>左ペイン「処理状況」ナビで、カレント repo の chat を状態別カンバン列で<br>一覧します。列は <code>idle → exec → verify → resume → live</code> の順です。</p>
 <h3>列の意味</h3>
 <table><thead><tr><th>列</th><th>状態</th></tr></thead><tbody><tr><td>idle</td><td>待機中（セッション未開始・完了）</td></tr><tr><td>exec</td><td>busy（実行中）+ waiting（実行待機中）を統合。カードのピルで区別</td></tr><tr><td>verify</td><td>実装ターン終了で自動遷移（touched あり → autoVerify）。検証中も列に留まる</td></tr><tr><td>resume</td><td>ACP 切断・次の送信で再開可能</td></tr><tr><td>live</td><td>ACP セッション接続中</td></tr></tbody></table>
 <h3>カード操作</h3>
@@ -30,8 +27,7 @@
 <p>いずれも SSE push で全パネルへ即時反映されます。</p>
 <h3>verify の流れ</h3>
 <p>再検証（verify）と push は一体の仕事です。検証を通っていないコミットは<br>リモートへ公開せず、帰属不明・rejected のコミットは <code>git revert</code> で<br>除去してから push します。検証 NG の場合は課題を分離して差し戻し<br>（<code>verifyBackLimit</code> まで再試行）。</p>
-      </main>
-    </div>
+    </main>
   </div>
 </body>
 </html>

@@ -1,0 +1,24 @@
+---
+title: アセット更新（CDN 配布）
+---
+flowchart TD
+    TRIG[更新確認<br/>起動時 / 定期 cdnCheckMinutes /<br/>POST /api/assets/check] --> EN{cdnBaseUrl 設定?}
+    EN -->|未設定| SKIP[何もしない<br/>（ZIP・ローカル配布のみ）]
+    EN -->|設定済| MF[manifest.json 取得<br/>channels / version / minExeVersion /<br/>files + sha256]
+    MF -->|取得失敗| KEEP[現行継続<br/>オフライン耐性・lastError を SSE push]
+    MF --> PIN{cdnManifestSha256<br/>ピン指定あり?}
+    PIN -->|あり・不一致| KEEP
+    PIN -->|なし or 一致| CMP{exe version >=<br/>minExeVersion?}
+    CMP -->|no| NEED[exe 更新が必要<br/>SSE assets で通知のみ・適用しない]
+    CMP -->|yes| DIFF{チャネルごと<br/>remote != installed?}
+    DIFF -->|同一| DONE[最新・何もしない]
+    DIFF -->|差分あり| GATE{assetAutoApply.&#60;ch&#62;?}
+    GATE -->|on<br/>panel/docs 既定| DL[.staging/&#60;ch&#62;/ へ全ファイル DL<br/>各 sha256 を検証]
+    DL -->|1件でも不一致| DISCARD[staging 破棄・現行維持]
+    DL -->|全件一致| SWAP[assets/&#60;ch&#62;/ を差替<br/>現行は &#60;ch&#62;.bak/ へ退避]
+    SWAP --> SSE[installed 版を assets/state.json へ記録<br/>SSE assets push<br/>都度ディスク配信なので再起動不要]
+    GATE -->|off<br/>prompts 既定=人ゲート| PROP[proposal 起票<br/>kind=prompt・changes=prompts/*<br/>同 version の起票済なら重複しない]
+    PROP --> HUMAN{人の採否}
+    HUMAN -->|採用| APPLY[proposal 適用<br/>root 配下へ書込み]
+    HUMAN -->|却下| DROP[記録して破棄]
+    SSE -.->|rollback API| RB[&#60;ch&#62;.bak/ を復元<br/>version/prevVersion を入替<br/>巻き戻した版を held＝自動適用抑制<br/>（より新しい版が来れば解除）]

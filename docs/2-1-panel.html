@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>2-1 パネル構成 — KASUGAI Agent マニュアル</title>
   <link rel="stylesheet" href="style.css">
+  <script src="nav.js" defer></script>
   <script type="module">
     import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
     mermaid.initialize({ startOnLoad: true });
@@ -16,24 +17,19 @@
       <h1>KASUGAI Agent マニュアル <span class="version-badge">v0.2.0</span></h1>
       <p>課題の検出 → 評価 → 対応 → 実機検証 → 学習 の自律ループ常駐システム</p>
     </header>
-    <div class="layout">
-      <nav class="side"><div class="sec"><div class="sec-name">概要</div><a href="index.html">1-1 概要</a></div>
-<div class="sec"><div class="sec-name">使い方</div><a href="2-1-panel.html" class="active">2-1 パネル構成</a><a href="2-2-chat.html">2-2 AIチャット</a><a href="2-3-status.html">2-3 処理状況</a><a href="2-4-docs.html">2-4 doc browser</a><a href="2-5-settings.html">2-5 設定</a></div>
-<div class="sec"><div class="sec-name">設計</div><a href="3-1-diagrams.html">3-1 統一モデル図</a></div></nav>
-      <main>
-        <h2 class="ptitle">2-1 パネル構成</h2>
-        <p>パネルは横3ペイン構成です。境界のグリップをドラッグすると幅を変えられ、<br>localStorage に永続化されます。</p>
+    <main>
+      <h2 class="ptitle">2-1 パネル構成</h2>
+      <p>パネルは横3ペイン構成です。境界のグリップをドラッグすると幅を変えられ、<br>localStorage に永続化されます。</p>
 <h3>左ペイン</h3>
-<ul><li><strong>カレントリポジトリ選択</strong> — title 直下の owner/repo 2セレクト。 常に1リポジトリを指し（「すべて」選択肢は無し）、選択がパネル全体の スコープ（新規 chat の cwd・課題化の repo・各一覧の絞込）になります。 localStorage に永続化</li><li><strong>管理セクション</strong> — loop state（version/port/repos/chats/candidates 数）と candidates 一覧を表示</li><li><strong>縦並びナビ</strong> — 各ビューへの入口（後述）</li></ul>
+<ul><li><strong>カレントリポジトリ選択</strong> — title 直下の owner/repo 2セレクト。 常に1リポジトリを指し（「すべて」選択肢は無し）、選択がパネル全体の スコープ（新規 chat の cwd・各一覧の絞込）になります。 選択し直すと各一覧・中央ペインを再取得し、表示中の chat / doc 表示が スコープ外なら解除します（実行中の chat はバックグラウンドで継続します）。 localStorage に永続化</li><li><strong>管理セクション</strong> — loop state（version/port/repos/chats/candidates 数）と candidates 一覧を表示</li><li><strong>縦並びナビ</strong> — 各ビューへの入口（後述）</li></ul>
 <h3>ナビボタン</h3>
 <table><thead><tr><th>ボタン</th><th>表示先</th><th>内容</th></tr></thead><tbody><tr><td>AIチャット</td><td>右ペイン</td><td>chat sessions 一覧に戻す</td></tr><tr><td>処理状況</td><td>中央ペイン</td><td>状態別カンバン列（「2-3 処理状況」）</td></tr><tr><td>エディター</td><td>右ペイン</td><td>カレント repo のフォルダツリー（file 選択で中央に本文表示）</td></tr><tr><td>AGENTS</td><td>右ペイン+中央</td><td>agent 定義・ルール文書と参照ファイル一覧</td></tr><tr><td>SKILL</td><td>右ペイン+中央</td><td>SKILL.md 一覧（global scope は除外）</td></tr><tr><td>マニュアル</td><td>中央ペイン</td><td>本サイト（<code>docs/</code>）を iframe で表示</td></tr><tr><td>設定</td><td>中央ペイン</td><td>接続AI / リポジトリ / システム（「2-5 設定」）</td></tr><tr><td>─（区切り線）</td><td></td><td></td></tr><tr><td>コミット</td><td>カレント repo</td><td>全変更をローカルコミット（<code>POST /api/git/commit</code>。<code>git add -A</code> + <code>git commit</code>、変更なしは noop）</td></tr><tr><td>プッシュ</td><td>カレント repo</td><td>コミットをリモートへプッシュ（<code>POST /api/git/push</code>。人ゲートの承認）</td></tr></tbody></table>
 <p>git 系ボタンは区切り線を挟んでナビ末尾（設定の下）に並びます。<br>実行出力はコンソールタブへ集約されます（SSE push で即時表示）。</p>
 <h3>右ペイン</h3>
 <ul><li><strong>chat sessions</strong> — カレント repo の chat 一覧。行は状態ドット + ラベルの最小表示で、状態の確認は処理状況ボードで行う。 並列モードは親子でグループ表示。省略ラベルはホバーで全文ポップアップ （状態・並列/agent の補足も併記）</li><li><strong>エディター</strong> — カレント repo のフォルダツリー。dir は lazy 展開 （<code>GET /api/fs/tree</code>）、file 選択で中央ペインに本文表示 （登録 repo 配下・非秘匿のみ）</li><li><strong>doc browser</strong> — AGENTS/SKILL 選択時に doc + 参照ファイルを一覧</li></ul>
 <h3>ヘッダ（中央ペイン）</h3>
-<p>チャット表示時は「最新・課題化・改名・中断・クリア・変更復元・リセット」<br>ボタン、doc/マニュアル表示時は「← チャット」で戻ります。右端の言語 select<br>で表示言語を切替（<code>panel/i18n/</code> 辞書・localStorage 永続化）。</p>
-      </main>
-    </div>
+<p>チャット表示時は「最新・改名・中断・クリア・変更復元・リセット」<br>ボタン、doc/マニュアル表示時は「← チャット」で戻ります。右端の言語 select<br>で表示言語を切替（<code>panel/i18n/</code> 辞書・localStorage 永続化）。</p>
+    </main>
   </div>
 </body>
 </html>

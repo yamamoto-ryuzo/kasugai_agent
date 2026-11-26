@@ -412,14 +412,14 @@ function newChat({ label, repo, sessionId, updatedAt, agent, id: wantId,
   // 変更復元: chat が触ったファイルの turn 単位変更前スナップショット
   const snaps = new SnapshotStore(join(SNAPS, String(id)));
   chat.snapTurn = snaps.lastTurn();
-  // execMode: direct=逐次 / parallel=kasugai-split で子 chat を自動起動。
+  // execMode: direct=逐次 / parallel=kasugai-split で子 chat を自動起動（既定）。
   // parent=親 chat id（子のみ）、depth=分割深度、splitScan=走査済み messages 位置、
   // primedFor=プリアンブルを届けた sessionId（false=未付与、HTTP型は null=付与済）、
   // seenSplits=発射済み分割キー、
   // repoDeclined=repo 不整合確認で「このまま送信」を選んだ候補（再確認しない）
   const entry = { chat, snaps, label: label ?? `chat ${id}`, repo: repo ?? null,
     updatedAt: updatedAt ?? new Date().toISOString(),
-    execMode: mode === 'parallel' ? 'parallel' : 'direct',
+    execMode: mode === 'direct' ? 'direct' : 'parallel',
     parent: parent ?? null, depth: depth ?? 0,
     primedFor: primedFor ?? false, splitScan: 0,
     seenSplits: new Set(seenSplits ?? []),

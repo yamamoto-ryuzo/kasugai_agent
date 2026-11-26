@@ -1,6 +1,11 @@
 {
   "site": "KASUGAI Agent マニュアル",
   "desc": "課題の検出 → 評価 → 対応 → 実機検証 → 学習 の自律ループ常駐システム",
+  "demos": [
+    { "href": "../", "text": "▶ パネルを開く" },
+    { "action": "launch", "target": "prod", "port": 8586, "text": "▶ 環境を起動" },
+    { "href": "https://github.com/yamamoto-ryuzo/kasugai_agent/issues", "text": "🐛 問い合わせ（GitHub Issues）" }
+  ],
   "groups": [
     {
       "section": "概要",
@@ -10,6 +15,7 @@
     },
     {
       "section": "使い方",
+      "label": "パネル",
       "items": [
         { "page": "2-1-panel", "text": "2-1 パネル構成" },
         { "page": "2-2-chat", "text": "2-2 AIチャット" },
@@ -21,7 +27,9 @@
     {
       "section": "設計",
       "items": [
-        { "page": "3-1-diagrams", "text": "3-1 統一モデル図" }
+        { "page": "3-1-diagrams", "text": "3-1 統一モデル図" },
+        { "page": "3-2-autonomy", "text": "3-2 自律ループと実装方式" },
+        { "page": "3-3-distribution", "text": "3-3 配布とアセット更新" }
       ]
     }
   ]

@@ -8,7 +8,9 @@
       "label": "Devin",
       "type": "acp",
       "exe": "C:\\path\\to\\devin.exe",
-      "args": ["acp"],
+      "args": [
+        "acp"
+      ],
       "auth": "devin"
     },
     "hub-copilot": {
@@ -41,8 +43,18 @@
       "requirePushApproval": false
     }
   ],
+  "repoScanDirs": ["C:/Users/you/repos"],
   "pollSeconds": {
     "issues": 120,
-    "health": 300
+    "health": 300,
+    "learn": 60
+  },
+  "cdnBaseUrl": "",
+  "cdnCheckMinutes": 0,
+  "cdnManifestSha256": "",
+  "assetAutoApply": {
+    "panel": true,
+    "docs": true,
+    "prompts": false
   }
 }

@@ -17,6 +17,9 @@
           display: flex; flex-direction: column; }
   .brand { padding: 14px 14px 10px; font-weight: 700; font-size: 15px; }
   .brand small { display: block; font-weight: 400; color: #9ca3af; font-size: 12px; }
+  #devbadge { display: none; margin-left: 6px; padding: 1px 6px; border-radius: 4px;
+              background: #dc2626; color: #fff; font-size: 10px; font-weight: 700;
+              vertical-align: 2px; letter-spacing: .05em; }
   #sess { flex: 1; overflow-y: auto; padding: 4px 8px; }
   .csess { display: flex; align-items: center; gap: 6px; padding: 8px 10px; margin: 2px 0;
            border-radius: 7px; cursor: pointer; font-size: 13px; color: #374151;
@@ -76,6 +79,11 @@
   .item:hover { background: #f8fafc; }
   .muted { color: #9ca3af; font-size: 12px; margin-top: 2px; }
   .empty { color: #9ca3af; font-size: 12px; padding: 6px 0; }
+  .vetok { color: #059669; font-weight: 600; font-size: 11px; margin-left: 6px; }
+  .vetng { color: #dc2626; font-weight: 600; font-size: 11px; margin-left: 6px; cursor: help; }
+  .vetst { color: #6b7280; font-size: 11px; margin-left: 6px; }
+  .pbtns { margin-top: 4px; display: flex; gap: 6px; }
+  .pbtns button { font-size: 11px; padding: 2px 10px; }
   .pill { display: inline-block; min-width: 42px; margin-right: 6px; padding: 1px 6px;
           border-radius: 999px; background: #f3f4f6; color: #6b7280; font-size: 12px;
           text-align: center; }
@@ -85,6 +93,8 @@
   .pill.resume { background: #e0e7ff; color: #3730a3; }
   .pill.par { background: #fdf4ff; color: #a21caf; }
   .pill.ver { background: #cffafe; color: #155e75; }
+  .pill.repo { background: #f1f5f9; color: #475569; }
+  .pill.ctx { background: #e0f2fe; color: #075985; min-width: 0; }
   /* ヘッダの親子リンク（子→親 / 親→子） */
   #plink a { color: #a21caf; font-size: 12px; margin-right: 8px; cursor: pointer; }
   /* ---- 処理状況カンバン（中央ペイン: 状態別の横並び列） ---- */
@@ -205,7 +215,7 @@
   #main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
   #head { display: flex; align-items: center; gap: 8px; padding: 10px 16px;
           background: #fff; border-bottom: 1px solid #e5e7eb; flex-wrap: wrap; }
-  #head .title { font-weight: 600; }
+  #head .title { font-weight: 600; flex: 1 1 100%; }
   #status { color: #6b7280; font-size: 12px; }
   #head select { font-size: 12px; padding: 3px 6px; border: 1px solid #d1d5db;
                  border-radius: 6px; background: #fff; max-width: 220px; }
@@ -304,7 +314,7 @@
 <body>
 <div id="rban"></div>
 <div id="mgmt">
-  <div class="brand">KASUGAI Agent<small data-i18n="brand.sub">管理 / AI チャット</small></div>
+  <div class="brand">KASUGAI Agent<span id="devbadge" title="開発インスタンスで起動中（debug ビルド / KASUGAI_DEV）">DEV</span><small data-i18n="brand.sub">管理 / AI チャット</small></div>
   <div id="repo-row">
     <select id="repo-owner" onchange="repoOwnerChanged()"
       title="オーナー（repo 一覧の絞込）" data-i18n-attr="title:repo.owner.tip"></select>
@@ -329,6 +339,7 @@
   <div id="mgmtbox">
     <div class="sec"><h3 data-i18n="mgmt.loopState">loop state</h3><div id="mstate" class="card">...</div></div>
     <div class="sec"><h3 data-i18n="mgmt.candidates">candidates</h3><div id="mcands" class="card">...</div></div>
+    <div class="sec"><h3 data-i18n="mgmt.proposals">proposals</h3><div id="mprops" class="card">...</div></div>
   </div>
 </div>
 <div class="grip" id="grip-l" title="ドラッグで左ペインの幅を変更" data-i18n-attr="title:grip.left.tip"></div>
@@ -354,7 +365,6 @@
     <span class="spacer"></span>
     <select id="langsel" onchange="changeLang(this.value)"
       title="表示言語" data-i18n-attr="title:lang.tip"></select>
-    <button class="chatonly" onclick="toIssue()" title="この会話を課題候補として登録" data-i18n="head.toIssue" data-i18n-attr="title:head.toIssue.tip">課題化</button>
     <button class="chatonly" onclick="renameChat()" title="ラベルを変更" data-i18n="head.rename" data-i18n-attr="title:head.rename.tip">改名</button>
     <button class="chatonly" onclick="chatCancel()" data-i18n="head.cancel">中断</button>
     <button class="chatonly" onclick="chatClear()" data-i18n="head.clear">クリア</button>
@@ -545,7 +555,7 @@ const Viewer = {
     const edit = editable
       ? `<span class="edit" onclick="startRevise()" title="${esc(t('edit.tip'))}">${esc(t('edit.label'))}</span>`
       : '';
-    return `<div class="msg ${cls}">${body}<span class="time">${(m.ts || '').slice(11, 19)}${edit}</span></div>`;
+    return `<div class="msg ${cls}">${body}<span class="time">${fmtTm(m.ts)}${edit}</span></div>`;
   },
   // ---- mermaid（```mermaid ブロックと .mmd 本文を図として描画） ----
   // CDN から lazy import。失敗時・構文エラー時はソース表示のまま残す
@@ -681,16 +691,39 @@ const joinSlug = (o, n) => o ? o + '/' + n : n;
 let repoOwner = splitSlug(repoScope)[0];   // カレント owner 選択
 const scopeFromSelects = () =>
   joinSlug(repoOwner, document.getElementById('repo-name').value);
-function applyRepoScope() {          // repoScope 確定後の全ペイン反映
+// path が属する登録 repo の slug（最長一致。どの repo 配下でもなければ null）
+const normPath = (p) =>
+  String(p ?? '').replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
+const pathRepoSlug = (p) => {
+  const n = normPath(p);
+  let best = null;
+  for (const r of repos) {
+    const root = normPath(r.path);
+    if (root && (n === root || n.startsWith(root + '/')) &&
+        (!best || root.length > normPath(best.path).length)) best = r;
+  }
+  return best ? repoSlugOf(best) : null;
+};
+async function applyRepoScope(refreshCenter = true) {  // repoScope 確定後の全ペイン反映
   localStorage.setItem('kasugai:repo', repoScope);
   const wasCenter = centerMode;    // sideView('chats') が centerMode を戻すので退避
-  loadSessions();            // 右ペイン chat sessions
-  sideView(sideMode);        // 右ペイン doc browser（再取得）
+  await loadSessions();        // 右ペイン chat sessions（sel のスコープ外解除を兼ねる）
+  treeSel = '';              // ツリーの選択・展開・取得キャッシュは旧 repo のものなので解除
+  treeKids.clear(); treeOpen.clear();
+  if (refreshCenter) sideView(sideMode);  // 右ペイン doc browser（再取得）
+  else renderSide();         // boardOpen 等で中央遷移を別途制御する場合は一覧のみ更新
   loadMgmt();                // 左ペイン管理セクション
-  treeSel = '';              // ツリーの選択は旧 repo のファイルになるので解除
   if (sideMode === 'editor') renderTree();
+  if (!refreshCenter) return;
   if (wasCenter === 'status') showStatus();
   else if (wasCenter === 'settings') showSettings();
+  // doc viewer が他 repo 配下のファイルを表示中なら閉じて chat 表示へ戻す
+  // （repo 非所属の global doc は残す。agents/skills 側は sideView が先頭
+  //   doc を開き直すので実質 editor 表示の救済）
+  else if (wasCenter === 'doc' && curDoc?.path &&
+           pathRepoSlug(curDoc.path) && pathRepoSlug(curDoc.path) !== repoScope) {
+    exitDoc(); loadChat();
+  }
   else if (sel == null) renderEmpty();
 }
 function repoOwnerChanged() {
@@ -715,6 +748,7 @@ function fillRepoNames(preferName) {
 // /api/state から選択肢を再構築。prefer 指定時はその slug を選択
 async function refreshRepos(prefer) {
   const st = await J('GET', '/api/state');
+  markDev(st);
   repos = st.repos || [];
   if (prefer && repos.some((r) => r.slug === prefer)) repoScope = prefer;
   else if (!repos.some((r) => r.slug === repoScope))
@@ -731,9 +765,31 @@ async function refreshRepos(prefer) {
   localStorage.setItem('kasugai:repo', repoScope);
 }
 // ---------- セッション一覧 ----------
+// コンテキスト消費量（usage {used,size?,cost?}。usage_update 由来、
+// size 不明な実行体は使用数のみ。cost は累積セッションコスト）
+const ctxPct = (u) => (u && u.size ? Math.round((u.used / u.size) * 100) : null);
+const ctxK = (n) =>
+  (n >= 10000 ? Math.round(n / 1000) + 'k' : n >= 1000 ? (n / 1000).toFixed(1) + 'k' : String(n));
+const ctxText = (u) => {                 // 詳細表示 "53k/200k (26%) · $0.045"
+  if (!u || u.used == null) return '';
+  const p = ctxPct(u);
+  let s = u.size ? `${ctxK(u.used)}/${ctxK(u.size)} (${p}%)` : ctxK(u.used);
+  if (u.cost && u.cost.amount != null)
+    s += ` · ${u.cost.currency === 'USD' ? '$' : (u.cost.currency ? u.cost.currency + ' ' : '')}${u.cost.amount}`;
+  return s;
+};
+const ctxShort = (u) =>                  // 短縮表示 "26%"（size 不明時は "12k"）
+  (u && u.used != null ? (ctxPct(u) != null ? ctxPct(u) + '%' : ctxK(u.used)) : '');
+const ctxPill = (s) =>
+  (s.usage ? ` <span class="pill ctx" title="${esc(t('ctx.label') + ' ' + ctxText(s.usage))}">ctx ${esc(ctxShort(s.usage))}</span>` : '');
 async function loadSessions() {
   const j = await J('GET', '/api/chat/sessions');
   const list = (j.sessions || []).filter((s) => matchRepo(s.repo));
+  // 選択中 chat がカレント repo の一覧に無ければ選択解除（他 repo 所属 or
+  // 削除済み）。実行中の chat 本体はバックグラウンドで継続する
+  if (sel != null && !list.some((s) => s.id === sel)) {
+    sel = null; endRevise(); renderEmpty();
+  }
   // 並列モードの子 chat は親の直下にインデントしてまとめる。
   // 親が絞込対象外・削除済みの孤児は root として表示する
   const ids = new Set(list.map((s) => s.id));
@@ -751,7 +807,8 @@ async function loadSessions() {
     `<div class="csess${s.id === sel ? ' active' : ''}${child ? ' child' : ''}" onclick="chatSelect(${s.id})"
       data-tip="${esc((child ? '↳ ' : '') + s.label + '\n' + stat(s) +
         (s.execMode === 'parallel' ? '\n' + t('exmode.parallel') : '') +
-        (agentRows.length > 1 && s.agentLabel ? '\n' + s.agentLabel : ''))}">
+        (agentRows.length > 1 && s.agentLabel ? '\n' + s.agentLabel : '') +
+        (s.usage ? '\n' + t('ctx.label') + ' ' + ctxText(s.usage) : ''))}">
       <span class="sdot st-${statusKey(s)}"></span>
       <span class="lbl">${child ? '↳ ' : ''}${esc(s.label)}</span>
       <span class="x" onclick="event.stopPropagation();closeChat(${s.id})">✕</span>
@@ -806,7 +863,7 @@ function renderEmpty() {
   document.getElementById('ctitle').textContent = t('chat.new');
   document.getElementById('plink').innerHTML = '';
   document.getElementById('exmode').value =
-    localStorage.getItem('kasugai:exmode') || 'direct';
+    localStorage.getItem('kasugai:exmode') || 'parallel';
   document.getElementById('status').textContent = t('chat.unsent');
   document.getElementById('box').innerHTML =
     `<div class="msg sys">${esc(t('chat.hintStartAgent', { agent: alabel }))}</div>`;
@@ -815,6 +872,8 @@ async function loadChat() {
   if (centerMode !== 'chat') return;     // doc/処理状況 表示中は中央ペインを保持
   if (sel == null) { renderEmpty(); return; }
   const j = await J('GET', '/api/chat?id=' + sel);
+  // カレント repo 外の chat は表示しない（実行自体はバックグラウンドで継続）
+  if (!matchRepo(j.repo)) { sel = null; renderEmpty(); loadSessions(); return; }
   document.getElementById('ctitle').textContent = j.label || ('chat ' + sel);
   // 並列モードの親子リンク（子→親へ戻る / 親→子 chat 一覧）
   document.getElementById('plink').innerHTML =
@@ -822,7 +881,7 @@ async function loadChat() {
       ? `<a onclick="chatSelect(${j.parent})" title="${esc(t('plink.parent.tip'))}">${esc(t('plink.parent', { id: j.parent }))}</a>` : '') +
     (j.children || []).map((c) =>
       `<a onclick="chatSelect(${c})" title="${esc(t('plink.child.tip'))}">${esc(t('plink.child', { id: c }))}</a>`).join('');
-  document.getElementById('exmode').value = j.execMode || 'direct';
+  document.getElementById('exmode').value = j.execMode || 'parallel';
   document.getElementById('status').textContent =
     (j.execMode === 'parallel' ? `[${t('exmode.parallel')}] ` : '') +
     (j.agent?.label ? '[' + j.agent.label + '] ' : '') +
@@ -831,7 +890,8 @@ async function loadChat() {
         ? t('status.repoAsk') : t('status.execWait')) :
     j.busy ? t('status.running') :
     j.sessionId ? (j.live ? t('status.connected') : t('status.disconnected'))
-    : (j.agent?.type && j.agent.type !== 'acp' ? t('status.http') : t('status.notStarted')));
+    : (j.agent?.type && j.agent.type !== 'acp' ? t('status.http') : t('status.notStarted'))) +
+    (j.usage ? ' · ctx ' + ctxText(j.usage) : '');
   // リポジトリ不整合の確認バー（waiting kind=repo）
   const ra = document.getElementById('repoask');
   const ask = j.waiting?.kind === 'repo' ? j.waiting.suggest : null;
@@ -905,7 +965,7 @@ function applyChatTab() {
 }
 const conLineHtml = (l) =>
   `<div class="cl ${l.stream === 'err' ? 'err' : l.stream === 'sys' ? 'sys' : ''}">` +
-  `<span class="t">${(l.ts || '').slice(11, 19)}</span>` +
+  `<span class="t">${fmtTm(l.ts)}</span>` +
   `<span class="cs">[${esc(l.src)}]</span>${esc(l.text)}</div>`;
 async function loadConsole() {
   const j = await J('GET', '/api/console?limit=800');
@@ -1049,20 +1109,6 @@ async function chatRestore() {
   loadChat();
 }
 
-// ---------- 課題化（manual detector 入口） ----------
-async function toIssue() {
-  if (sel == null) return;
-  const j = await J('GET', '/api/chat?id=' + sel);
-  const convo = (j.messages || [])
-    .filter((m) => m.role === 'user' || m.role === 'agent')
-    .map((m) => `[${m.role}] ${m.text}`).join('\n').slice(0, 8000);
-  const title = prompt(t('issue.titlePrompt'), j.label || '');
-  if (!title) return;
-  const r = await J('POST', '/api/candidates', {
-    title, body: convo, repo: repoScope || undefined });
-  alert(r.ok ? t('issue.registered') : t('alert.fail', { error: r.error || '' }));
-}
-
 // ---------- 中央ペインの表示モード（chat / doc / status / settings） ----------
 let centerMode = 'chat';                     // 'chat' | 'doc' | 'status' | 'settings'
 
@@ -1091,7 +1137,8 @@ const statusLabel = (s) => {
 };
 async function showStatus() {
   const j = await J('GET', '/api/chat/sessions');
-  const list = (j.sessions || []).filter((s) => matchRepo(s.repo));
+  // 処理状況は全 repo を表示し、カレント repo のカードを各列の先頭に並べる
+  const list = (j.sessions || []);
   centerMode = 'status';
   curDoc = null;
   document.getElementById('main').classList.add('doc');
@@ -1100,12 +1147,15 @@ async function showStatus() {
   renderSide();
   const by = Object.fromEntries(STATUS_COLS.map(([k]) => [k, []]));
   for (const s of list) by[statusKey(s)].push(s);
-  by.exec.sort((a, b) => (b.busy ? 1 : 0) - (a.busy ? 1 : 0)); // 実行中 → 実行待機中の順
+  const cur = (s) => (matchRepo(s.repo) ? 1 : 0);   // カレント repo 優先
+  for (const k in by) by[k].sort((a, b) => cur(b) - cur(a));
+  by.exec.sort((a, b) => (b.busy ? 1 : 0) - (a.busy ? 1 : 0) || cur(b) - cur(a)); // 実行中 → 実行待機中、同順はカレント repo 優先
   document.getElementById('ctitle').textContent = t('nav.status');
   document.getElementById('status').textContent = t('board.total', { count: list.length });
   const short = (f) => String(f).split('/').slice(-2).join('/');
-  const card = (s) =>
-    `<div class="bcard" onclick="chatSelect(${s.id})">` +
+  const card = (s) => {
+    const slug = repoSlugOf(s.repo);
+    return `<div class="bcard" onclick="boardOpen(${s.id},'${esc(slug)}')">` +
     (statusKey(s) === 'live'
       ? `<span class="bx" title="${esc(t('board.close.tip'))}" onclick="event.stopPropagation();boardClose(${s.id})">×</span>`
       : '') +
@@ -1116,6 +1166,7 @@ async function showStatus() {
       ? `<button class="bact" title="${esc(t('board.verify.tip'))}" onclick="event.stopPropagation();boardVerify(${s.id})">${esc(t('board.verify.btn'))}</button>`
       : '') +
     `<div><b>${s.parent != null ? '↳ ' : ''}${esc(s.label)}</b>` +
+    (slug && slug !== repoScope ? ` <span class="pill repo">${esc(slug)}</span>` : '') +
     (s.execMode === 'parallel' ? ` <span class="pill par">${esc(t('exmode.parallel'))}</span>` : '') +
     (statusKey(s) === 'exec'
       ? ` <span class="pill run">${s.busy ? esc(t('board.running')) : s.waitInfo?.kind === 'repo' ? esc(t('board.waitConfirm')) : esc(t('board.waiting'))}</span>` +
@@ -1124,6 +1175,7 @@ async function showStatus() {
     (statusKey(s) === 'verify'
       ? ` <span class="pill ver">${s.verify === 'running' ? esc(t('board.verifying')) : esc(t('board.verifyPending'))}</span>`
       : '') +
+    ctxPill(s) +
     `</div>` +
     `<div class="muted">#${s.id} · ${esc(fmtTs(s.updatedAt))}</div>` +
     (s.waitInfo?.kind === 'repo'
@@ -1135,6 +1187,7 @@ async function showStatus() {
         (s.waitInfo.held ? esc(t('board.held', { count: s.waitInfo.held })) : '') + `</div>`
       : '') +
     `</div>`;
+  };
   const col = ([k, pill, name]) =>
     `<div class="bcol"><div class="bhead"><span class="pill ${pill}">${esc(t(name))}</span>` +
     (k === 'live' && by.live.length
@@ -1152,15 +1205,24 @@ const scheduleStatus = () => {
   clearTimeout(statT);
   statT = setTimeout(showStatus, 300);
 };
+// ボードのカードを開く。他 repo の chat なら先にカレント repo を切り替える
+// （loadChat はカレント repo 外を表示しないため）
+async function boardOpen(id, slug) {
+  if (slug && slug !== repoScope && repos.some((r) => r.slug === slug)) {
+    await refreshRepos(slug);
+    await applyRepoScope(false);   // status 再描画と競合させず、続く chatSelect で中央を開く
+  }
+  chatSelect(id);
+}
 // 完了列カードの × で chat を削除（closeChat と同じ API）。ボードも即時再描画
 async function boardClose(id) {
   await closeChat(id);              // close API + 右ペイン一覧の更新
   if (centerMode === 'status') showStatus();
 }
-// 完了列ヘッダの「すべて削除」: カレント repo の完了（live）列 chat を一括削除
+// 完了列ヘッダの「すべて削除」: ボードに表示中（全 repo）の完了列 chat を一括削除
 async function boardCloseAll(count) {
   if (!count || !confirm(t('board.closeAll.confirm', { count }))) return;
-  const r = await J('POST', '/api/chat/close-completed', { repo: repoScope || undefined });
+  const r = await J('POST', '/api/chat/close-completed', {});
   if (!r.ok) { alert(t('alert.fail', { error: r.error || '' })); return; }
   if (r.ids?.includes(sel)) { sel = null; loadChat(); }
   loadSessions();
@@ -1203,13 +1265,21 @@ async function gitPush() {
 
 // ---------- 設定（中央ペイン: 接続AI + 監視リポジトリ一覧・編集） ----------
 // GET /api/repos は config.repos 登録済み + IDEワークスペース直下の .git
-// ディレクトリ（IDE管理下）を返す。カレントrepo選択では絞らず全件表示する。
+// ディレクトリ（IDE管理下）+ ユーザーリポジトリ（ワークスペース/repoScanDirs
+// 直下の .git 無し dir・ユーザーディレクトリ/repoScanDirs 直下の .git dir。
+// GitHub 非依存）を返す。カレントrepo選択では絞らず全件表示する。
 // GET /api/chat-agents は config.chatAgents/chatAgent（ACP 実行体の台帳）を返す
 let repoRows = [];
 let agentRows = [];
 let activeAgent = '';
 let wsRoot = '';            // GET /api/repos の workspace。path ピッカーの初期位置
 let sysState = {};          // GET /api/state。システムタブの表示用
+let isDev = false;          // /api/state.dev。開発インスタンス表示
+function markDev(st) {
+  isDev = !!(st && st.dev);
+  document.getElementById('devbadge').style.display = isDev ? 'inline-block' : 'none';
+  document.title = (isDev ? '[DEV] ' : '') + t('app.title');
+}
 let setTab = localStorage.getItem('kasugai:settab') || 'agents';  // agents|repos|system
 async function refreshAgents() {
   const aj = await J('GET', '/api/chat-agents');
@@ -1259,6 +1329,7 @@ function renderSettings() {
   const card = (e, i) => {
     const badges =
       (e.ide ? `<span class="pill live">${esc(t('repo.ide'))}</span>` : '') +
+      (e.user ? `<span class="pill">${esc(t('repo.user'))}</span>` : '') +
       (e.registered ? `<span class="pill">${esc(t('repo.registered'))}</span>`
                     : `<span class="pill wait">${esc(t('repo.unregistered'))}</span>`);
     const cur = e.slug && e.slug === repoScope
@@ -1345,6 +1416,38 @@ function renderSettings() {
     ` title="${esc(t('sys.restartForce.tip'))}">${esc(t('sys.restartForce'))}</button>` +
     `<span class="muted" id="restart-note"></span></div>` +
     `<div class="muted">${esc(t('sys.restartNote'))}</div></div>`;
+  // 自動起動カード（HKCU Run キー KasugaiAgentDispatcher の登録/解除）
+  const as = sysState.autostart || {};
+  const autoCard =
+    `<div class="rcard"><b>${esc(t('autostart.title'))}</b>` +
+    `<div class="muted">` +
+    (as.installed
+      ? `<span class="pill live">${esc(t('autostart.installed'))}</span>`
+      : `<span class="pill">${esc(t('autostart.notInstalled'))}</span>`) +
+    ` <span class="muted">${esc(as.task ?? 'KasugaiAgentDispatcher')}</span>` +
+    (as.cmd ? ` <span class="muted">${esc(as.cmd)}</span>` : '') + `</div>` +
+    `<div class="rset">` +
+    (as.installed
+      ? `<button onclick="autostartSet(false)">${esc(t('autostart.uninstall'))}</button>`
+      : `<button class="primary" onclick="autostartSet(true)">${esc(t('autostart.install'))}</button>`) +
+    `</div>` +
+    `<div class="muted">${esc(t('autostart.note'))}</div></div>`;
+  // 時刻表示カード（IANA タイムゾーン名。空欄=ブラウザ既定）
+  const tzCard =
+    `<div class="rcard"><b>${esc(t('tz.title'))}</b>` +
+    `<div class="muted">${esc(t('tz.now', { tz: tzName() }))}: ${esc(fmtTs(new Date().toISOString()))}</div>` +
+    `<div class="rset"><label>${esc(t('tz.label'))}` +
+    `<input type="text" id="tz-input" list="tz-list" value="${esc(dispTz)}"` +
+    ` placeholder="${esc(tzAuto())}"` +
+    ` onkeydown="if(event.key==='Enter')saveTz()"></label>` +
+    `<datalist id="tz-list">` +
+    [...new Set([tzAuto(), dispTz, ...TZ_CHOICES].filter(Boolean))]
+      .map((z) => `<option value="${esc(z)}">`).join('') +
+    `</datalist>` +
+    `<button class="primary" onclick="saveTz()">${esc(t('common.save'))}</button></div>` +
+    `<div class="muted">${esc(t('tz.note'))}</div></div>`;
+  // アセット更新カード（CDN 配布: /api/state.assets）
+  const assetCardHtml = assetsCard();
   // 先頭カードは任意パスの登録フォーム。登録はすべてこのビューで行う
   const regCard =
     `<div class="rcard"><b>${esc(t('repo.regTitle'))}</b>` +
@@ -1371,7 +1474,7 @@ function renderSettings() {
         ? `<div class="rgrid">` + repoRows.map(card).join('') + `</div>`
         : `<div class="empty">${esc(t('repo.none'))}</div>`)
     : setTab === 'system'
-      ? sysCard
+      ? sysCard + autoCard + tzCard + assetCardHtml
       : agentReg + (agentRows.length
           ? agentRows.map(acard).join('') : `<div class="empty">${esc(t('agent.none'))}</div>`);
   document.getElementById('box').innerHTML = tabbar + body;
@@ -1384,12 +1487,75 @@ function agentTypeUI() {
   for (const el of document.querySelectorAll('#agent-reg-fields [data-t]'))
     el.style.display = (el.dataset.t || '').split(' ').includes(t) ? '' : 'none';
 }
+// ---------- アセット更新（CDN 配布: /api/assets*。表示は /api/state.assets） ----------
+function assetsCard() {
+  const a = sysState.assets || {};
+  const chs = a.channels || {};
+  const names = Object.keys(chs);
+  const row = (ch) => {
+    const c = chs[ch];
+    const state = a.needsExe
+      ? `<span class="pill">${esc(t('assets.needExe', { v: a.needsExe }))}</span>`
+      : (c.held && c.held === c.latest)
+        ? `<span class="pill">${esc(t('assets.held'))}</span>`
+        : c.update
+          ? (c.autoApply
+            ? `<span class="pill live">${esc(t('assets.update'))}</span>`
+            : `<span class="pill">${esc(t('assets.gated'))}</span>`)
+          : `<span class="pill">${esc(t('assets.uptodate'))}</span>`;
+    const gp = c.gatedProposal && c.gatedProposal.proposalId
+      ? ` <span class="muted">${esc(t('assets.proposal', { id: c.gatedProposal.proposalId }))}</span>` : '';
+    const btns =
+      (c.update && !a.needsExe
+        ? `<button onclick="assetsApply('${esc(ch)}')">${esc(t('assets.apply'))}</button>` : '') +
+      (c.hasBackup
+        ? `<button onclick="assetsRollback('${esc(ch)}')">${esc(t('assets.rollback'))}</button>` : '');
+    return `<div class="muted"><b>${esc(ch)}</b> ` +
+      `${esc(c.installed ?? '-')} → ${esc(c.latest ?? '-')} ${state}${gp}` +
+      (c.error ? ` <span class="pill">${esc(c.error)}</span>` : '') +
+      (btns ? ` <span class="rset" style="display:inline-flex">${btns}</span>` : '') +
+      `</div>`;
+  };
+  return `<div class="rcard"><b>${esc(t('assets.title'))}</b>` +
+    `<div class="muted">CDN: ${esc(a.cdnBaseUrl || t('assets.off'))}` +
+    (a.lastCheckAt ? ` · ${esc(t('assets.lastCheck'))}: ${esc(fmtTs(a.lastCheckAt))}` : '') +
+    (a.lastError ? ` · ${esc(t('assets.fail', { e: a.lastError }))}` : '') + `</div>` +
+    (names.length ? names.map(row).join('') : `<div class="empty">${esc(t('assets.none'))}</div>`) +
+    `<div class="rset"><button onclick="assetsCheck()" ${a.checking ? 'disabled' : ''}` +
+    ` title="${esc(t('assets.check.tip'))}">${esc(a.checking ? t('assets.checking') : t('assets.check'))}</button></div>` +
+    `<div class="muted">${esc(t('assets.note'))}</div></div>`;
+}
+async function assetsCheck() {
+  const r = await J('POST', '/api/assets/check', {});
+  if (!r.ok) { alert(t('alert.fail', { error: r.error || '' })); return; }
+  sysState.assets = r;
+  if (centerMode === 'settings' && setTab === 'system') renderSettings();
+}
+async function assetsApply(ch) {
+  const r = await J('POST', '/api/assets/apply', { channel: ch });
+  if (!r.ok) { alert(t('alert.fail', { error: r.error || '' })); return; }
+  if (centerMode === 'settings') showSettings();
+}
+async function assetsRollback(ch) {
+  if (!confirm(t('assets.rollbackConfirm', { ch }))) return;
+  const r = await J('POST', '/api/assets/rollback', { channel: ch });
+  if (!r.ok) { alert(t('alert.fail', { error: r.error || '' })); return; }
+  if (centerMode === 'settings') showSettings();
+}
 async function sysRestart(force) {
   if (!confirm(force ? t('confirm.restartForce') : t('confirm.restart')))
     return;
   const r = await J('POST', '/api/control/restart', force ? { force: true } : {});
   if (!r.ok) { alert(t('alert.restartFail', { error: r.error || '' })); return; }
   showRestarting(!!r.pending, force);
+}
+// 自動起動（HKCU Run キー登録）の切替。応答の autostart で即時反映
+async function autostartSet(on) {
+  const r = await J('POST', '/api/control/autostart',
+    { action: on ? 'install' : 'uninstall' });
+  if (!r.ok) { alert(t('alert.fail', { error: r.error || '' })); return; }
+  sysState.autostart = r.autostart;
+  if (centerMode === 'settings' && setTab === 'system') renderSettings();
 }
 // 再起動の状態表示（最上部 #rban バナー + カード内 note。SSE restart からも呼ぶ）
 let restartShown = false;
@@ -1832,7 +1998,57 @@ async function openTreeFile(path) {
 }
 
 // ---------- 管理ペイン（左） ----------
-const fmtTs = (ts) => String(ts || '').replace('T', ' ').slice(0, 19) || '-';
+// ---- 表示タイムゾーン（設定ビューのシステムタブで選択・localStorage 永続化） ----
+// dispTz='' はブラウザ既定（OS のゾーン）。保存値は IANA 名。サーバの ts は
+// UTC ISO のまま保持し、表示時に Intl で変換する
+const TZ_KEY = 'kasugai:tz';
+let dispTz = localStorage.getItem(TZ_KEY) || '';
+const tzAuto = () => Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+const tzName = () => dispTz || tzAuto();
+const tzValid = (z) => {
+  try { new Intl.DateTimeFormat('en', { timeZone: z }); return true; }
+  catch { return false; }
+};
+// datalist に出す代表ゾーン（入力自体は任意の IANA 名を受理する）
+const TZ_CHOICES = [
+  'Asia/Tokyo', 'UTC',
+  'Asia/Seoul', 'Asia/Shanghai', 'Asia/Taipei', 'Asia/Singapore',
+  'Asia/Kolkata', 'Asia/Dubai', 'Australia/Sydney', 'Pacific/Auckland',
+  'Europe/London', 'Europe/Paris', 'Europe/Berlin', 'Europe/Moscow',
+  'America/Los_Angeles', 'America/Denver', 'America/Chicago',
+  'America/New_York', 'America/Toronto', 'America/Sao_Paulo',
+];
+// sv-SE ロケール + h23 で 'YYYY-MM-DD HH:MM:SS' / 'HH:MM:SS' 形に揃える
+let tzFmt = { key: '', d: null, t: null };
+function tzFmts() {
+  const key = tzName();
+  if (tzFmt.key !== key) {
+    const base = { timeZone: key, hourCycle: 'h23' };
+    tzFmt = {
+      key,
+      d: new Intl.DateTimeFormat('sv-SE', { ...base, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+      t: new Intl.DateTimeFormat('sv-SE', { ...base, hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+    };
+  }
+  return tzFmt;
+}
+const tsDate = (ts) => { const d = new Date(ts); return isNaN(d) ? null : d; };
+const fmtTs = (ts) => {
+  const d = tsDate(ts);
+  return d ? tzFmts().d.format(d) : (String(ts || '').replace('T', ' ').slice(0, 19) || '-');
+};
+const fmtTm = (ts) => {
+  const d = tsDate(ts);
+  return d ? tzFmts().t.format(d) : String(ts || '').slice(11, 19);
+};
+function saveTz() {
+  const v = (document.getElementById('tz-input')?.value || '').trim();
+  if (v && !tzValid(v)) { alert(t('tz.invalid', { tz: v })); return; }
+  dispTz = v;
+  localStorage.setItem(TZ_KEY, dispTz);
+  renderSettings();
+  loadMgmt();   // 左ペインの一覧時刻も即時反映
+}
 // 秒数 → 表示用の稼働時間（86400s=1d）
 const fmtDur = (sec) => {
   const s = Math.floor(+sec || 0);
@@ -1847,9 +2063,9 @@ const scheduleMgmt = () => {
   mgmtT = setTimeout(loadMgmt, 400);
 };
 async function loadMgmt() {
-  const [st, sess, cand] = await Promise.all([
+  const [st, sess, cand, prop] = await Promise.all([
     J('GET', '/api/state'), J('GET', '/api/chat/sessions'),
-    J('GET', '/api/candidates')]);
+    J('GET', '/api/candidates'), J('GET', '/api/proposals')]);
   const sessions = (sess.sessions || []).filter((s) => matchRepo(s.repo));
   const candidates = (cand.candidates || []).filter((c) => matchRepo(c.repo));
   document.getElementById('mstate').innerHTML =
@@ -1863,6 +2079,26 @@ async function loadMgmt() {
     `<div><b>${esc(c.title)}</b></div>` +
     `<div class="muted">${esc(c.source || 'manual')} · ${esc(fmtTs(c.detectedAt))}</div>` +
     `</div>`).join('') : `<div class="empty">${esc(t('cand.none'))}</div>`;
+  const proposals = (prop.proposals || []).slice().reverse();
+  document.getElementById('mprops').innerHTML = proposals.length ? proposals.map((pp) => {
+    const fails = ((pp.vet && pp.vet.checks) || []).filter((x) => !x.ok).map((x) => x.name + ' ' + (x.path || ''));
+    const badge = pp.status === 'pending'
+      ? (pp.vet && pp.vet.ok ? '<span class="vetok">vet &#10003;</span>'
+        : '<span class="vetng" data-tip="' + esc(fails.join(' / ')) + '">vet &#10007;</span>')
+      : '<span class="vetst">' + esc(pp.status) + '</span>';
+    const btns = pp.status === 'pending' ? '<div class="pbtns">' +
+      '<button onclick="propDecide(\'' + esc(pp.id) + '\',\'accept\')" ' + (pp.vet && pp.vet.ok ? '' : 'disabled') + '>' + esc(t('prop.accept')) + '</button>' +
+      '<button onclick="propDecide(\'' + esc(pp.id) + '\',\'decline\')">' + esc(t('prop.decline')) + '</button></div>' : '';
+    return '<div class="item" style="cursor:default"><div><b>' + esc(pp.title) + '</b>' + badge + '</div>' +
+      '<div class="muted">' + esc(pp.kind || '') + ' &middot; ' + esc(fmtTs(pp.createdAt)) + '</div>' + btns + '</div>';
+  }).join('') : `<div class="empty">${esc(t('prop.none'))}</div>`;
+}
+
+// ---------- proposals（vet は採否の前提検査） ----------
+async function propDecide(id, decision) {
+  const r = await J('POST', `/api/proposals/${id}/${decision}`);
+  if (!r.ok) alert(r.error === 'vet failed' ? t('prop.vetFail') : (r.error || 'error'));
+  loadMgmt();
 }
 
 // ---------- 省略ラベルの全文ポップアップ ----------
@@ -1938,7 +2174,7 @@ async function boot() {
     `<option value="${l}">${LANGUAGE_NAMES[l]}</option>`).join('');
   langsel.value = getLanguage();
   applyI18n();
-  document.title = t('app.title');
+  document.title = (isDev ? '[DEV] ' : '') + t('app.title');
   await refreshRepos();
   await refreshAgents();             // active 接続AI（新規chatの実行体表示用）
   // セッション未開始でもモデル/モード選択肢を出す
@@ -1954,7 +2190,7 @@ async function boot() {
 // JS 生成文字列を含むビュー（一覧・ボード・設定・doc 本文）はここで再描画する
 async function changeLang(v) {
   await setLanguage(v);
-  document.title = t('app.title');
+  document.title = (isDev ? '[DEV] ' : '') + t('app.title');
   document.getElementById('langsel').value = getLanguage();
   document.getElementById('hint').textContent = hintText();
   if (busySince) setSendBusy(true);
@@ -1977,12 +2213,26 @@ es.addEventListener('chat', (e) => {
 });
 es.addEventListener('chats', () => { loadSessions(); scheduleMgmt(); scheduleStatus(); });
 es.addEventListener('candidates', scheduleMgmt);
+es.addEventListener('proposals', scheduleMgmt);
 es.addEventListener('console', (e) => appendConLines(JSON.parse(e.data).lines));
-es.addEventListener('repos', async () => { await refreshRepos(); loadMgmt();
-  if (centerMode === 'settings') showSettings(); });
+es.addEventListener('repos', async () => {
+  const prev = repoScope;
+  await refreshRepos();          // 登録解除等で選択 repo が無効になるとフォールバック
+  if (repoScope !== prev) { applyRepoScope(); return; }   // 選択が変わった → 全ペイン反映
+  loadMgmt();
+  if (centerMode === 'settings') showSettings();
+});
 es.addEventListener('chatAgents', async () => { await refreshAgents();
   loadSessions();
   if (centerMode === 'settings') showSettings(); });
+es.addEventListener('assets', (e) => {   // CDN アセット更新の状態変化
+  sysState.assets = JSON.parse(e.data);
+  if (centerMode === 'settings' && setTab === 'system') renderSettings();
+});
+es.addEventListener('autostart', (e) => {  // 自動起動（タスク登録）の状態変化
+  sysState.autostart = JSON.parse(e.data);
+  if (centerMode === 'settings' && setTab === 'system') renderSettings();
+});
 es.addEventListener('restart', (e) => {  // control 再起動の pending/restarting 表示
   const d = JSON.parse(e.data);
   showRestarting(!!d.pending, !!d.forced);

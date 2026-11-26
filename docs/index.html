@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>1-1 概要 — KASUGAI Agent マニュアル</title>
   <link rel="stylesheet" href="style.css">
+  <script src="nav.js" defer></script>
   <script type="module">
     import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
     mermaid.initialize({ startOnLoad: true });
@@ -16,24 +17,19 @@
       <h1>KASUGAI Agent マニュアル <span class="version-badge">v0.2.0</span></h1>
       <p>課題の検出 → 評価 → 対応 → 実機検証 → 学習 の自律ループ常駐システム</p>
     </header>
-    <div class="layout">
-      <nav class="side"><div class="sec"><div class="sec-name">概要</div><a href="index.html" class="active">1-1 概要</a></div>
-<div class="sec"><div class="sec-name">使い方</div><a href="2-1-panel.html">2-1 パネル構成</a><a href="2-2-chat.html">2-2 AIチャット</a><a href="2-3-status.html">2-3 処理状況</a><a href="2-4-docs.html">2-4 doc browser</a><a href="2-5-settings.html">2-5 設定</a></div>
-<div class="sec"><div class="sec-name">設計</div><a href="3-1-diagrams.html">3-1 統一モデル図</a></div></nav>
-      <main>
-        <h2 class="ptitle">1-1 概要</h2>
-        <p>KASUGAI Agent は、<strong>課題の検出 → 評価 → 対応 → 実機検証 → 学習</strong> の自律ループを<br>実装する常駐システムです。統一モデルの正本は <code>README.md</code>、開発規約は<br><code>AGENTS.md</code> にあります。</p>
+    <main>
+      <h2 class="ptitle">1-1 概要</h2>
+      <p>KASUGAI Agent は、<strong>課題の検出 → 評価 → 対応 → 実機検証 → 学習</strong> の自律ループを<br>実装する常駐システムです。統一モデルの正本は <code>README.md</code>、開発規約は<br><code>AGENTS.md</code> にあります。</p>
 <h3>画面構成</h3>
 <p>操作の中心はブラウザのパネル UI（<code>http://127.0.0.1:8586/</code>）です。<br>制御は loopback bind のみで、外部には公開しません。</p>
 <table><thead><tr><th>UI 領域</th><th>内容</th></tr></thead><tbody><tr><td>左ペイン</td><td>title・カレントリポジトリ選択・管理セクション（loop state / candidates）・縦並びナビ（AIチャット / 処理状況 / エディター / AGENTS / SKILL / マニュアル / 設定）</td></tr><tr><td>中央ペイン</td><td>chat messages（chat/console タブ切替）・doc 本文・処理状況カンバン・設定ビュー・マニュアル（本サイト）</td></tr><tr><td>右ペイン</td><td>chat sessions 一覧 / エディター（フォルダツリー） / doc browser（doc + 参照ファイル）</td></tr></tbody></table>
 <p>左ペインのナビから各ビューを開き、右ペインまたは中央ペインに表示します。<br>このマニュアルは「マニュアル」ナビで開いた <code>docs/</code> サイトそのものです。</p>
 <h3>自律ループ（課題ライフサイクル）</h3>
 <p>detector が課題候補（candidate）を emit し、入口で正規化・重複判定<br>（source+repo+symptomHash）して課題レコードを作ります。<code>external</code> ラベル付きは<br>人ゲート待ち、それ以外はキュー → runner 起動 → 実装 → verify（L0〜L4 の<br>実機検証）→ push まで自動で進みます。詳細は「3-1 統一モデル図」を参照。</p>
-<ul><li><strong>manual detector</strong>: このパネルのチャットが会話入口（「課題化」ボタンで 会話を課題候補に登録）</li><li><strong>verify</strong>: L2 以上は対象 EXE を実機で起動して応答確認。証跡は <code>evidence/</code> へ</li><li><strong>learn</strong>: 実行結果・証跡は <code>knowledge/</code> へ蓄積し、agent 自身への反映は proposals 機構で人が採否する</li></ul>
+<ul><li><strong>verify</strong>: L2 以上は対象 EXE を実機で起動して応答確認。証跡は <code>evidence/</code> へ</li><li><strong>learn</strong>: 実行結果・証跡は SKILL（draft・mermaid 図必須）として <code>.devin/skills/</code> へ蓄積し、agent 自身への反映は proposals 機構で人が採否する</li></ul>
 <h3>関連ドキュメント</h3>
 <ul><li><code>README.md</code> — 統一モデル正本（設計の詳細はこちら）</li><li><code>AGENTS.md</code> — 開発規約（mermaid 正本・1ファイル1責務・SSE 即時反映 等）</li></ul>
-      </main>
-    </div>
+    </main>
   </div>
 </body>
 </html>

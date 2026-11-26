@@ -6,11 +6,13 @@
   "private": true,
   "scripts": {
     "start": "node src/control.mjs",
+    "dev": "cargo run --manifest-path server/Cargo.toml",
     "check": "node --check src/control.mjs && node --check src/acp-chat.mjs",
     "diagrams": "node tools/sync-diagrams.mjs",
     "diagrams:check": "node tools/sync-diagrams.mjs --check",
     "docs": "node tools/sync-docs.mjs",
     "docs:check": "node tools/sync-docs.mjs --check",
-    "test": "node --test \"test/*.test.mjs\""
+    "test": "node --test \"test/*.test.mjs\"",
+    "dist": "node tools/make-dist.mjs"
   }
 }
