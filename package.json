@@ -6,7 +6,7 @@
   "private": true,
   "scripts": {
     "start": "node src/control.mjs",
-    "dev": "cargo run --manifest-path server/Cargo.toml",
+    "dev": "node tools/dev.mjs",
     "check": "node --check src/control.mjs && node --check src/acp-chat.mjs",
     "diagrams": "node tools/sync-diagrams.mjs",
     "diagrams:check": "node tools/sync-diagrams.mjs --check",

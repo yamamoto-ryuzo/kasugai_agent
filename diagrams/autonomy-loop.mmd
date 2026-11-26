@@ -8,7 +8,7 @@ flowchart TB
     G -->|却下| X[rejected]
     G -->|承認| R[dispatch<br/>runner = 接続AI]
     R --> V[verify L0〜L4<br/>実機検証・証跡・push]
-    V -->|NG 差し戻し| R
+    V -->|NG 差し戻し<br/>（保留 → 処理再開・再起動で再送）| R
     V -->|合格| K[learn<br/>SKILL 蓄積 → .devin/skills/<br/>（draft・mermaid 図を必ず明示）]
     K --> P[proposals<br/>skills / prompts / config]
     P --> G

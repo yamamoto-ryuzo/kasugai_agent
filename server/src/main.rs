@@ -11,6 +11,9 @@
 //   kasugai-agent --register-protocol    kasugai-agent:// プロトコルを HKCU 登録
 //   kasugai-agent --uri "<url>"          プロトコルハンドラ入口
 //                                        （kasugai-agent:launch?target=..&port=..）
+//   kasugai-agent --import-github        config.repos の GitHub Issue を
+//                                        一括取込（open→queued/gated・
+//                                        closed→done/rejected の終端起票）
 // release ビルドはコンソール窓を出さない（タスクスケジューラ常駐用）。
 // CLI サブコマンドは attach_console() で親コンソールへ出力する
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
@@ -23,12 +26,15 @@ mod config;
 mod control;
 mod detectors;
 mod github;
+mod housekeep;
 mod knowledge;
 mod launch;
+mod locks;
 mod pipeline;
 mod proposals;
 mod registry;
 mod repomatch;
+mod runner;
 mod snapshots;
 mod split;
 mod store;
@@ -191,6 +197,18 @@ async fn main() {
             }
             std::process::exit(0);
         }
+        Some("--import-github") => {
+            attach_console();
+            let root = find_root();
+            let cfg = load_config(&root);
+            let (created, total) =
+                detectors::github_issues::import_all(&root, &cfg).await;
+            println!(
+                "github issue 取込: {} 件中 {} 件を新規起票（既出は lastSeen 更新のみ）",
+                total, created
+            );
+            std::process::exit(0);
+        }
         _ => {}
     }
 
@@ -268,6 +286,19 @@ async fn main() {
                         }
                     }
                 }
+                let mut pending_splits = Vec::new();
+                if let Some(arr) = s.get("pendingSplits").and_then(|v| v.as_array()) {
+                    for v in arr {
+                        let title = v.get("title").and_then(|x| x.as_str()).unwrap_or("");
+                        let prompt = v.get("prompt").and_then(|x| x.as_str()).unwrap_or("");
+                        if !title.is_empty() && !prompt.is_empty() {
+                            pending_splits.push(split::Split {
+                                title: title.to_string(),
+                                prompt: prompt.to_string(),
+                            });
+                        }
+                    }
+                }
                 app.new_chat(control::NewChatOpts {
                     label: s.get("label").and_then(|v| v.as_str()).map(String::from),
                     repo: s.get("repo").cloned().filter(|v| !v.is_null()),
@@ -286,14 +317,46 @@ async fn main() {
                     depth: s.get("depth").and_then(|v| v.as_u64()).unwrap_or(0),
                     primed_for: Some(Primed::from_persisted(s.get("primedFor"))),
                     seen_splits,
+                    pending_splits,
                     repo_declined,
                     verify: s.get("verify").and_then(|v| v.as_str()).map(String::from),
                     verify_count: s.get("verifyCount").and_then(|v| v.as_u64()).unwrap_or(0),
                     verify_back: s.get("verifyBack").and_then(|v| v.as_u64()).unwrap_or(0),
+                    done_kind: s
+                        .get("doneKind")
+                        .and_then(|v| v.as_str())
+                        .map(String::from),
+                    back_prompt: s
+                        .get("backPrompt")
+                        .and_then(|v| v.as_str())
+                        .map(String::from),
+                    needs_human: s
+                        .get("needsHuman")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false),
                     usage: s
                         .get("usage")
                         .cloned()
                         .and_then(|v| serde_json::from_value(v).ok()),
+                    // 再起動前の待機状態（kind=repo の確認待ち・保留 prompt を含む）
+                    waiting: s.get("waiting").and_then(|v| {
+                        serde_json::from_value::<Option<chat::WaitState>>(v.clone())
+                            .ok()
+                            .flatten()
+                    }),
+                    held_prompts: s
+                        .get("heldPrompts")
+                        .and_then(|v| v.as_array())
+                        .map(|a| {
+                            a.iter()
+                                .filter_map(|x| x.as_str().map(String::from))
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                    resume_on_release: s
+                        .get("resumeOnRelease")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false),
                 })
                 .await;
             }
@@ -306,6 +369,26 @@ async fn main() {
         tokio::spawn(async move { control::event_loop(app2, evt_rx).await });
     }
     control::spawn_watchers(app.clone());
+
+    // pendingSplits が残る親 chat は起動時に drain を試行する。
+    // 再起動で子の busy エッジ（完了検知）が消えるため、これがないと
+    // 待機キューが誰にも起動されず滞留する
+    {
+        let app2 = app.clone();
+        tokio::spawn(async move {
+            let ids: Vec<i64> = {
+                let chats = app2.chats.lock().await;
+                chats
+                    .iter()
+                    .filter(|(_, s)| !s.pending_splits.is_empty())
+                    .map(|(id, _)| *id)
+                    .collect()
+            };
+            for id in ids {
+                app2.spawn_splits(id).await;
+            }
+        });
+    }
 
     // 起動時の自動再開: resumable な chat を全て ensureSession で再接続
     if cfg_bool_default_true(&cfg, "autoResumeOnStart") {
@@ -328,6 +411,10 @@ async fn main() {
                     chat.push_sys(&format!("[自動再開失敗] {}", e)).await;
                 }
             }
+            // 起動時の自動再処理: 差し戻し待ち・検証待ち・宙ぶら待機・
+            // 起動失敗の保留 prompt を再送（再開可への続行 prompt・
+            // 要人対応・repo 確認待ちは対象外）
+            app2.resume_all(None, false).await;
         });
     }
 

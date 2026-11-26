@@ -19,16 +19,18 @@
     </header>
     <main>
       <h2 class="ptitle">2-1 パネル構成</h2>
-      <p>パネルは横3ペイン構成です。境界のグリップをドラッグすると幅を変えられ、<br>localStorage に永続化されます。</p>
+      <p>パネルは左・中央・右の3ペイン構成です。右ペインは常時表示で、<br>エディター/AGENTS/SKILL 選択時は doc browser / フォルダツリー、<br>それ以外（右ペインに出すものがない時）は管理セクションを表示します。<br>境界のグリップをドラッグすると幅を変えられ、<br>localStorage に永続化されます。</p>
 <h3>左ペイン</h3>
-<ul><li><strong>カレントリポジトリ選択</strong> — title 直下の owner/repo 2セレクト。 常に1リポジトリを指し（「すべて」選択肢は無し）、選択がパネル全体の スコープ（新規 chat の cwd・各一覧の絞込）になります。 選択し直すと各一覧・中央ペインを再取得し、表示中の chat / doc 表示が スコープ外なら解除します（実行中の chat はバックグラウンドで継続します）。 localStorage に永続化</li><li><strong>管理セクション</strong> — loop state（version/port/repos/chats/candidates 数）と candidates 一覧を表示</li><li><strong>縦並びナビ</strong> — 各ビューへの入口（後述）</li></ul>
+<ul><li><strong>カレントリポジトリ選択</strong> — title 直下の owner/repo 2セレクト。 常に1リポジトリを指し（「すべて」選択肢は無し）、選択がパネル全体の スコープ（新規 chat の cwd・各一覧の絞込）になります。 選択し直すと各一覧・中央ペインを再取得し、表示中の chat / doc 表示が スコープ外なら解除します（実行中の chat はバックグラウンドで継続します）。 localStorage に永続化</li><li><strong>縦並びナビ</strong> — 各ビューへの入口（後述）</li></ul>
 <h3>ナビボタン</h3>
-<table><thead><tr><th>ボタン</th><th>表示先</th><th>内容</th></tr></thead><tbody><tr><td>AIチャット</td><td>右ペイン</td><td>chat sessions 一覧に戻す</td></tr><tr><td>処理状況</td><td>中央ペイン</td><td>状態別カンバン列（「2-3 処理状況」）</td></tr><tr><td>エディター</td><td>右ペイン</td><td>カレント repo のフォルダツリー（file 選択で中央に本文表示）</td></tr><tr><td>AGENTS</td><td>右ペイン+中央</td><td>agent 定義・ルール文書と参照ファイル一覧</td></tr><tr><td>SKILL</td><td>右ペイン+中央</td><td>SKILL.md 一覧（global scope は除外）</td></tr><tr><td>マニュアル</td><td>中央ペイン</td><td>本サイト（<code>docs/</code>）を iframe で表示</td></tr><tr><td>設定</td><td>中央ペイン</td><td>接続AI / リポジトリ / システム（「2-5 設定」）</td></tr><tr><td>─（区切り線）</td><td></td><td></td></tr><tr><td>コミット</td><td>カレント repo</td><td>全変更をローカルコミット（<code>POST /api/git/commit</code>。<code>git add -A</code> + <code>git commit</code>、変更なしは noop）</td></tr><tr><td>プッシュ</td><td>カレント repo</td><td>コミットをリモートへプッシュ（<code>POST /api/git/push</code>。人ゲートの承認）</td></tr></tbody></table>
+<table><thead><tr><th>ボタン</th><th>表示先</th><th>内容</th></tr></thead><tbody><tr><td>処理状況</td><td>中央ペイン</td><td>状態別カンバン列（「2-3 処理状況」）。起動時の初期表示</td></tr><tr><td>AIチャット</td><td>中央ペイン</td><td>doc/ツリー表示を閉じてチャットに戻る</td></tr><tr><td>エディター</td><td>右ペイン</td><td>カレント repo のフォルダツリー（file 選択で中央に本文表示）</td></tr><tr><td>AGENTS</td><td>右ペイン+中央</td><td>agent 定義・ルール文書と参照ファイル一覧</td></tr><tr><td>SKILL</td><td>右ペイン+中央</td><td>SKILL.md 一覧（global scope は除外）</td></tr><tr><td>マニュアル</td><td>中央ペイン</td><td>本サイト（<code>docs/</code>）を iframe で表示</td></tr><tr><td>設定</td><td>中央ペイン</td><td>接続AI / リポジトリ / システム（「2-5 設定」）</td></tr><tr><td>─（区切り線）</td><td></td><td></td></tr><tr><td>コミット</td><td>カレント repo</td><td>全変更をローカルコミット（<code>POST /api/git/commit</code>。<code>git add -A</code> + <code>git commit</code>、変更なしは noop）</td></tr><tr><td>プッシュ</td><td>カレント repo</td><td>コミットをリモートへプッシュ（<code>POST /api/git/push</code>。人ゲートの承認）</td></tr></tbody></table>
 <p>git 系ボタンは区切り線を挟んでナビ末尾（設定の下）に並びます。<br>実行出力はコンソールタブへ集約されます（SSE push で即時表示）。</p>
 <h3>右ペイン</h3>
-<ul><li><strong>chat sessions</strong> — カレント repo の chat 一覧。行は状態ドット + ラベルの最小表示で、状態の確認は処理状況ボードで行う。 並列モードは親子でグループ表示。省略ラベルはホバーで全文ポップアップ （状態・並列/agent の補足も併記）</li><li><strong>エディター</strong> — カレント repo のフォルダツリー。dir は lazy 展開 （<code>GET /api/fs/tree</code>）、file 選択で中央ペインに本文表示 （登録 repo 配下・非秘匿のみ）</li><li><strong>doc browser</strong> — AGENTS/SKILL 選択時に doc + 参照ファイルを一覧</li></ul>
+<p>常時表示です。エディター/AGENTS/SKILL 選択時は doc browser /<br>フォルダツリーに切り替わり、それ以外（右ペインに出すものがない時）は<br>管理セクションを表示します。</p>
+<ul><li><strong>管理セクション</strong> — loop state（version/port/repos/chats/candidates 数）と candidates / issues / proposals 一覧を表示（既定表示）。 candidates は人の判断待ちのみを表示する inbox で （未起票・gated・queued・failed。起票は自動が既定で、 実行中・終端の課題行は出しません）、各行の「対応」「却下」 ボタンで一括判断します。「対応」は起票・承認・再実行を兼ねた 即時 dispatch（未起票は rate-limit を人判断で bypass）、 「却下」は rejected です（未起票は起票して即 rejected）。 proposals のカードはクリックで中央ペインに詳細（vet 検査結果・ changes 本文・採否ボタン）を表示します</li><li><strong>エディター</strong> — カレント repo のフォルダツリー。dir は lazy 展開 （<code>GET /api/fs/tree</code>）、file 選択で中央ペインに本文表示 （登録 repo 配下・非秘匿のみ）</li><li><strong>doc browser</strong> — AGENTS/SKILL 選択時に doc + 参照ファイルを一覧</li></ul>
+<p>chat の切替は処理状況ボードのカードで行い、新規チャットは<br>チャットヘッダまたはボード上部の「＋ 新規チャット」で開きます。<br>ヘッダの「◀ 戻る / 進む ▶」ボタンでも前後の chat へ移れます<br>（並びは処理状況ボードと同じ。他 repo の chat はカレント repo の<br>切替を兼ねます）。</p>
 <h3>ヘッダ（中央ペイン）</h3>
-<p>チャット表示時は「最新・改名・中断・クリア・変更復元・リセット」<br>ボタン、doc/マニュアル表示時は「← チャット」で戻ります。右端の言語 select<br>で表示言語を切替（<code>panel/i18n/</code> 辞書・localStorage 永続化）。</p>
+<p>チャット表示時はタイトル前に処理状態ピル（ボードの列区分と同じ色で<br>実行中・検証中・要対応など）を表示し、<br>「＋ 新規チャット・最新・◀ 戻る・進む ▶・改名・中断・クリア・<br>変更復元・リセット」<br>ボタンを並べます。doc/マニュアル表示時は「← チャット」で戻ります。<br>右端の言語 select で表示言語を切替（<code>panel/i18n/</code> 辞書・localStorage 永続化）。</p>
     </main>
   </div>
 </body>

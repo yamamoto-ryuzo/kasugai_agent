@@ -45,11 +45,15 @@ pub struct ChatEntry {
     pub primed_for: Primed,                // プリアンブル付与済み sessionId
     pub split_scan: usize,
     pub seen_splits: HashSet<String>,
+    pub pending_splits: Vec<crate::split::Split>, // 同時実行上限超過分の待機キュー
     pub repo_declined: HashSet<String>,
     pub verify: Option<String>,            // pending|running
     pub verify_count: u64,
     pub verify_back: u64,
     pub verify_scan: usize,
+    pub done_kind: Option<String>,         // 終了区分: done|ng|unverified
+    pub back_prompt: Option<String>,       // 検証NG差し戻しの保留 prompt（再送待ち）
+    pub needs_human: bool,                 // 差し戻し上限到達（要人対応マーク）
 }
 
 /// primedFor: NotYet=未付与 / Session(sid)=付与済み / Always(HTTP型は常に付与扱い)
@@ -121,7 +125,7 @@ impl App {
     }
 
     /// chatAgents レジストリ: {active, agents}
-    fn chat_agents(cfg: &Value) -> (Option<String>, Map<String, Value>) {
+    pub(crate) fn chat_agents(cfg: &Value) -> (Option<String>, Map<String, Value>) {
         let mut agents = cfg_obj(cfg, "chatAgents").cloned().unwrap_or_default();
         if cfg_str(cfg, "devinExe").is_some() && !agents.contains_key("devin") {
             let mut d = Map::new();
@@ -184,8 +188,6 @@ impl App {
         json!({
             "slug": repo_slug(Some(r)),
             "path": r.get("path").and_then(|v| v.as_str()).unwrap_or(""),
-            "autoTrigger": r.get("autoTrigger").and_then(|v| v.as_bool()).unwrap_or(false),
-            "triggerLabel": r.get("triggerLabel").and_then(|v| v.as_str()).unwrap_or("devin"),
             "requirePushApproval": r.get("requirePushApproval").and_then(|v| v.as_bool()).unwrap_or(true),
         })
     }
@@ -288,7 +290,7 @@ impl App {
         reg
     }
 
-    fn git_repo<'a>(cfg: &'a Value, slug: &str) -> Option<&'a Value> {
+    pub(crate) fn git_repo<'a>(cfg: &'a Value, slug: &str) -> Option<&'a Value> {
         cfg_arr(cfg, "repos").iter().find(|r| {
             repo_slug(Some(r)).as_deref() == Some(slug)
                 || norm_p(r.get("path").and_then(|v| v.as_str()).unwrap_or("")) == norm_p(slug)
@@ -396,6 +398,13 @@ impl App {
             chat.core().lock().await.saved_session_id = Some(sid.clone());
         }
         chat.core().lock().await.usage = o.usage;
+        {
+            // 再起動前の待機状態を復元（held prompts・resumeOnRelease も維持）
+            let mut c = chat.core().lock().await;
+            c.waiting = o.waiting;
+            c.held_prompts = o.held_prompts;
+            c.resume_on_release = o.resume_on_release;
+        }
         let snaps = SnapshotStore::new(self.snaps.join(id.to_string()));
         chat.core().lock().await.snap_turn = snaps.last_turn();
         let exec_mode = if o.mode.as_deref() == Some("direct") {
@@ -426,6 +435,7 @@ impl App {
             primed_for,
             split_scan: 0,
             seen_splits: o.seen_splits,
+            pending_splits: o.pending_splits,
             repo_declined: o.repo_declined,
             verify: match o.verify.as_deref() {
                 Some("running") => Some("pending".to_string()),
@@ -435,6 +445,9 @@ impl App {
             verify_count: o.verify_count,
             verify_back: o.verify_back,
             verify_scan: 0,
+            done_kind: o.done_kind,
+            back_prompt: o.back_prompt,
+            needs_human: o.needs_human,
         };
         self.chats.lock().await.insert(id, entry);
         self.persist_chats().await;
@@ -478,6 +491,14 @@ impl App {
                 json!(s.seen_splits.iter().cloned().collect::<Vec<_>>()),
             );
             e.insert(
+                "pendingSplits".into(),
+                json!(s
+                    .pending_splits
+                    .iter()
+                    .map(|p| json!({"title": p.title, "prompt": p.prompt}))
+                    .collect::<Vec<_>>()),
+            );
+            e.insert(
                 "repoDeclined".into(),
                 json!(s.repo_declined.iter().cloned().collect::<Vec<_>>()),
             );
@@ -488,9 +509,39 @@ impl App {
             e.insert("verifyCount".into(), json!(s.verify_count));
             e.insert("verifyBack".into(), json!(s.verify_back));
             e.insert(
+                "doneKind".into(),
+                s.done_kind
+                    .clone()
+                    .map(Value::String)
+                    .unwrap_or(Value::Null),
+            );
+            e.insert(
+                "backPrompt".into(),
+                s.back_prompt
+                    .clone()
+                    .map(Value::String)
+                    .unwrap_or(Value::Null),
+            );
+            e.insert("needsHuman".into(), json!(s.needs_human));
+            e.insert(
                 "usage".into(),
                 serde_json::to_value(&c.usage).unwrap_or(Value::Null),
             );
+            // 待機状態は再起動を跨いで復元する（busy ではないため延期対象外だが
+            // 保留 prompt まで失うと再送できない）
+            e.insert(
+                "waiting".into(),
+                c.waiting
+                    .as_ref()
+                    .map(|w| {
+                        json!({
+                            "kind": w.kind, "files": w.files, "blockedBy": w.blocked_by,
+                            "suggest": w.suggest, "since": w.since })
+                    })
+                    .unwrap_or(Value::Null),
+            );
+            e.insert("heldPrompts".into(), json!(c.held_prompts));
+            e.insert("resumeOnRelease".into(), json!(c.resume_on_release));
             drop(c);
             o.insert(id.to_string(), Value::Object(e));
         }
@@ -520,8 +571,14 @@ impl App {
                 "sessionId": c.session_id,
                 "resumable": s.chat.transport() == "acp" && !proc && c.saved_session_id.is_some(),
                 "waiting": c.waiting.is_some(),
+                "heldPrompts": c.held_prompts.len(),
                 "usage": c.usage,
                 "verify": s.verify, "verifyBack": s.verify_back,
+                "doneKind": s.done_kind,
+                "backPending": s.back_prompt.is_some(),
+                "needsHuman": s.needs_human,
+                "pendingSplits": s.pending_splits.iter()
+                    .map(|p| json!({"title": p.title})).collect::<Vec<_>>(),
                 "waitInfo": c.waiting.as_ref().map(|w| json!({
                     "kind": w.kind, "files": w.files, "blockedBy": w.blocked_by,
                     "held": c.held_prompts.len(), "suggest": w.suggest })),
@@ -560,6 +617,9 @@ impl App {
         if was && !now {
             self.release_waiters(id).await;
             self.on_chat_done(id).await;
+            // ターン終了時に usage・updatedAt 等を chats.json へ反映
+            // （SessionId を出さない http 型や usage_update 更新後の保存抜けを防ぐ）
+            self.persist_chats().await;
         }
         self.sse("chat", &json!({"id": id}));
     }
@@ -618,15 +678,17 @@ impl App {
 
         enum Action {
             None,
-            Back { n: u64, prompt: String },
+            Back { n: u64 },
             BackLimit { n: u64 },
         }
         let mut action = Action::None;
         let mut need_persist = false;
         let mut do_aggregate = false;
+        let mut parent_id = None;
         let mut do_splits = false;
         let mut do_verify = false;
         let mut emit_chats = false;
+        let mut derived = None;
 
         {
             let mut chats = self.chats.lock().await;
@@ -649,12 +711,18 @@ impl App {
                             s.verify_count = 0;
                             if s.verify_back < back_limit {
                                 s.verify_back += 1;
-                                action = Action::Back {
-                                    n: s.verify_back,
-                                    prompt: build_back_prompt(v),
-                                };
+                                // 差し戻し prompt は送信せず保留する（再送は
+                                // 「処理再開」/「差し戻し」ボタン・再起動時の
+                                // 自動再処理で行う）。終了区分は ng のまま:
+                                // 再実装ターンが touched 無しで終わっても
+                                // 「未実装」ではなく「検証NG」と表示するため
+                                s.done_kind = Some("ng".to_string());
+                                s.back_prompt = Some(build_back_prompt(v));
+                                action = Action::Back { n: s.verify_back };
                             } else {
                                 s.verify_back = 0;
+                                s.done_kind = Some("ng".to_string());
+                                s.needs_human = true;
                                 action = Action::BackLimit { n: back_limit };
                             }
                             need_persist = true;
@@ -669,16 +737,49 @@ impl App {
                             if s.verify.is_none() {
                                 s.verify_count = 0;
                                 s.verify_back = 0;
+                                // 検証フェーズ解消時の終了区分:
+                                // verdict 合格=done（実装完了）/ verdict 未取得=unverified
+                                s.done_kind = Some(
+                                    if v.as_ref().is_some_and(|x| x.ok) {
+                                        "done"
+                                    } else {
+                                        "unverified"
+                                    }
+                                    .to_string(),
+                                );
+                                emit_chats = true;
+                            } else {
+                                s.done_kind = None;
                             }
                             need_persist = true;
                         }
                     }
                 } else if !c.touched.is_empty() {
-                    s.verify = Some("pending".to_string());
-                    s.verify_count = 0;
-                    need_persist = true;
+                    if s.done_kind.as_deref() == Some("done") {
+                        // done は終端: 変更の生じたターンは派生課題として起票し、
+                        // chat 側は done を維持（検証・是正は派生課題が担う）
+                        let last_prompt = c
+                            .messages
+                            .iter()
+                            .rev()
+                            .find(|m| m.role == "user")
+                            .map(|m| m.text.clone())
+                            .unwrap_or_default();
+                        derived = Some((
+                            s.label.clone(),
+                            s.repo.clone(),
+                            last_prompt,
+                            c.touched.iter().cloned().collect::<Vec<_>>(),
+                        ));
+                    } else {
+                        s.verify = Some("pending".to_string());
+                        s.verify_count = 0;
+                        s.done_kind = None;
+                        need_persist = true;
+                    }
                 }
                 do_aggregate = s.parent.is_some();
+                parent_id = s.parent;
                 do_splits = s.exec_mode == "parallel" && s.depth < par_max_depth;
                 do_verify = s.verify.as_deref() == Some("pending") && auto_verify;
             }
@@ -690,17 +791,23 @@ impl App {
             self.persist_chats().await;
         }
         match action {
-            Action::Back { n, prompt } => {
-                let _ = self
-                    .send_to_chat(id, prompt, Some(format!("[差し戻し {}回目] 検証NG → 再実装", n)))
-                    .await;
+            Action::Back { n } => {
+                let chats = self.chats.lock().await;
+                if let Some(s) = chats.get(&id) {
+                    s.chat
+                        .push_sys(&format!(
+                            "[検証] 差し戻し {}回目を保留しました（「処理再開」/「差し戻し」で再実装を送信）",
+                            n
+                        ))
+                        .await;
+                }
             }
             Action::BackLimit { n } => {
                 let chats = self.chats.lock().await;
                 if let Some(s) = chats.get(&id) {
                     s.chat
                         .push_sys(&format!(
-                            "[検証] 差し戻し上限（{}回）に達したため終了します",
+                            "[検証] 差し戻し上限（{}回）に達しました。「要人対応」として人の判断を待ちます",
                             n
                         ))
                         .await;
@@ -708,8 +815,49 @@ impl App {
             }
             Action::None => {}
         }
+        // done 済み chat 内で生じた変更は派生課題として intake へ起票する
+        if let Some((label, repo, last_prompt, touched)) = derived {
+            let slug = repo_slug(repo.as_ref()).unwrap_or_default();
+            let head = last_prompt.lines().next().unwrap_or("").trim();
+            let title = if head.is_empty() {
+                format!("派生: {}", label)
+            } else {
+                format!("派生: {}", head.chars().take(60).collect::<String>())
+            };
+            let cand = json!({
+                "source": "derived",
+                "repo": slug,
+                "slug": slug,
+                "title": title,
+                "body": format!(
+                    "chat #{}「{}」の完了後ターンで変更が発生（touched: {}）。\n\
+                     適用済みの変更を検証し、不足があれば是正する。\n\n元の依頼:\n{}",
+                    id,
+                    label,
+                    touched.join(", "),
+                    last_prompt
+                ),
+                "detectedAt": now_iso(),
+            });
+            let (issue, _created, _deferred) = crate::detectors::ingest(&self.root, &cand);
+            self.sse("candidates", &json!({}));
+            self.sse("issues", &json!({}));
+            let chats = self.chats.lock().await;
+            if let Some(s) = chats.get(&id) {
+                s.chat
+                    .push_sys(&format!(
+                        "[派生課題] 変更を別課題として起票: {}",
+                        issue.get("title").and_then(|v| v.as_str()).unwrap_or("")
+                    ))
+                    .await;
+            }
+        }
         if do_aggregate {
             self.aggregate_to_parent(id).await;
+            // 子の完了で同時実行枠が空いたら親の待機キューを drain する
+            if let Some(pid) = parent_id {
+                self.spawn_splits(pid).await;
+            }
         }
         if do_splits {
             self.spawn_splits(id).await;
@@ -749,13 +897,236 @@ impl App {
         true
     }
 
-    async fn spawn_splits(self: &Arc<Self>, id: i64) {
+    // ---------- 処理再開の共通ロジック ----------
+    // 処理再開ボタン（continue_resumable=true）と起動時の自動再処理
+    // （false）で共有する。仕分けの優先度: 差し戻し待ち → 検証待ち →
+    // 実行待機 → 再開可/未着手。
+    //   back_prompt あり（差し戻し待ち）        → 保留 prompt を再送
+    //   verify=pending                         → start_verify（検証ターン起動）
+    //   waiting（kind!=repo）で blocker 全非busy → leave_wait + 保留 prompt 再送
+    //   resumable（acp・proc無・saved sid有）   → 再接続+中断作業の続行 prompt
+    //     ※ continue_resumable=false の起動時再処理では行わない
+    //   未着手（acp・proc無・saved sid無し）     → 保留 prompt があれば起動して
+    //     再送（無ければ continue_resumable 時のみ session/new 起動）
+    // busy 中・repo 確認待ち（人ゲート）・要人対応は触らない。
+    pub async fn resume_all(
+        self: &Arc<Self>,
+        repo_f: Option<String>,
+        continue_resumable: bool,
+    ) -> Value {
+        let (rework_ids, verify_ids, resume_ids, waiter_ids) = {
+            let chats = self.chats.lock().await;
+            let mut busy = HashSet::new();
+            for (id, s) in chats.iter() {
+                if s.chat.core().lock().await.busy {
+                    busy.insert(*id);
+                }
+            }
+            let (mut rw, mut v, mut r, mut w) =
+                (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+            for (id, s) in chats.iter() {
+                if let Some(rf) = &repo_f {
+                    if repo_slug(s.repo.as_ref()).as_deref() != Some(rf.as_str()) {
+                        continue;
+                    }
+                }
+                let c = s.chat.core().lock().await;
+                if c.busy || s.needs_human {
+                    continue;
+                }
+                if s.back_prompt.is_some() {
+                    rw.push(*id);
+                } else if s.verify.as_deref() == Some("pending") {
+                    v.push(*id);
+                } else if let Some(wstate) = &c.waiting {
+                    if wstate.kind != "repo"
+                        && !wstate.blocked_by.iter().any(|b| busy.contains(b))
+                    {
+                        w.push(*id);
+                    }
+                } else if s.chat.transport() == "acp" && !s.chat.has_proc().await {
+                    // saved sid 有り=再開可 / 無し=未着手。どちらも起動対象
+                    r.push(*id);
+                }
+            }
+            (rw, v, r, w)
+        };
+        // 差し戻し待ち → 保留の差し戻し prompt を再送（send が session/load を兼ねる）
+        let mut n_rework = 0usize;
+        for id in rework_ids {
+            let job = {
+                let mut chats = self.chats.lock().await;
+                let Some(s) = chats.get_mut(&id) else { continue };
+                s.back_prompt.take().map(|p| (p, s.verify_back))
+            };
+            let Some((prompt, n)) = job else { continue };
+            if let Err(e) = self
+                .send_to_chat(
+                    id,
+                    prompt,
+                    Some(format!("[差し戻し {}回目] 検証NG → 再実装", n)),
+                )
+                .await
+            {
+                let chats = self.chats.lock().await;
+                if let Some(s) = chats.get(&id) {
+                    s.chat.push_sys(&format!("[差し戻し失敗] {}", e)).await;
+                }
+            } else {
+                n_rework += 1;
+            }
+        }
+        // 検証待ち → 検証ターン起動（send が session/load を兼ねる）
+        let mut n_verify = 0usize;
+        for id in verify_ids {
+            if self.start_verify(id).await {
+                n_verify += 1;
+            }
+        }
+        // 再開可 → 再接続（send 内で session/load）して中断作業の続行を促す。
+        // 未着手（saved sid 無し）→ 起動失敗で保留の prompt があればそれを再送、
+        // 無ければ ensure_session で session/new 起動のみ（未着手から抜け出す）
+        let mut n_resumed = 0usize;
+        for id in resume_ids {
+            enum Job {
+                Send(String, Option<String>),
+                StartOnly,
+                Skip,
+            }
+            let job = {
+                let chats = self.chats.lock().await;
+                let Some(s) = chats.get(&id) else { continue };
+                let mut c = s.chat.core().lock().await;
+                if c.saved_session_id.is_some() {
+                    if continue_resumable {
+                        Job::Send(
+                            "セッションが切断されました。中断していた作業を続行してください。"
+                                .to_string(),
+                            Some("[処理再開] 中断していた作業を続行してください".to_string()),
+                        )
+                    } else {
+                        Job::Skip
+                    }
+                } else {
+                    let held = std::mem::take(&mut c.held_prompts);
+                    if held.is_empty() {
+                        if continue_resumable {
+                            Job::StartOnly
+                        } else {
+                            Job::Skip
+                        }
+                    } else {
+                        Job::Send(
+                            held.join("\n"),
+                            Some("[処理再開] 起動失敗で保留されていた送信を再送します".to_string()),
+                        )
+                    }
+                }
+            };
+            match job {
+                Job::Send(text, disp) => {
+                    if let Err(e) = self.send_to_chat(id, text, disp).await {
+                        let chats = self.chats.lock().await;
+                        if let Some(s) = chats.get(&id) {
+                            s.chat.push_sys(&format!("[処理再開失敗] {}", e)).await;
+                        }
+                    } else {
+                        n_resumed += 1;
+                    }
+                }
+                Job::StartOnly => {
+                    let chat = self.chats.lock().await.get(&id).map(|s| s.chat.clone());
+                    if let Some(chat) = chat {
+                        match chat.ensure_session().await {
+                            Ok(()) => n_resumed += 1,
+                            Err(e) => {
+                                chat.push_sys(&format!("[処理再開失敗] {}", e)).await;
+                            }
+                        }
+                    }
+                }
+                Job::Skip => {}
+            }
+        }
+        // 宙ぶらの実行待機 → 再開後の busy 集合で再判定し、解放して保留を再送
+        // （release_waiters と同じ経路。解放前に再開した blocker は busy に
+        //   戻っているため待機は維持される）
+        let mut n_released = 0usize;
+        {
+            let chats = self.chats.lock().await;
+            let mut busy = HashSet::new();
+            for (id, s) in chats.iter() {
+                if s.chat.core().lock().await.busy {
+                    busy.insert(*id);
+                }
+            }
+            let mut work: Vec<(i64, String)> = Vec::new();
+            for id in &waiter_ids {
+                let Some(s) = chats.get(id) else { continue };
+                let mut c = s.chat.core().lock().await;
+                let Some(wstate) = c.waiting.as_mut() else { continue };
+                if wstate.kind == "repo" {
+                    continue;
+                }
+                wstate.blocked_by.retain(|b| busy.contains(b));
+                if !wstate.blocked_by.is_empty() {
+                    continue;
+                }
+                if let Some(text) = c.leave_wait() {
+                    let cwd = s.chat.cwd().read().await.clone();
+                    setup_claims_core(&mut c, &text, &cwd);
+                    work.push((*id, text));
+                }
+            }
+            drop(chats);
+            for (id, text) in work {
+                let chats2 = self.chats.lock().await;
+                if let Some(s) = chats2.get(&id) {
+                    let chat = s.chat.clone();
+                    drop(chats2);
+                    let _ = self.evt_tx.send(CtrlEvt::Changed { id });
+                    if let Err(e) = chat.send(text, None).await {
+                        chat.push_sys(&format!("[再開失敗] {}", e)).await;
+                    } else {
+                        n_released += 1;
+                    }
+                }
+            }
+        }
+        if n_rework + n_verify + n_resumed + n_released > 0 {
+            conlog(
+                "control",
+                "sys",
+                &format!(
+                    "処理再開: 差し戻し再送 {}・続行 {}・検証起動 {}・待機解放 {}",
+                    n_rework, n_resumed, n_verify, n_released
+                ),
+            );
+        }
+        // back_prompt/held_prompts/waiting を変更しているため必ず永続化
+        // （未保存で落ちると差し戻し prompt が復活し二重送信され得る）
+        self.persist_chats().await;
+        self.sse("chats", &json!({}));
+        json!({"ok": true, "reworked": n_rework, "resumed": n_resumed, "verify": n_verify, "released": n_released})
+    }
+
+    pub async fn spawn_splits(self: &Arc<Self>, id: i64) {
         let par_max_children = cfg_u64(&self.cfg().await, "parallelMaxChildren", 4);
         let mut work: Vec<(String, String)> = Vec::new(); // (title, prompt)
         {
             let mut chats = self.chats.lock().await;
-            let n_children_base =
-                chats.values().filter(|x| x.parent == Some(id)).count() as u64;
+            // parallelMaxChildren は同時実行上限。アクティブな子
+            // （busy／実装待機／検証中）だけが枠を占有し、完了・削除済みは解放される
+            let mut n_active = 0u64;
+            for x in chats.values() {
+                if x.parent != Some(id) {
+                    continue;
+                }
+                let c = x.chat.core().lock().await;
+                if c.busy || c.waiting.is_some() || x.verify.is_some() {
+                    n_active += 1;
+                }
+            }
             let Some(s) = chats.get_mut(&id) else { return };
             let c = s.chat.core().lock().await;
             let len = c.messages.len();
@@ -771,17 +1142,21 @@ impl App {
                 }
                 for sub in extract_splits(&m.text) {
                     let key = split_key(&sub);
-                    if s.seen_splits.contains(&key) {
+                    if s.seen_splits.contains(&key)
+                        || s.pending_splits.iter().any(|p| split_key(p) == key)
+                    {
+                        continue;
+                    }
+                    if n_active + work.len() as u64 >= par_max_children {
+                        // 上限超過は打ち捨てず待機キューへ（子完了で順次起動）
+                        sys_notes.push(format!(
+                            "[並列] 同時実行上限（{}）のため「{}」は待機キューに追加しました",
+                            par_max_children, sub.title
+                        ));
+                        s.pending_splits.push(sub);
                         continue;
                     }
                     s.seen_splits.insert(key);
-                    if n_children_base + work.len() as u64 >= par_max_children {
-                        sys_notes.push(format!(
-                            "[並列] 子チャット上限（{}）のため「{}」は起動しません",
-                            par_max_children, sub.title
-                        ));
-                        continue;
-                    }
                     sys_notes.push(format!(
                         "[並列] 分割タスク「{}」→ 子チャットを起動します",
                         sub.title
@@ -790,7 +1165,19 @@ impl App {
                 }
             }
             drop(c);
-            if !sys_notes.is_empty() || !s.seen_splits.is_empty() {
+            // 空き枠があれば待機キューから順次起動する
+            while n_active + (work.len() as u64) < par_max_children
+                && !s.pending_splits.is_empty()
+            {
+                let sub = s.pending_splits.remove(0);
+                s.seen_splits.insert(split_key(&sub));
+                sys_notes.push(format!(
+                    "[並列] 待機中の分割タスク「{}」→ 子チャットを起動します",
+                    sub.title
+                ));
+                work.push((sub.title, sub.prompt));
+            }
+            if !sys_notes.is_empty() {
                 let mut c = s.chat.core().lock().await;
                 for n in &sys_notes {
                     c.push("sys", n);
@@ -798,12 +1185,22 @@ impl App {
             }
         }
         if work.is_empty() {
-            if !self.chats.lock().await.get(&id).map(|s| s.seen_splits.is_empty()).unwrap_or(true) {
+            let dirty = self
+                .chats
+                .lock()
+                .await
+                .get(&id)
+                .map(|s| !s.seen_splits.is_empty() || !s.pending_splits.is_empty())
+                .unwrap_or(false);
+            if dirty {
                 self.persist_chats().await;
+                self.sse("chat", &json!({"id": id}));
+                self.sse("chats", &json!({}));
             }
             return;
         }
         self.persist_chats().await;
+        self.sse("chat", &json!({"id": id}));
         for (title, prompt) in work {
             let (repo, agent, depth) = {
                 let chats = self.chats.lock().await;
@@ -955,22 +1352,29 @@ impl App {
     async fn close_chat_entry(self: &Arc<Self>, id: i64) -> bool {
         let s = self.chats.lock().await.remove(&id);
         let existed = s.is_some();
+        let parent = s.as_ref().and_then(|s| s.parent);
         if let Some(s) = s {
             let _ = s.chat.reset().await;
             let _ = std::fs::remove_dir_all(self.snaps.join(id.to_string()));
         }
         self.busy_prev.lock().await.remove(&id);
         self.release_waiters(id).await;
+        // 子の削除で同時実行枠が空いたら親の待機キューを drain する
+        if let Some(pid) = parent {
+            self.spawn_splits(pid).await;
+        }
         existed
     }
 
     // ---------- control 自己再起動（README §8） ----------
+    // 延期判定は「実行中 run」（busy）のみ。waiting は実行系を占有しておらず
+    // （待機状態は chats.json へ persist して再起動後に復元する）、repo 確認待ち
+    // 等の人ゲート待機が残る限り drift 再起動が永久延期になるため含めない
     pub async fn busy_ids(&self) -> Vec<i64> {
         let chats = self.chats.lock().await;
         let mut out = Vec::new();
         for (id, s) in chats.iter() {
-            let c = s.chat.core().lock().await;
-            if c.busy || c.waiting.is_some() {
+            if s.chat.core().lock().await.busy {
                 out.push(*id);
             }
         }
@@ -1023,21 +1427,35 @@ impl App {
             }
         }
         self.persist_chats().await;
-        // detached respawner: 自身を --respawn モードで起動し、旧 PID 終了を待って新起動
-        if let Ok(exe) = std::env::current_exe() {
+        // detached respawner: 自身を --respawn モードで起動し、旧 PID 終了を待って新起動。
+        // spawn 失敗のまま exit すると control が死んだまま戻らないため、
+        // 失敗時は再起動を中止して失敗を通知する
+        let spawned = std::env::current_exe().map_err(|e| e.to_string()).and_then(|exe| {
             let pid = std::process::id();
-            let _ = spawn_detached(&exe, &[
+            spawn_detached(&exe, &[
                 "--respawn".to_string(),
                 pid.to_string(),
                 exe.to_string_lossy().into_owned(),
-            ]);
+            ])
+            .map_err(|e| e.to_string())
+        });
+        if let Err(e) = spawned {
+            conlog(
+                "control",
+                "err",
+                &format!("再起動中止: respawner 起動失敗: {}", e),
+            );
+            self.restarting.store(false, Ordering::SeqCst);
+            self.sse(
+                "restart",
+                &json!({"restarting": false, "failed": true, "error": e}),
+            );
+            return false;
         }
-        let app = self.clone();
         tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(300)).await;
             std::process::exit(0);
         });
-        let _ = app;
         true
     }
 }
@@ -1066,11 +1484,18 @@ pub struct NewChatOpts {
     pub depth: u64,
     pub primed_for: Option<Primed>,
     pub seen_splits: HashSet<String>,
+    pub pending_splits: Vec<crate::split::Split>,
     pub repo_declined: HashSet<String>,
     pub verify: Option<String>,
     pub verify_count: u64,
     pub verify_back: u64,
+    pub done_kind: Option<String>,
+    pub back_prompt: Option<String>,
+    pub needs_human: bool,
     pub usage: Option<crate::chat::Usage>,
+    pub waiting: Option<crate::chat::WaitState>,
+    pub held_prompts: Vec<String>,
+    pub resume_on_release: bool,
 }
 
 // detached spawn（respawner 用）
@@ -1202,17 +1627,6 @@ async fn api_repos_update(State(app): State<Shared>, b: Bytes) -> Response {
         return err(StatusCode::NOT_FOUND, "repo not found");
     };
     let repo = &mut cfg["repos"][i];
-    if let Some(v) = a.get("autoTrigger") {
-        repo["autoTrigger"] = json!(v.as_bool().unwrap_or(false));
-    }
-    if let Some(v) = a.get("triggerLabel") {
-        repo["triggerLabel"] = json!(
-            match v.as_str().map(|s| s.trim()).filter(|s| !s.is_empty()) {
-                Some(s) => s.to_string(),
-                None => "devin".to_string(),
-            }
-        );
-    }
     if let Some(v) = a.get("requirePushApproval") {
         repo["requirePushApproval"] = json!(v.as_bool().unwrap_or(false));
     }
@@ -1286,8 +1700,7 @@ async fn api_repos_post(State(app): State<Shared>, b: Bytes) -> Response {
         )
             .into_response();
     }
-    let repo = json!({"slug": slug, "path": rpath, "autoTrigger": false,
-        "triggerLabel": "devin", "requirePushApproval": true});
+    let repo = json!({"slug": slug, "path": rpath, "requirePushApproval": true});
     if cfg.get("repos").and_then(|v| v.as_array()).is_none() {
         cfg["repos"] = json!([]);
     }
@@ -1585,6 +1998,25 @@ async fn api_restart(State(app): State<Shared>, b: Bytes) -> Response {
     let force = a.get("force").and_then(|v| v.as_bool()).unwrap_or(false);
     let pending = !app.maybe_restart(force).await;
     j(json!({"ok": true, "pending": pending, "busy": app.busy_ids().await}))
+}
+
+// POST /api/control/import-github — config.repos の GitHub Issue を
+// 一括取込する（open+closed 全件。closed は pipeline が終端状態で起票）。
+// `kasugai-agent --import-github` と同等の操作を API から行える
+async fn api_import_github(State(app): State<Shared>) -> Response {
+    let cfg = app.cfg().await;
+    let (created, total) =
+        crate::detectors::github_issues::import_all(&app.root, &cfg).await;
+    if created > 0 {
+        app.sse("candidates", &json!({}));
+        app.sse("issues", &json!({}));
+    }
+    conlog(
+        "control",
+        "sys",
+        &format!("github issue 取込: {} 件中 {} 件を新規起票", total, created),
+    );
+    j(json!({"ok": true, "total": total, "created": created}))
 }
 
 // POST /api/control/launch — 環境起動（docs ナビの起動ボタンが呼ぶ。
@@ -1903,6 +2335,13 @@ async fn api_chat_get(State(app): State<Shared>, Query(q): Query<HashMap<String,
     snap["depth"] = json!(s.depth);
     snap["verify"] = s.verify.clone().map(Value::String).unwrap_or(Value::Null);
     snap["verifyBack"] = json!(s.verify_back);
+    snap["doneKind"] = s
+        .done_kind
+        .clone()
+        .map(Value::String)
+        .unwrap_or(Value::Null);
+    snap["backPending"] = json!(s.back_prompt.is_some());
+    snap["needsHuman"] = json!(s.needs_human);
     snap["children"] = json!(children);
     j(snap)
 }
@@ -2049,13 +2488,23 @@ async fn api_chat_send(State(app): State<Shared>, b: Bytes) -> Response {
             return j(json!({"ok": true, "id": id, "waiting": true}));
         }
     }
-    // 新規ターン: verify/verifyBack をリセット
+    // 新規ターン: verify/verifyBack/doneKind をリセット
+    // （doneKind=done は終端のため消さない。実装完了 chat は live列に留まる）
     {
         let mut chats = app.chats.lock().await;
         if let Some(s) = chats.get_mut(&id) {
-            if s.verify.is_some() || s.verify_back > 0 {
+            if s.done_kind.as_deref() != Some("done")
+                && (s.verify.is_some()
+                    || s.verify_back > 0
+                    || s.done_kind.is_some()
+                    || s.back_prompt.is_some()
+                    || s.needs_human)
+            {
                 s.verify = None;
                 s.verify_back = 0;
+                s.done_kind = None;
+                s.back_prompt = None;
+                s.needs_human = false;
                 drop(chats);
                 app.persist_chats().await;
                 app.sse("chats", &json!({}));
@@ -2315,26 +2764,35 @@ async fn api_chat_reset(State(app): State<Shared>, b: Bytes) -> Response {
     j(json!({"ok": true}))
 }
 
+// POST /api/chat/resume — 再開可 chat の session/load 再接続に加え、
+// 未着手（saved sid 無し・起動失敗滞留）chat の session/new 起動も担う。
+// 未送信の保留 prompt（held_prompts）があれば接続後に再送する
 async fn api_chat_resume(State(app): State<Shared>, b: Bytes) -> Response {
     let a = body_json(b).await;
     let id = qi(&a, "id").unwrap_or(0);
-    let chat = {
+    let (chat, held) = {
         let chats = app.chats.lock().await;
         let Some(s) = chats.get(&id) else {
             return err(StatusCode::NOT_FOUND, "chat not found");
         };
-        let c = s.chat.core().lock().await;
+        let mut c = s.chat.core().lock().await;
         if s.chat.has_proc().await || c.busy || c.waiting.is_some() {
             return j(json!({"ok": true, "id": id}));
         }
-        if c.saved_session_id.is_none() {
-            return err(StatusCode::BAD_REQUEST, "再開できるセッションがありません");
-        }
-        s.chat.clone()
+        (s.chat.clone(), std::mem::take(&mut c.held_prompts))
     };
     match chat.ensure_session().await {
-        Ok(()) => j(json!({"ok": true, "id": id})),
+        Ok(()) => {
+            if !held.is_empty() {
+                if let Err(e) = app.send_to_chat(id, held.join("\n"), None).await {
+                    chat.push_sys(&format!("[保留再送失敗] {}", e)).await;
+                }
+            }
+            j(json!({"ok": true, "id": id}))
+        }
         Err(e) => {
+            // 失敗時は保留を戻す（再送手段を失わない）
+            chat.core().lock().await.held_prompts.extend(held);
             chat.push_sys(&format!("[手動再開失敗] {}", e)).await;
             (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"ok": false, "error": e})))
                 .into_response()
@@ -2343,134 +2801,11 @@ async fn api_chat_resume(State(app): State<Shared>, b: Bytes) -> Response {
 }
 
 // POST /api/chat/resume-all — 処理状況ボード上部の「処理再開」ボタン。
-// 止まった処理を一括で再開する（panel-layout.mmd RALL）:
-//   verify=pending                         → start_verify（検証ターン起動）
-//   resumable（acp・proc無・saved sid有）   → 再接続+中断作業の続行 prompt
-//   waiting（kind!=repo）で blocker 全非busy → leave_wait + 保留 prompt 再送
-// busy 中・repo 確認待ち（kind=repo の人ゲート）は触らない。
-// {repo} 指定時はその slug の chat のみ対象。
+// 実処理は App::resume_all（起動時の自動再処理と共通）へ委譲。
 async fn api_chat_resume_all(State(app): State<Shared>, b: Bytes) -> Response {
     let a = body_json(b).await;
     let repo_f = a.get("repo").and_then(|v| v.as_str()).map(String::from);
-    // 対象の仕分け（優先度は列の順に倣う: verify → 待機 → resume）
-    let (verify_ids, resume_ids, waiter_ids) = {
-        let chats = app.chats.lock().await;
-        let mut busy = HashSet::new();
-        for (id, s) in chats.iter() {
-            if s.chat.core().lock().await.busy {
-                busy.insert(*id);
-            }
-        }
-        let (mut v, mut r, mut w) = (Vec::new(), Vec::new(), Vec::new());
-        for (id, s) in chats.iter() {
-            if let Some(rf) = &repo_f {
-                if repo_slug(s.repo.as_ref()).as_deref() != Some(rf.as_str()) {
-                    continue;
-                }
-            }
-            let c = s.chat.core().lock().await;
-            if c.busy {
-                continue;
-            }
-            if s.verify.as_deref() == Some("pending") {
-                v.push(*id);
-            } else if let Some(wstate) = &c.waiting {
-                if wstate.kind != "repo" && !wstate.blocked_by.iter().any(|b| busy.contains(b)) {
-                    w.push(*id);
-                }
-            } else if s.chat.transport() == "acp"
-                && c.saved_session_id.is_some()
-                && !s.chat.has_proc().await
-            {
-                r.push(*id);
-            }
-        }
-        (v, r, w)
-    };
-    // 検証待ち → 検証ターン起動（send が session/load を兼ねる）
-    let mut n_verify = 0usize;
-    for id in verify_ids {
-        if app.start_verify(id).await {
-            n_verify += 1;
-        }
-    }
-    // 再開可 → 再接続（send 内で session/load）して中断作業の続行を促す
-    let mut n_resumed = 0usize;
-    for id in resume_ids {
-        if let Err(e) = app
-            .send_to_chat(
-                id,
-                "セッションが切断されました。中断していた作業を続行してください。"
-                    .to_string(),
-                Some("[処理再開] 中断していた作業を続行してください".to_string()),
-            )
-            .await
-        {
-            let chats = app.chats.lock().await;
-            if let Some(s) = chats.get(&id) {
-                s.chat.push_sys(&format!("[処理再開失敗] {}", e)).await;
-            }
-        } else {
-            n_resumed += 1;
-        }
-    }
-    // 宙ぶらの実行待機 → 再開後の busy 集合で再判定し、解放して保留を再送
-    // （release_waiters と同じ経路。解放前に再開した blocker は busy に
-    //   戻っているため待機は維持される）
-    let mut n_released = 0usize;
-    {
-        let chats = app.chats.lock().await;
-        let mut busy = HashSet::new();
-        for (id, s) in chats.iter() {
-            if s.chat.core().lock().await.busy {
-                busy.insert(*id);
-            }
-        }
-        let mut work: Vec<(i64, String)> = Vec::new();
-        for id in &waiter_ids {
-            let Some(s) = chats.get(id) else { continue };
-            let mut c = s.chat.core().lock().await;
-            let Some(wstate) = c.waiting.as_mut() else { continue };
-            if wstate.kind == "repo" {
-                continue;
-            }
-            wstate.blocked_by.retain(|b| busy.contains(b));
-            if !wstate.blocked_by.is_empty() {
-                continue;
-            }
-            if let Some(text) = c.leave_wait() {
-                let cwd = s.chat.cwd().read().await.clone();
-                setup_claims_core(&mut c, &text, &cwd);
-                work.push((*id, text));
-            }
-        }
-        drop(chats);
-        for (id, text) in work {
-            let chats2 = app.chats.lock().await;
-            if let Some(s) = chats2.get(&id) {
-                let chat = s.chat.clone();
-                drop(chats2);
-                let _ = app.evt_tx.send(CtrlEvt::Changed { id });
-                if let Err(e) = chat.send(text, None).await {
-                    chat.push_sys(&format!("[再開失敗] {}", e)).await;
-                } else {
-                    n_released += 1;
-                }
-            }
-        }
-    }
-    if n_verify + n_resumed + n_released > 0 {
-        conlog(
-            "control",
-            "sys",
-            &format!(
-                "処理再開: 続行 {}・検証起動 {}・待機解放 {}",
-                n_resumed, n_verify, n_released
-            ),
-        );
-    }
-    app.sse("chats", &json!({}));
-    j(json!({"ok": true, "resumed": n_resumed, "verify": n_verify, "released": n_released}))
+    j(app.resume_all(repo_f, true).await)
 }
 
 async fn api_chat_verify(State(app): State<Shared>, b: Bytes) -> Response {
@@ -2486,8 +2821,66 @@ async fn api_chat_verify(State(app): State<Shared>, b: Bytes) -> Response {
         }
         s.verify_count = 0;
         s.verify_back = 0;
+        s.done_kind = None;
+        s.back_prompt = None;
+        s.needs_human = false;
     }
     app.start_verify(id).await;
+    j(json!({"ok": true, "id": id}))
+}
+
+// POST /api/chat/rework — 要対応列の差し戻し。保留の差し戻し prompt
+// （無ければ終了区分に応じた再作業 prompt）を送り、doneKind/verify 系・
+// 要人対応をリセットして実行状況列へ戻す
+async fn api_chat_rework(State(app): State<Shared>, b: Bytes) -> Response {
+    let a = body_json(b).await;
+    let id = qi(&a, "id").unwrap_or(0);
+    let (kind, stored) = {
+        let mut chats = app.chats.lock().await;
+        let Some(s) = chats.get_mut(&id) else {
+            return err(StatusCode::NOT_FOUND, "chat not found");
+        };
+        let c = s.chat.core().lock().await;
+        if c.busy {
+            return err(StatusCode::CONFLICT, "busy");
+        }
+        drop(c);
+        let k = s.done_kind.take();
+        s.verify = None;
+        s.verify_count = 0;
+        s.verify_back = 0;
+        s.needs_human = false;
+        (k, s.back_prompt.take())
+    };
+    app.persist_chats().await;
+    app.sse("chats", &json!({}));
+    let (prompt, disp) = match stored {
+        Some(p) => (p, "[差し戻し] 検証NG → 再実装".to_string()),
+        None => {
+            let reason = match kind.as_deref() {
+                Some("ng") => {
+                    "前回の実装は実機検証でNGが解消しませんでした（差し戻し上限到達）。"
+                }
+                Some("unverified") => {
+                    "前回の実装は検証結果を取得できず、実装完了を確認できていません。"
+                }
+                _ => "このセッションでは実装が完了していません。",
+            };
+            (
+                format!(
+                    "[差し戻し] {}作業内容を確認し、残りの実装・修正を行って完了させてください。",
+                    reason
+                ),
+                "[差し戻し] 実装完了に至っていないため再作業".to_string(),
+            )
+        }
+    };
+    if let Err(e) = app.send_to_chat(id, prompt, Some(disp)).await {
+        let chats = app.chats.lock().await;
+        if let Some(s) = chats.get(&id) {
+            s.chat.push_sys(&format!("[差し戻し失敗] {}", e)).await;
+        }
+    }
     j(json!({"ok": true, "id": id}))
 }
 
@@ -2515,7 +2908,12 @@ async fn api_chat_close_completed(State(app): State<Shared>, b: Bytes) -> Respon
             }
             let c = s.chat.core().lock().await;
             let proc = s.chat.has_proc().await;
-            if s.verify.is_none()
+            // 一括削除の対象は live 列（doneKind=done・無印）の停止中 chat。
+            // 要対応（ng/unverified・差し戻し待ち・要人対応）は残す
+            if matches!(s.done_kind.as_deref(), Some("done") | None)
+                && s.verify.is_none()
+                && s.back_prompt.is_none()
+                && !s.needs_human
                 && !c.busy
                 && c.waiting.is_none()
                 && (proc || (s.chat.transport() == "http" && c.ready))
@@ -2616,7 +3014,30 @@ async fn api_chat_attach(State(app): State<Shared>, b: Bytes) -> Response {
 }
 
 async fn api_candidates_get(State(app): State<Shared>) -> Response {
-    j(json!({"ok": true, "candidates": load_j(&app.cand_path(), json!([]))}))
+    let cands = load_j(&app.cand_path(), json!([]));
+    let issues = crate::store::load_issues(&app.root);
+    // 起票済み課題の status を各行に付与（candidate 行に課題状態を併記する表示用。
+    // 保存データではなく応答にだけ載せる）
+    let out: Vec<Value> = cands
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|mut c| {
+            if let Some(key) = c.get("key").and_then(|v| v.as_str()) {
+                let st = issues
+                    .iter()
+                    .find(|i| i.get("key").and_then(|v| v.as_str()) == Some(key))
+                    .and_then(|i| i.get("status").and_then(|v| v.as_str()))
+                    .unwrap_or("");
+                c.as_object_mut()
+                    .unwrap()
+                    .insert("issueStatus".into(), json!(st));
+            }
+            c
+        })
+        .collect();
+    j(json!({"ok": true, "candidates": out}))
 }
 
 // POST /api/candidates — manual detector 入口。{repo,title,body} を intake する
@@ -2640,12 +3061,195 @@ async fn api_candidates_post(State(app): State<Shared>, b: Bytes) -> Response {
         "symptomHash": format!("manual-{}", rand_hex(4)),
         "detectedAt": now_iso(),
     });
-    let (issue, created) = crate::detectors::ingest(&app.root, &cand);
+    let (issue, created, deferred) = crate::detectors::ingest(&app.root, &cand);
     if created {
         app.sse("candidates", &json!({}));
         app.sse("issues", &json!({}));
+    } else if deferred {
+        // レート制限の deferred ピル表示を即時反映
+        app.sse("candidates", &json!({}));
     }
     j(json!({"ok": true, "created": created, "issue": issue, "candidate": cand}))
+}
+
+// ---------- issues（課題ライフサイクル。状態遷移は pipeline.rs のみ） ----------
+
+fn issue_status(root: &Path, key: &str) -> Option<String> {
+    crate::store::load_issues(root)
+        .iter()
+        .find(|i| i.get("key").and_then(|v| v.as_str()) == Some(key))
+        .and_then(|i| {
+            i.get("status")
+                .and_then(|v| v.as_str())
+                .map(String::from)
+        })
+}
+
+// GET /api/issues?repo=<slug|path> — 課題一覧 + status 別件数。
+// ?repo= は登録 repo の slug/path どちらでもよく、解決できれば slug+path 両方で絞込
+async fn api_issues_get(
+    State(app): State<Shared>,
+    Query(q): Query<HashMap<String, String>>,
+) -> Response {
+    let issues = crate::store::load_issues(&app.root);
+    let sel = q.get("repo").map(|s| s.trim().to_string()).unwrap_or_default();
+    let issues = if sel.is_empty() {
+        issues
+    } else {
+        let cfg = app.cfg().await;
+        let (slug, path) = App::git_repo(&cfg, &sel)
+            .map(|r| {
+                (
+                    repo_slug(Some(r)).unwrap_or_default(),
+                    norm_p(r.get("path").and_then(|v| v.as_str()).unwrap_or("")),
+                )
+            })
+            .unwrap_or_default();
+        let sel_n = norm_p(&sel);
+        issues
+            .into_iter()
+            .filter(|i| {
+                let ir = i.get("repo").and_then(|v| v.as_str()).unwrap_or("");
+                let is = i.get("slug").and_then(|v| v.as_str()).unwrap_or("");
+                ir == sel
+                    || is == sel
+                    || (!slug.is_empty() && (ir == slug || is == slug))
+                    || (!path.is_empty() && (norm_p(ir) == path || norm_p(is) == path))
+                    || norm_p(ir) == sel_n
+            })
+            .collect()
+    };
+    let mut counts = Map::new();
+    for i in &issues {
+        let st = i.get("status").and_then(|v| v.as_str()).unwrap_or("");
+        let e = counts.entry(st.to_string()).or_insert(json!(0));
+        *e = json!(e.as_u64().unwrap_or(0) + 1);
+    }
+    j(json!({"ok": true, "issues": issues, "counts": counts}))
+}
+
+/// 対応/却下の適用（issues・candidates 共通の人ゲート）。
+/// dispatch: queued→running（gated は承認→queued・failed は再実行→queued を
+/// 兼ねた即時 dispatch）。reject: gated|queued|failed→rejected。
+/// 状態遷移は pipeline・起動は runner に委譲し、ここでは状態を直接触らない
+async fn issue_gate_action(app: &Shared, key: &str, action: &str) -> Result<Value, String> {
+    let cur = issue_status(&app.root, key).ok_or_else(|| "issue not found".to_string())?;
+    match action {
+        "dispatch" => {
+            match cur.as_str() {
+                crate::pipeline::ST_GATED | crate::pipeline::ST_FAILED => {
+                    crate::pipeline::request_transition(
+                        &app.root,
+                        key,
+                        crate::pipeline::ST_QUEUED,
+                    )?;
+                }
+                crate::pipeline::ST_QUEUED => {}
+                s => {
+                    return Err(format!("issue is {} (gated|queued|failed required)", s));
+                }
+            }
+            crate::runner::dispatch_issue(app, key).await
+        }
+        "reject" => match cur.as_str() {
+            crate::pipeline::ST_GATED
+            | crate::pipeline::ST_QUEUED
+            | crate::pipeline::ST_FAILED => {
+                crate::pipeline::request_transition(&app.root, key, crate::pipeline::ST_REJECTED)
+            }
+            s => Err(format!("issue is {} (gated|queued|failed required)", s)),
+        },
+        _ => Err("unknown action".into()),
+    }
+}
+
+// POST /api/candidates/{key}/{dispatch|reject} — 候補一覧（判断待ち inbox）の
+// 人ゲート。課題が未起票なら人判断で即時起票（rate-limit は人判断を優先して
+// bypass）してから、対応=即時 dispatch（gated/failed は承認/再実行を兼ねる）・
+// 却下=rejected へ（detect-pipeline.mmd INBOX・issue-lifecycle.mmd）
+async fn api_candidates_action(
+    State(app): State<Shared>,
+    AxPath((key, action)): AxPath<(String, String)>,
+) -> Response {
+    if action != "dispatch" && action != "reject" {
+        return err(StatusCode::NOT_FOUND, "unknown action");
+    }
+    let cands = crate::store::load_candidates(&app.root);
+    let Some(cand) = cands
+        .iter()
+        .find(|c| c.get("key").and_then(|v| v.as_str()) == Some(key.as_str()))
+    else {
+        return err(StatusCode::NOT_FOUND, "candidate not found");
+    };
+    if issue_status(&app.root, &key).is_none() {
+        crate::detectors::ingest_forced(&app.root, cand);
+    }
+    match issue_gate_action(&app, &key, &action).await {
+        Ok(issue) => {
+            app.sse("issues", &json!({}));
+            app.sse("candidates", &json!({}));
+            j(json!({"ok": true, "issue": issue}))
+        }
+        Err(e) => err(StatusCode::CONFLICT, &e),
+    }
+}
+
+// POST /api/issues/{key}/{approve|reject|requeue|push-approve|dispatch}
+// gated→queued(承認) / gated|queued|failed→rejected(却下) / failed→queued(再実行) /
+// verifying の課題へ pushApproved:true 付与（requirePushApproval repo の人ゲート） /
+// queued→running の即時 dispatch（runner の dispatch lock/can_dispatch 経由。
+// dispatch はこの人操作のみが行い、drain は queued を自動起動しない。
+// gated/failed からの dispatch は承認・再実行を兼ねる）。
+// 遷移・フィールド更新は pipeline に委譲し、ここでは状態を直接触らない
+async fn api_issues_action(
+    State(app): State<Shared>,
+    AxPath((key, action)): AxPath<(String, String)>,
+) -> Response {
+    let (from, to) = match action.as_str() {
+        "approve" => (crate::pipeline::ST_GATED, crate::pipeline::ST_QUEUED),
+        "reject" => ("", crate::pipeline::ST_REJECTED),
+        "requeue" => (crate::pipeline::ST_FAILED, crate::pipeline::ST_QUEUED),
+        "push-approve" => (crate::pipeline::ST_VERIFYING, ""),
+        "dispatch" => ("", ""),
+        _ => return err(StatusCode::NOT_FOUND, "unknown action"),
+    };
+    let Some(cur) = issue_status(&app.root, &key) else {
+        return err(StatusCode::NOT_FOUND, "issue not found");
+    };
+    // reject は gated（承認前）・queued（対応待ち）・failed（再試行しない判断）
+    // のどれからでも可。dispatch は queued に加え gated（承認+即時 dispatch）・
+    // failed（再実行+即時 dispatch）からも可
+    let ok_from = match action.as_str() {
+        "reject" | "dispatch" => matches!(
+            cur.as_str(),
+            crate::pipeline::ST_GATED | crate::pipeline::ST_QUEUED | crate::pipeline::ST_FAILED
+        ),
+        _ => cur == from,
+    };
+    if !ok_from {
+        let want = match action.as_str() {
+            "reject" | "dispatch" => "gated|queued|failed",
+            _ => from,
+        };
+        return err(
+            StatusCode::CONFLICT,
+            &format!("issue is {} ({} required)", cur, want),
+        );
+    }
+    let res = if action == "push-approve" {
+        crate::pipeline::set_field(&app.root, &key, "pushApproved", json!(true))
+    } else if action == "dispatch" || action == "reject" {
+        issue_gate_action(&app, &key, &action).await
+    } else {
+        crate::pipeline::request_transition(&app.root, &key, to)
+    };
+    match res {
+        Ok(issue) => {
+            app.sse("issues", &json!({}));
+            j(json!({"ok": true, "issue": issue}))
+        }
+        Err(e) => err(StatusCode::CONFLICT, &e),
+    }
 }
 
 // ---------- proposals（採否は人ゲート・vet が前提検査） ----------
@@ -2868,6 +3472,14 @@ async fn serve_static(State(app): State<Shared>, uri: Uri) -> Response {
                 .unwrap();
         }
     }
+    if p.starts_with("/api/") {
+        // 未登録の API パス（実行中バイナリがディスク上の panel/ より古く
+        // ルート未実装のケース）を静的ファイルの 404 と区別できるよう明示する
+        return err(
+            StatusCode::NOT_FOUND,
+            &format!("api not found: {}（実行中バイナリが古い可能性）", p),
+        );
+    }
     err(StatusCode::NOT_FOUND, "not found")
 }
 
@@ -2887,6 +3499,7 @@ pub fn router(app: Shared) -> Router {
         .route("/api/git/push", post(api_git_push))
         .route("/api/control/restart", post(api_restart))
         .route("/api/control/launch", post(api_launch))
+        .route("/api/control/import-github", post(api_import_github))
         .route(
             "/api/control/autostart",
             get(api_autostart_get).post(api_autostart_post),
@@ -2909,12 +3522,16 @@ pub fn router(app: Shared) -> Router {
         .route("/api/chat/resume", post(api_chat_resume))
         .route("/api/chat/resume-all", post(api_chat_resume_all))
         .route("/api/chat/verify", post(api_chat_verify))
+        .route("/api/chat/rework", post(api_chat_rework))
         .route("/api/chat/close", post(api_chat_close))
         .route("/api/chat/close-completed", post(api_chat_close_completed))
         .route("/api/chat/rename", post(api_chat_rename))
         .route("/api/chat/option", post(api_chat_option))
         .route("/api/chat/attach", post(api_chat_attach))
         .route("/api/candidates", get(api_candidates_get).post(api_candidates_post))
+        .route("/api/candidates/{key}/{action}", post(api_candidates_action))
+        .route("/api/issues", get(api_issues_get))
+        .route("/api/issues/{key}/{action}", post(api_issues_action))
         .route("/api/proposals", get(api_proposals_get).post(api_proposals_post))
         .route("/api/proposals/{id}/{decision}", post(api_proposals_decide))
         .route("/api/agents", get(api_agents))
@@ -3135,14 +3752,39 @@ pub fn spawn_watchers(app: Shared) {
             }
         });
     }
+    // 課題パイプの定期処理（issue-lifecycle.mmd）。dispatch は人判断のみで
+    // queued の自動起動はしない —— drain は起票 reconcile・中断した
+    // verifying の復帰・pushApproved 待ちの再開・孤児 running の failed 化を
+    // 担い、起動した課題の run→verify→push は runner.rs 側で完結する。
+    // pollSeconds.runner（既定15s、<=0 で無効）。
+    {
+        let app = app.clone();
+        tokio::spawn(async move {
+            loop {
+                crate::runner::drain(&app).await;
+                let cfg = app.cfg().await;
+                let secs = cfg_obj(&cfg, "pollSeconds")
+                    .and_then(|p| p.get("runner"))
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(15.0);
+                if secs <= 0.0 {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_secs_f64(secs)).await;
+            }
+        });
+    }
     // 課題検出ポーリング（detect-pipeline.mmd: detector emit → ingest → intake）
     // pollSeconds.issues（既定120s）で github-issues、pollSeconds.health
     // （既定300s）で local-health。新規課題ができたら SSE で即時反映する。
     spawn_detector_poller(app.clone(), "issues", 120.0);
+    spawn_detector_poller(app.clone(), "ciFailure", 300.0);
+    spawn_detector_poller(app.clone(), "specDrift", 300.0);
     spawn_detector_poller(app, "health", 300.0);
 }
 
-/// kind は pollSeconds のキー（"issues"→github-issues / "health"→local-health）。
+/// kind は pollSeconds のキー（"issues"→github-issues / "health"→local-health /
+/// "ciFailure"→ci-failure / "specDrift"→spec-drift）。
 /// secs <= 0 なら起動時の1回のみ実行して終了する。
 fn spawn_detector_poller(app: Shared, kind: &'static str, default_secs: f64) {
     tokio::spawn(async move {
@@ -3150,15 +3792,23 @@ fn spawn_detector_poller(app: Shared, kind: &'static str, default_secs: f64) {
             let cfg = app.cfg().await;
             let cands = match kind {
                 "health" => crate::detectors::local_health::poll(&cfg).await,
+                "ciFailure" => crate::detectors::ci_failure::poll(&cfg).await,
+                "specDrift" => crate::detectors::spec_drift::poll(&cfg, &app.root).await,
                 _ => crate::detectors::github_issues::poll(&cfg).await,
             };
             let mut created = false;
+            let mut deferred = false;
             for c in &cands {
-                created |= crate::detectors::ingest(&app.root, c).1;
+                let (_i, cr, df) = crate::detectors::ingest(&app.root, c);
+                created |= cr;
+                deferred |= df;
             }
             if created {
                 app.sse("candidates", &json!({}));
                 app.sse("issues", &json!({}));
+            } else if deferred {
+                // レート制限の deferred ピル表示を即時反映
+                app.sse("candidates", &json!({}));
             }
             let secs = cfg_obj(&cfg, "pollSeconds")
                 .and_then(|p| p.get(kind))

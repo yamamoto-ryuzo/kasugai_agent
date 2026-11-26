@@ -55,7 +55,7 @@ pub struct Usage {
     pub cost: Option<Value>,
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WaitState {
     pub kind: String, // conflict|repo

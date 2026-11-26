@@ -17,6 +17,6 @@ flowchart TD
 
     subgraph COLD[冷起動の入口（control 全停止時）]
         TS[ログオン自動起動<br/>HKCU Run キー KasugaiAgentDispatcher<br/>ログオンで prod 常駐<br/>--install-task / パネル設定で登録]
-        MANUAL[exe 直起動 / cargo run<br/>（npm run dev）]
+        MANUAL[exe 直起動 / npm run dev<br/>（tools/dev.mjs: 対象ポートの占有を強制停止→cargo run。<br/>通常版・開発版とも :8586。検証の並走は PORT= で適宜指定）]
         PROTO2[kasugai-agent:// プロトコル<br/>（本図のフォールバック経路）]
     end

@@ -22,7 +22,7 @@
       <p>KASUGAI Agent は、<strong>課題の検出 → 評価 → 対応 → 実機検証 → 学習</strong> の自律ループを<br>実装する常駐システムです。統一モデルの正本は <code>README.md</code>、開発規約は<br><code>AGENTS.md</code> にあります。</p>
 <h3>画面構成</h3>
 <p>操作の中心はブラウザのパネル UI（<code>http://127.0.0.1:8586/</code>）です。<br>制御は loopback bind のみで、外部には公開しません。</p>
-<table><thead><tr><th>UI 領域</th><th>内容</th></tr></thead><tbody><tr><td>左ペイン</td><td>title・カレントリポジトリ選択・管理セクション（loop state / candidates）・縦並びナビ（AIチャット / 処理状況 / エディター / AGENTS / SKILL / マニュアル / 設定）</td></tr><tr><td>中央ペイン</td><td>chat messages（chat/console タブ切替）・doc 本文・処理状況カンバン・設定ビュー・マニュアル（本サイト）</td></tr><tr><td>右ペイン</td><td>chat sessions 一覧 / エディター（フォルダツリー） / doc browser（doc + 参照ファイル）</td></tr></tbody></table>
+<table><thead><tr><th>UI 領域</th><th>内容</th></tr></thead><tbody><tr><td>左ペイン</td><td>title・カレントリポジトリ選択・縦並びナビ（処理状況 / AIチャット / エディター / AGENTS / SKILL / マニュアル / 設定。初期表示は処理状況）</td></tr><tr><td>中央ペイン</td><td>chat messages（chat/console タブ切替）・doc 本文・処理状況カンバン・設定ビュー・マニュアル（本サイト）</td></tr><tr><td>右ペイン</td><td>管理セクション（loop state / candidates / issues / proposals）/ エディター（フォルダツリー） / doc browser（doc + 参照ファイル）。エディター/AGENTS/SKILL 選択時は doc browser、それ以外は管理セクション</td></tr></tbody></table>
 <p>左ペインのナビから各ビューを開き、右ペインまたは中央ペインに表示します。<br>このマニュアルは「マニュアル」ナビで開いた <code>docs/</code> サイトそのものです。</p>
 <h3>自律ループ（課題ライフサイクル）</h3>
 <p>detector が課題候補（candidate）を emit し、入口で正規化・重複判定<br>（source+repo+symptomHash）して課題レコードを作ります。<code>external</code> ラベル付きは<br>人ゲート待ち、それ以外はキュー → runner 起動 → 実装 → verify（L0〜L4 の<br>実機検証）→ push まで自動で進みます。詳細は「3-1 統一モデル図」を参照。</p>

@@ -173,20 +173,18 @@ impl AcpChat {
         }
     }
 
-    fn handle_msg(self: &Arc<Self>, m: Value, proc: Arc<ProcShared>) {
+    async fn handle_msg(self: &Arc<Self>, m: Value, proc: Arc<ProcShared>) {
         if let Some(id) = m.get("id").and_then(|v| v.as_u64()) {
             // pending 応答（id + error/result）
             if m.get("method").is_none() {
-                tokio::spawn(async move {
-                    if let Some(tx) = proc.pending.lock().await.remove(&id) {
-                        let r = if let Some(e) = m.get("error") {
-                            Err(format!("{}", e))
-                        } else {
-                            Ok(m.get("result").cloned().unwrap_or(Value::Null))
-                        };
-                        let _ = tx.send(r);
-                    }
-                });
+                if let Some(tx) = proc.pending.lock().await.remove(&id) {
+                    let r = if let Some(e) = m.get("error") {
+                        Err(format!("{}", e))
+                    } else {
+                        Ok(m.get("result").cloned().unwrap_or(Value::Null))
+                    };
+                    let _ = tx.send(r);
+                }
                 return;
             }
             // 要求: session/request_permission は allow 系を自動選択（自律実行前提）
@@ -232,12 +230,11 @@ impl AcpChat {
             }
             return;
         }
-        // notification
+        // notification: session/update は受信順に直列処理する。
+        // spawn すると worker thread で実行順が入れ替わり、chunk 追記が
+        // 乱れて表示本文（日本語等）が壊れる
         if m.get("method").and_then(|v| v.as_str()) == Some("session/update") {
-            let this = self.clone();
-            tokio::spawn(async move {
-                this.on_update(&m["params"]["update"]).await;
-            });
+            self.on_update(&m["params"]["update"]).await;
         }
     }
 
@@ -417,7 +414,7 @@ impl AcpChat {
                     }
                     match serde_json::from_str::<Value>(&line) {
                         Err(_) => this.console("out", &line),
-                        Ok(m) => this.handle_msg(m, p.clone()),
+                        Ok(m) => this.handle_msg(m, p.clone()).await,
                     }
                 }
             });
@@ -571,6 +568,7 @@ impl AcpChat {
             let mut c = self.core.lock().await;
             c.session_id = sid.clone();
             c.saved_session_id = sid.clone();
+            c.usage = None;   // 新セッションはコンテキスト消費量を持ち越さない
             c.ready = true;
             c.options = s
                 .get("configOptions")
@@ -649,12 +647,31 @@ impl AcpChat {
             }
         }
         if let Err(e) = self.ensure_session().await {
+            // 起動失敗: prompt を保留キューへ退避する（未着手に滞留させない。
+            // 「開始」/「処理再開」/次の send で ensure_session 成功時に併送）
             let mut c = self.core.lock().await;
-            c.push("sys", &format!("[起動失敗] {}", e));
+            c.push("user", &display.clone().unwrap_or_else(|| text.clone()));
+            c.held_prompts.push(text);
+            c.push(
+                "sys",
+                &format!("[起動失敗] {}（「開始」/「処理再開」で再送します）", e),
+            );
             drop(c);
             self.changed();
             return Err(e);
         }
+        // セッション確立。起動失敗で滞留した保留 prompt があれば併せて送る
+        let text = {
+            let mut c = self.core.lock().await;
+            let held = std::mem::take(&mut c.held_prompts);
+            if held.is_empty() {
+                text
+            } else {
+                let mut v = held;
+                v.push(text);
+                v.join("\n")
+            }
+        };
         let (new_turn, seq, session_id) = {
             let mut c = self.core.lock().await;
             let d = display.clone().unwrap_or_else(|| text.clone());

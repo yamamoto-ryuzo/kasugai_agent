@@ -34,14 +34,14 @@ flowchart TB
     G --&gt;|却下| X[rejected]
     G --&gt;|承認| R[dispatch&lt;br/&gt;runner = 接続AI]
     R --&gt; V[verify L0〜L4&lt;br/&gt;実機検証・証跡・push]
-    V --&gt;|NG 差し戻し| R
+    V --&gt;|NG 差し戻し&lt;br/&gt;（保留 → 処理再開・再起動で再送）| R
     V --&gt;|合格| K[learn&lt;br/&gt;SKILL 蓄積 → .devin/skills/&lt;br/&gt;（draft・mermaid 図を必ず明示）]
     K --&gt; P[proposals&lt;br/&gt;skills / prompts / config]
     P --&gt; G
     G --&gt;|採用| SELF[agent 自身を更新]
     SELF -.-&gt;|次のループを改良| N
 </pre>
-<table><thead><tr><th>段階</th><th>内容</th></tr></thead><tbody><tr><td>detect</td><td>detector（github-issues / ci-failure / local-health / manual-chat）が課題候補を emit</td></tr><tr><td>normalize/dedupe</td><td>統一 candidate 形式に正規化し <code>source+repo+symptomHash</code> で重複排除</td></tr><tr><td>assess</td><td>課題の性質と検証深度（verifyLevel L0〜L4）を決定</td></tr><tr><td>gate</td><td>external 起票・proposal 採否・push 可否など人だけが越えられる判定地点</td></tr><tr><td>dispatch</td><td>runner（接続AI 実行体）に実装を委譲</td></tr><tr><td>verify</td><td>実機起動・証跡採取・push 可否。NG なら retry に差し戻し</td></tr><tr><td>learn</td><td>結果・証跡を SKILL（draft・mermaid 図必須）として <code>.devin/skills/</code> へ蓄積し proposals を生成</td></tr></tbody></table>
+<table><thead><tr><th>段階</th><th>内容</th></tr></thead><tbody><tr><td>detect</td><td>detector（github-issues / ci-failure / local-health / manual-chat）が課題候補を emit</td></tr><tr><td>normalize/dedupe</td><td>統一 candidate 形式に正規化し <code>source+repo+symptomHash</code> で重複排除</td></tr><tr><td>assess</td><td>課題の性質と検証深度（verifyLevel L0〜L4）を決定</td></tr><tr><td>gate</td><td>dispatch（対応）判断・external 起票承認・proposal 採否・push 可否など人だけが越えられる判定地点</td></tr><tr><td>dispatch</td><td>runner（接続AI 実行体）に実装を委譲。起動は ISSUES 一覧の「対応」ボタンによる人判断のみ（自動起動しない）</td></tr><tr><td>verify</td><td>実機起動・証跡採取・push 可否。NG なら差し戻し prompt を保留し、処理再開・再起動時の自動再処理で retry へ（上限到達は要人対応）</td></tr><tr><td>learn</td><td>結果・証跡を SKILL（draft・mermaid 図必須）として <code>.devin/skills/</code> へ蓄積し proposals を生成</td></tr></tbody></table>
 <p>LOOP が「要」なのは、これが<strong>自律性そのもの</strong>だからです。</p>
 <ul><li><strong>終わらない</strong> — 常駐サーバが観測を続け、課題ごとにサイクルを回す</li><li><strong>閉じている</strong> — verify が「実装したつもり」を実機で弾き、learn が結果を 次のループの入力に還流する</li><li><strong>自己書換えする</strong> — learn → proposals → 採用 で agent 自身が更新され、 ループがループを改良する（meta-loop）</li></ul>
 <h3>実装方式の比較（Rust 自前 / SDK / プラグイン）</h3>

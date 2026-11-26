@@ -31,8 +31,14 @@ pub async fn gh(args: &[&str], cwd: Option<&Path>) -> Result<String, String> {
     }
 }
 
-/// open Issue を列挙（`gh issue list --repo <slug> --json ...`）
-pub async fn issue_list(repo_dir: &Path, slug: &str, limit: u32) -> Result<Vec<Value>, String> {
+/// Issue を列挙（`gh issue list --repo <slug> --state <state> --json ...`）
+/// state は open|closed|all。一括取込では all を使い state/stateReason で終端判定する
+pub async fn issue_list(
+    repo_dir: &Path,
+    slug: &str,
+    state: &str,
+    limit: u32,
+) -> Result<Vec<Value>, String> {
     let lim = limit.to_string();
     let out = gh(
         &[
@@ -41,9 +47,9 @@ pub async fn issue_list(repo_dir: &Path, slug: &str, limit: u32) -> Result<Vec<V
             "--repo",
             slug,
             "--state",
-            "open",
+            state,
             "--json",
-            "number,title,body,labels,url",
+            "number,title,body,labels,url,state,stateReason",
             "--limit",
             &lim,
         ],

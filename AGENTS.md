@@ -62,7 +62,7 @@
 - 選択はパネル全体のスコープ（新規 chat の cwd・
   各一覧の絞込）になり、localStorage に永続化する
 - **リポジトリ名の表示はこのセレクトのみ**。選択リポジトリで絞られた一覧・
-  画面（chat sessions・処理状況・candidates・ヘッダ status 等）では
+  画面（candidates・doc 一覧・ヘッダ status 等）では
   行ごとの repo 名を出さない（常に同一リポジトリなので冗長）
 
 ## 処理ライフサイクル（verify の混在ルール）
@@ -88,10 +88,26 @@
   人が dispatch を判断するまで評価・実装どちらにも進まない
 - 匿名 Issue は prompt injection の入口になり得るため、内容の目視確認は必須
 
+## 起票と dispatch（人ゲート）
+
+- **起票は自動・dispatch は人判断のみ**: detector / 派生 / manual の課題は
+  intake で自動起票（queued）されるが、実行の開始は candidates /
+  ISSUES 一覧の「対応」ボタンだけが行う。drain は補起票・中断 verify の
+  再開・孤児 run の failed 化のみを担い、queued を自動起動しない
+- **candidates 一覧は判断待ち inbox**: 未起票・gated・queued・failed の
+  み表示し、各行の「対応」「却下」で人が一括判断する。「対応」は
+  起票・承認・再実行を兼ねた即時 dispatch（未起票は rate-limit を
+  人判断で bypass）、「却下」は `rejected`（未起票は起票して即
+  rejected、failed の却下も `rejected` へ）
+- 起動済み課題の run→verify→push は従来どおり自動で進む
+  （verify NG の差し戻しは queued で再び対応待ち）
+
 ## detector プラグイン規約
 
 - detector は `server/src/detectors/` 配下に置き、統一 candidate 形式
-  `{source, repo, title, body, symptomHash, detectedAt}` を emit する
+  `{source, repo, title, body, symptomHash, detectedAt, kind?}` を emit する
+  （`kind` は課題の種別。learn の SKILL draft 名 source+repo+kind に使う。
+  run id 等の揮発 id は入れない）
 - dedupe は入口で共通実施（source+repo+symptomHash）。detector 個別には持たせない
 - detector は検出のみ行い、起動・判定には関与しない
 
@@ -101,9 +117,11 @@
   ならタスク空きを待って自動再起動する。手動は `POST /api/control/restart`
 - 再起動は必ず「実行系停止 → control 再起動」の順
 - 判断フローの正本は `diagrams/restart-flow.mmd`（README §8 に埋め込み）
-- **開発ループ**: `npm run dev`（`cargo run`）で debug ビルドをフォアグラウンド実行
-  （kasugai_qgis の `run.py` 方式に倣う。EXE の別配置・常駐 dev インスタンスは持たない）。
-  prod と同時稼働させたい場合のみ `PORT=8587 cargo run` で第二インスタンスにする
+- **開発ループ**: `npm run dev`（`tools/dev.mjs` → `cargo run`）で debug ビルドを
+  フォアグラウンド実行（kasugai_qgis の `run.py` 方式に倣う。EXE の別配置・
+  常駐 dev インスタンスは持たない）。**通常版も開発版も :8586** — dev 起動時は
+  対象ポートの占有プロセスを強制停止してから起動する。検証用の並走インスタンスは
+  `PORT=<任意> npm run dev` で適宜ポートを指定する
 
 ## 配布とアセット更新（CDN）
 

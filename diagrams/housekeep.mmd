@@ -1,0 +1,10 @@
+---
+title: housekeeping（drain の定期整備）
+---
+flowchart LR
+    TICK[drain 定期 tick] --> REC[起票 reconcile<br/>candidate → intake<br/>deferred 分も窓が開けば起票]
+    TICK --> ORPH[中断 verify の再開・<br/>孤児 running の failed 化]
+    TICK --> RET[retention<br/>config.retentionDays<br/>0=掃除しない]
+    RET -->|期限切れ| EV[evidence/key-slug<br/>終端課題のみ<br/>done/failed/rejected/dropped]
+    RET -->|期限切れ| LG[logs/*.log]
+    EV --> KEEP[進行中課題の証跡は<br/>保持したまま]

@@ -5,14 +5,17 @@ flowchart TD
     WATCH[実行 exe の更新検知<br/>（cargo build 成果物の mtime）] --> EN{autoRestartOnDrift?}
     EN -->|off| END[何もしない]
     MAN[手動再起動<br/>設定ビューのボタン or<br/>POST /api/control/restart] --> BUSY
-    EN -->|on| BUSY{実行中 run あり?}
+    EN -->|on| BUSY{実行中 run（busy）あり?<br/>実行待機（waiting）は含まない}
     BUSY -->|yes| FORCE{force 指定?}
     FORCE -->|no| DEFER[空くまで延期<br/>SSE restart pending push]
-    FORCE -->|yes| STOP[runner 停止<br/>busy も含め全 proc を畳む]
+    FORCE -->|yes| STOP[runner 停止<br/>busy も含め全 proc を畳む<br/>待機状態・保留 prompt は<br/>chats.json へ persist]
     BUSY -->|no| STOP
     DEFER --> BUSY
-    STOP --> START[control 再起動<br/>detached respawner が親終了を<br/>待って新プロセスを起動]
-    START --> RSM{autoResumeOnStart かつ<br/>resumable chat あり?}
-    RSM -->|yes| LOAD[全対象を session/load で自動再接続<br/>失敗時は session/new へフォールバック]
+    STOP --> RSP{respawner 起動}
+    RSP -->|失敗| ABORT[再起動を中止<br/>exit せず SSE で失敗を通知]
+    RSP -->|ok| START[control 再起動<br/>detached respawner が親終了を<br/>待って新プロセスを起動]
+    START --> RSM{autoResumeOnStart?}
+    RSM -->|yes| LOAD[resumable chat を session/load で<br/>自動再接続<br/>失敗時は session/new へフォールバック]
+    LOAD --> RPROC[停止中の処理を自動再処理:<br/>差し戻し待ち→保留 prompt 再送 /<br/>検証待ち→検証ターン起動 /<br/>宙ぶら待機→解放して再送 /<br/>未着手の保留 prompt→起動して再送<br/>（再開可への続行 prompt・<br/>要人対応・repo 確認待ちは除く）]
     RSM -->|no| READY[idle 待機]
-    LOAD --> READY
+    RPROC --> READY

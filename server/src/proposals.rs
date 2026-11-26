@@ -203,6 +203,11 @@ pub fn dir(root: &Path) -> PathBuf {
     root.join("proposals")
 }
 
+/// 決定済み proposal の退避先。一覧（pending）とは分離する
+pub fn decided_dir(dir: &Path) -> PathBuf {
+    dir.join("decided")
+}
+
 fn path_of(dir: &Path, id: &str) -> Option<PathBuf> {
     // id は英数・-・_ のみ（パス注入防止）
     if id.is_empty()
@@ -266,9 +271,16 @@ pub fn create(dir: &Path, a: &Value) -> Value {
 }
 
 /// 採否の決定。accept は vet.ok のときのみ。戻り値 (http_status, body)
+/// 決定済みは proposals/decided/ へ移し、一覧（pending のみ）から外す
 pub fn decide(dir: &Path, id: &str, accept: bool, ws_root: &str) -> (u16, Value) {
-    let Some(mut p) = load(dir, id) else {
-        return (404, json!({"ok": false, "error": "not found"}));
+    let mut p = match load(dir, id) {
+        Some(p) => p,
+        None => {
+            if let Some(p) = load(&decided_dir(dir), id) {
+                return (409, json!({"ok": false, "error": "already decided", "proposal": with_vet(&p, ws_root)}));
+            }
+            return (404, json!({"ok": false, "error": "not found"}));
+        }
     };
     if p.get("status").and_then(|v| v.as_str()) != Some("pending") {
         return (409, json!({"ok": false, "error": "already decided", "proposal": with_vet(&p, ws_root)}));
@@ -282,7 +294,10 @@ pub fn decide(dir: &Path, id: &str, accept: bool, ws_root: &str) -> (u16, Value)
     o.insert("status".into(), json!(if accept { "accepted" } else { "declined" }));
     o.insert("decidedAt".into(), json!(now_iso()));
     o.insert("vet".into(), verdict);
-    save(dir, &p);
+    save(&decided_dir(dir), &p);
+    if let Some(op) = path_of(dir, id) {
+        let _ = std::fs::remove_file(&op);
+    }
     (200, json!({"ok": true, "proposal": p}))
 }
 
@@ -347,5 +362,28 @@ mod tests {
     fn rejects_bad_shape() {
         assert!(!vet_ok(&json!({"title":"","kind":"prompt","changes":[]})));
         assert!(!vet_ok(&json!({"title":"t","kind":"bogus","changes":[{"path":"prompts/a","content":"b"}]})));
+    }
+
+    #[test]
+    fn decide_moves_to_decided_dir() {
+        let root = std::env::temp_dir().join(format!(
+            "kasugai-proposals-test-{}",
+            crate::util::rand_hex(4)
+        ));
+        let dir = dir(&root);
+        let p = create(
+            &dir,
+            &json!({"title":"t","kind":"prompt","changes":[{"path":"prompts/a.md","content":"x"}]}),
+        );
+        let id = p.get("id").and_then(|v| v.as_str()).unwrap().to_string();
+        let (code, _) = decide(&dir, &id, false, &root.to_string_lossy());
+        assert_eq!(code, 200);
+        // 一覧（pending）から外れ、decided/ に記録される
+        assert!(list(&dir).is_empty());
+        assert_eq!(list(&decided_dir(&dir)).len(), 1);
+        // 再決定は 409
+        let (code, _) = decide(&dir, &id, true, &root.to_string_lossy());
+        assert_eq!(code, 409);
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

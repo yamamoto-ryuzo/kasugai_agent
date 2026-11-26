@@ -10,6 +10,7 @@ runner が課題 run の chat に注入する運用指示。`{{name}}` は注入
 - key: `{{key}}`
 - repo: `{{repo}}`
 - verifyLevel: L{{verifyLevel}}
+- priority: P{{priority}}
 - 受入条件: {{acceptance}}
 
 ## 課題

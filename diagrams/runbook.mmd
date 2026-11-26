@@ -1,0 +1,17 @@
+---
+title: runbook（kind 別対処手順の注入）
+---
+flowchart LR
+    ISS[queued 課題<br/>kind = detector emit<br/>ci-failure=workflow名・<br/>local-health=gh-auth等] --> DISP[一覧の対応ボタンで<br/>dispatch]
+    DISP --> RB1{prompts/runbook/<br/>source-kind.md?}
+    RB1 -->|あり| INJ[runbook 本文を<br/>対処手順として<br/>prompt に注入]
+    RB1 -->|なし| RB2{prompts/runbook/<br/>kind.md?}
+    RB2 -->|あり| INJ
+    RB2 -->|なし| RB3{prompts/runbook/<br/>source.md?}
+    RB3 -->|あり| INJ
+    RB3 -->|なし| SKIP[runbook なし]
+    INJ --> PROMPT[dispatch prompt =<br/>課題 + 受入条件 + 運用ルール<br/>+ runbook + knowledge]
+    SKIP --> PROMPT
+    PROMPT --> RUN[runner 非対話実行<br/>接続AI -p]
+    KN[knowledge/key-slug.md<br/>課題単位の生知見<br/>常に注入] -.-> PROMPT
+    SK[.devin/skills/slug<br/>slug=source+repo+kind<br/>learn が育てる SKILL draft<br/>runbook の学習版に相当] -.->|kind の粒度は共通| RB1

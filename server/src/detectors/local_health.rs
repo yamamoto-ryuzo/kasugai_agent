@@ -33,6 +33,7 @@ fn missing_paths(cfg: &Value) -> Vec<Value> {
                 name, path
             ),
             "labels": ["health"],
+            "kind": "missing-path",
             "symptomHash": format!("health-missing-path-{}", store::symptom_hash(path, "")),
             "detectedAt": now,
         }));
@@ -52,6 +53,7 @@ async fn gh_auth() -> Option<Value> {
                 e
             ),
             "labels": ["health"],
+            "kind": "gh-auth",
             "symptomHash": "health-gh-auth",
             "detectedAt": now_iso(),
         })

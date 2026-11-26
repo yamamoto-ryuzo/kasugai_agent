@@ -34,12 +34,12 @@
   "autoResumeOnStart": true,
   "retryLimit": 3,
   "verifyBackLimit": 3,
+  "intakeMaxPerHour": 0,
+  "retentionDays": 0,
   "repos": [
     {
       "slug": "yamamoto-ryuzo/kasugai_agent",
       "path": "C:/devin/kasugai_agent",
-      "autoTrigger": true,
-      "triggerLabel": "devin",
       "requirePushApproval": false
     }
   ],

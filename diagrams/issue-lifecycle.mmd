@@ -7,17 +7,28 @@ stateDiagram-v2
     deduped --> dropped : 既知/重複
     deduped --> assessed : 新規
     assessed --> gated : 人ゲート待ち (external等)
-    assessed --> queued : 自律可
+    assessed --> queued : 自律対象（対応待ち）
     gated --> queued : 人が承認
     gated --> rejected : 人が却下
-    queued --> running : runner 起動
+    queued --> running : 一覧の対応ボタンで dispatch<br/>（自動起動しない）
+    queued --> rejected : 人が却下
     running --> verifying : 実装完了
     verifying --> done : 検証合格
     verifying --> retry : NG (差し戻し)
-    retry --> queued : 再実行
-    retry --> failed : リトライ上限
+    retry --> queued : 差し戻し（対応ボタンで<br/>再 dispatch）
+    retry --> failed : リトライ上限（要人対応）
     running --> failed : 異常終了
+    failed --> queued : 再実行
+    failed --> rejected : 人が却下
+    note right of queued
+        candidates 一覧は判断待ち（未起票・gated・
+        queued・failed）のみ表示し、各行の
+        対応/却下ボタンで人が一括判断する。
+        対応は起票/承認/再実行を兼ねた即時 dispatch
+        （未起票は rate-limit を人判断で bypass）
+    end note
     done --> [*]
-    failed --> [*]
     rejected --> [*]
     dropped --> [*]
+    [*] --> done : GitHub closed Issue 取込<br/>（--import-github・COMPLETED）
+    [*] --> rejected : GitHub closed Issue 取込<br/>（--import-github・NOT_PLANNED）

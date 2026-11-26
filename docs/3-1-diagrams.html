@@ -32,20 +32,31 @@ stateDiagram-v2
     deduped --&gt; dropped : 既知/重複
     deduped --&gt; assessed : 新規
     assessed --&gt; gated : 人ゲート待ち (external等)
-    assessed --&gt; queued : 自律可
+    assessed --&gt; queued : 自律対象（対応待ち）
     gated --&gt; queued : 人が承認
     gated --&gt; rejected : 人が却下
-    queued --&gt; running : runner 起動
+    queued --&gt; running : 一覧の対応ボタンで dispatch&lt;br/&gt;（自動起動しない）
+    queued --&gt; rejected : 人が却下
     running --&gt; verifying : 実装完了
     verifying --&gt; done : 検証合格
     verifying --&gt; retry : NG (差し戻し)
-    retry --&gt; queued : 再実行
-    retry --&gt; failed : リトライ上限
+    retry --&gt; queued : 差し戻し（対応ボタンで&lt;br/&gt;再 dispatch）
+    retry --&gt; failed : リトライ上限（要人対応）
     running --&gt; failed : 異常終了
+    failed --&gt; queued : 再実行
+    failed --&gt; rejected : 人が却下
+    note right of queued
+        candidates 一覧は判断待ち（未起票・gated・
+        queued・failed）のみ表示し、各行の
+        対応/却下ボタンで人が一括判断する。
+        対応は起票/承認/再実行を兼ねた即時 dispatch
+        （未起票は rate-limit を人判断で bypass）
+    end note
     done --&gt; [*]
-    failed --&gt; [*]
     rejected --&gt; [*]
     dropped --&gt; [*]
+    [*] --&gt; done : GitHub closed Issue 取込&lt;br/&gt;（--import-github・COMPLETED）
+    [*] --&gt; rejected : GitHub closed Issue 取込&lt;br/&gt;（--import-github・NOT_PLANNED）
 </pre>
 <h3>全体構成</h3>
 <!-- diagram: architecture -->
@@ -62,10 +73,10 @@ flowchart LR
     end
 
     subgraph Core[コア server/src/]
-        N[normalize + dedupe&lt;br/&gt;store.rs]
+        N[normalize + dedupe&lt;br/&gt;detectors/mod.rs + store.rs]
         A[assess&lt;br/&gt;pipeline.rs]
         G[gate&lt;br/&gt;人ゲート]
-        R[runner&lt;br/&gt;session.rs]
+        R[runner&lt;br/&gt;runner.rs + chat/]
         V[verify&lt;br/&gt;verify.rs]
         K[knowledge&lt;br/&gt;knowledge.rs]
     end
@@ -90,11 +101,22 @@ flowchart LR
 title: detect → normalize → dedupe
 ---
 flowchart TD
-    DET[detector] --&gt;|candidate&lt;br/&gt;source/repo/title/body/&lt;br/&gt;symptomHash/detectedAt| NORM[正規化]
+    DET[detector / manual API /&lt;br/&gt;派生（done chat の&lt;br/&gt;変更ターン source=derived）&lt;br/&gt;github-issues は open issue 全件&lt;br/&gt;（ラベル選別なし）&lt;br/&gt;closed は --import-github で&lt;br/&gt;終端取込] --&gt;|candidate&lt;br/&gt;source/repo/title/body/&lt;br/&gt;symptomHash/detectedAt| NORM[正規化]
     NORM --&gt; HASH[issue key =&lt;br/&gt;source+repo+symptomHash]
     HASH --&gt; EXIST{既出?}
     EXIST --&gt;|yes| BUMP[既存課題の&lt;br/&gt;lastSeen 更新のみ]
-    EXIST --&gt;|no| NEW[課題レコード作成&lt;br/&gt;status=assessed へ]
+    EXIST --&gt;|no| RATE{起票レート超過?&lt;br/&gt;intakeMaxPerHour&lt;br/&gt;source+repo 単位&lt;br/&gt;0=無制限}
+    RATE --&gt;|超過| DEFER[candidate に留め置く&lt;br/&gt;deferred=rate-limit&lt;br/&gt;課題は作らない]
+    DEFER -.-&gt;|次回 reconcile で再試行| BF
+    RATE --&gt;|以内| NEW[課題レコード作成&lt;br/&gt;＋assess&lt;br/&gt;verifyLevel・受入条件・&lt;br/&gt;priority・自律可否&lt;br/&gt;起票＝本システムの課題&lt;br/&gt;（GitHub 登録は別機構）]
+    BF[drain 定期 reconcile:&lt;br/&gt;candidate に課題が無ければ&lt;br/&gt;intake で補起票] -.-&gt;|自動起票の保証| NEW
+    NEW --&gt; GATE{external 等&lt;br/&gt;自律対象外?}
+    GATE --&gt;|no| Q[queued&lt;br/&gt;一覧の対応ボタンで&lt;br/&gt;人が dispatch]
+    GATE --&gt;|yes| G[gated&lt;br/&gt;候補一覧で人が&lt;br/&gt;dispatch 判断]
+    DEFER --&gt; INBOX
+    Q --&gt; INBOX
+    G --&gt; INBOX
+    INBOX[候補一覧 = 判断待ち inbox&lt;br/&gt;未起票・gated・queued・failed のみ表示&lt;br/&gt;（実行中・終端の課題行は出さない）&lt;br/&gt;全行 対応/却下ボタンで人が一括判断:&lt;br/&gt;対応=起票/承認/再実行を兼ねた即時 dispatch&lt;br/&gt;（未起票は rate-limit を人判断で bypass）&lt;br/&gt;却下=rejected（未起票は起票して即 rejected）]
 </pre>
 <h3>verify（L0〜L4 / push 統合）</h3>
 <!-- diagram: verify-levels -->
@@ -117,10 +139,10 @@ flowchart TD
     REVERT --&gt; PUSH
     PUSH --&gt; DONE[status=done]
     JUDGE --&gt;|NG| SEP[課題を分離&lt;br/&gt;実装済みNG課題 × 未実装課題&lt;br/&gt;kasugai-verify verdict]
-    SEP --&gt; BACK[差し戻し prompt で再実装指示&lt;br/&gt;実装済み→修正 / 未実装→実装]
-    BACK --&gt; RETRY[status=retry&lt;br/&gt;verifyBackLimit まで]
-    RETRY --&gt; IMPL
-    RETRY --&gt;|上限到達| FAIL[status=failed&lt;br/&gt;sys 報告]
+    SEP --&gt; BACK[差し戻し prompt を組み立て保留&lt;br/&gt;実装済み→修正 / 未実装→実装&lt;br/&gt;（自動送信はしない）]
+    BACK --&gt; RETRY[status=retry&lt;br/&gt;要対応列で再送待ち&lt;br/&gt;verifyBackLimit まで]
+    RETRY --&gt;|処理再開ボタン /&lt;br/&gt;個別の差し戻しボタン /&lt;br/&gt;再起動時の自動再処理| IMPL
+    RETRY --&gt;|上限到達| FAIL[status=failed&lt;br/&gt;要人対応マーク + sys 報告]
 </pre>
 <h3>learn（知見の還流）</h3>
 <!-- diagram: learn-flow -->
@@ -129,13 +151,18 @@ flowchart TD
 title: learn（知見の還流）
 ---
 flowchart LR
-    RUN[run 結果・証跡] --&gt; KN[SKILL 蓄積&lt;br/&gt;.devin/skills/&lt;br/&gt;課題key単位・draft・mermaid 図必須]
-    KN --&gt; PROP[proposals 生成&lt;br/&gt;skills/prompts/config/&lt;br/&gt;正本ドキュメント]
+    RUN[run 結果・証跡] --&gt; KN[生の知見を蓄積&lt;br/&gt;knowledge/&lt;br/&gt;課題key単位・無条件]
+    KN --&gt; SK[SKILL draft 組立&lt;br/&gt;.devin/skills/&lt;slug&gt;/SKILL.md&lt;br/&gt;slug = source+repo+kind&lt;br/&gt;揮発 id を含まない安定名&lt;br/&gt;mermaid 図必須・図 title = slug]
+    SK --&gt; DUP{同 slug path の proposal 既存？&lt;br/&gt;pending + decided/ を対象&lt;br/&gt;または同一内容&lt;br/&gt;（key/題名/知見名の揮発分を&lt;br/&gt;正規化比較）}
+    DUP --&gt;|なし| PROP[proposals 生成&lt;br/&gt;kind=skill・issueKey=課題key]
+    DUP --&gt;|あり| SKIP[起票しない&lt;br/&gt;同じ種別の再検出は抑止]
     PROP --&gt; VET[vet&lt;br/&gt;機械検査&lt;br/&gt;path許可 / secret混入 /&lt;br/&gt;構文 / frontmatter]
     VET --&gt;|fail| VF[vet 不合格&lt;br/&gt;accept 不能・要修正]
     VET --&gt;|pass| HUMAN{人の採否}
     HUMAN --&gt;|採用| SELF[agent 自身へ反映&lt;br/&gt;or 正本へ課題起票]
-    HUMAN --&gt;|却下| DROP[記録して破棄]
+    HUMAN --&gt;|却下| DROP[破棄]
+    SELF --&gt; REC[proposals/decided/ へ記録&lt;br/&gt;一覧は pending のみ]
+    DROP --&gt; REC
 </pre>
 <h3>chat 送受信シーケンス</h3>
 <!-- diagram: chat-sequence -->
@@ -177,9 +204,9 @@ sequenceDiagram
         end
     end
     alt execMode=parallel: ターン終了時に&lt;br/&gt;kasugai-split ブロックを検出
-        C-&gt;&gt;C: split.rs が [{title,prompt}] を抽出&lt;br/&gt;（parallelMaxChildren 上限・重複抑止）
+        C-&gt;&gt;C: split.rs が [{title,prompt}] を抽出（重複抑止）。&lt;br/&gt;parallelMaxChildren は同時実行上限:&lt;br/&gt;アクティブ子数（busy/待機/検証中）が&lt;br/&gt;上限未満なら即起動、超過分は&lt;br/&gt;pendingSplits 待機キューへ（chats.json 永続化）
         C-&gt;&gt;A: 子 chat を生成（parent=親id・direct 固定・&lt;br/&gt;同 repo cwd・同 agent）して session/prompt
-        Note over C: 子 chat の busy 解除 → 最終回答を&lt;br/&gt;ダイジェストとして親 chat へ投函。&lt;br/&gt;親は統合・さらなる分割を続けられる
+        Note over C: 子 chat の busy 解除 → 最終回答を&lt;br/&gt;ダイジェストとして親 chat へ投函。&lt;br/&gt;空いた枠で待機キューから順次起動。&lt;br/&gt;親は統合・さらなる分割を続けられる
     end
     Note over C: blocker chat の busy 解除 → 待機を解き&lt;br/&gt;保留 prompt を session/prompt へ再送
     Note over C,A: acp spawn 時は WINDSURF_EXT_HOST_PID を&lt;br/&gt;env から除去（devin は実親でなくこの変数の pid を&lt;br/&gt;親監視するため、死んだ IDE ホストの値が残ると&lt;br/&gt;実行体が起動直後に自死する）
@@ -205,22 +232,27 @@ sequenceDiagram
 title: パネルレイアウト
 ---
 flowchart LR
-    L[左ペイン&lt;br/&gt;title + カレントrepo +&lt;br/&gt;縦並びナビ + 管理セクション] --&gt; C[中央ペイン&lt;br/&gt;chat messages（chat/console タブ）/&lt;br/&gt;doc 本文（Viewer 単一オブジェクトに集約&lt;br/&gt;kind判定・原文/プレビュー切替・mermaid描画&lt;br/&gt;MD+mermaid・HTML・MMD 表示・MMD は縦横切替可&lt;br/&gt;mermaid 図は＋−ボタン/wheel で拡縮&lt;br/&gt;（カーソル位置を維持）&lt;br/&gt;中央配置・ドラッグで視野移動・ズーム率表示）]
-    C --&gt; R[右ペイン&lt;br/&gt;chat sessions（行は状態ドット+ラベルの&lt;br/&gt;最小表示・状態確認は処理状況ボード） /&lt;br/&gt;doc browser + 参照ファイル /&lt;br/&gt;フォルダツリー（エディター）&lt;br/&gt;（省略ラベルは data-tip&lt;br/&gt;ホバーポップアップで全文表示）]
+    L[左ペイン&lt;br/&gt;title + カレントrepo +&lt;br/&gt;縦並びナビ&lt;br/&gt;（処理状況/AIチャット/エディター/&lt;br/&gt;AGENTS/SKILL/マニュアル/設定の順。&lt;br/&gt;初期表示は処理状況）] --&gt; C[中央ペイン&lt;br/&gt;chat messages（chat/console タブ）/&lt;br/&gt;doc 本文（Viewer 単一オブジェクトに集約&lt;br/&gt;kind判定・原文/プレビュー切替・mermaid描画&lt;br/&gt;MD+mermaid・HTML・MMD 表示・MMD は縦横切替可&lt;br/&gt;mermaid 図は＋−ボタン/wheel で拡縮&lt;br/&gt;（カーソル位置を維持）&lt;br/&gt;中央配置・ドラッグで視野移動・ズーム率表示）]
+    C --&gt; R[右ペイン&lt;br/&gt;管理セクション / doc browser + 参照ファイル /&lt;br/&gt;フォルダツリー（エディター）&lt;br/&gt;（エディター/AGENTS/SKILL 選択時は doc browser。&lt;br/&gt;表示するものがない時は管理セクションを&lt;br/&gt;表示し、ペイン自体は常時表示。&lt;br/&gt;省略ラベルは data-tip&lt;br/&gt;ホバーポップアップで全文表示）]
     G[境界グリップ&lt;br/&gt;ドラッグで幅可変&lt;br/&gt;localStorage 永続化] --&gt; L
     G --&gt; R
     RS[カレントrepo選択&lt;br/&gt;左ペイン title 直下&lt;br/&gt;「すべて」選択肢なし&lt;br/&gt;repo名の表示はここのみ&lt;br/&gt;localStorage 永続化] --&gt;|表示スコープ| L
     RS --&gt;|表示スコープ| R
     RS --&gt;|新規chatの cwd&lt;br/&gt;スコープ外の chat選択・doc表示の解除&lt;br/&gt;（実行中chatはバックグラウンド継続）| C
-    C --&gt;|ヘッダレイアウト&lt;br/&gt;1行目=タイトル（概要）が全幅&lt;br/&gt;2行目=plink/status/最新/&lt;br/&gt;options/言語select/操作ボタン| HD[flex-wrap で&lt;br/&gt;自然折返し]
+    C --&gt;|ヘッダレイアウト&lt;br/&gt;1行目=タイトル（概要）が全幅&lt;br/&gt;（タイトル前に処理状態ピル。&lt;br/&gt;削除ボタン表示時はタイトルと1行目を共有）&lt;br/&gt;2行目=plink/status/最新/◀▶ページング/&lt;br/&gt;options/言語select/操作ボタン| HD[flex-wrap で&lt;br/&gt;自然折返し]
+    C --&gt;|タイトル前の状態ピル| CPILL[ボードの列区分と同じ色で&lt;br/&gt;現在の処理状態を表示&lt;br/&gt;（実行中/実行待機中/検証中/&lt;br/&gt;検証待ち/要対応など）&lt;br/&gt;SSE push で即時反映]
     C --&gt;|最新ボタン| NEW[updatedAt 最大の&lt;br/&gt;chat を選択]
+    C --&gt;|ヘッダの◀戻る/進む▶ボタン&lt;br/&gt;（新規画面からは 進む=先頭・戻る=末尾）| PAGE[処理状況ボードと同じ並びで&lt;br/&gt;前後の chat を選択&lt;br/&gt;（列順 idle→exec→verify→resume→&lt;br/&gt;unresolved→live。他repoのchatは&lt;br/&gt;カレントrepo切替を兼ねる）]
+    C --&gt;|ヘッダの＋新規チャットボタン /&lt;br/&gt;処理状況ボード上部の&lt;br/&gt;＋新規チャットボタン| NEWC[新規 chat 画面へ&lt;br/&gt;（chat の切替は処理状況ボードの&lt;br/&gt;カードで行う）]
     C --&gt;|言語 select&lt;br/&gt;localStorage 永続化| I18N[panel/i18n.js&lt;br/&gt;i18n/*.json 辞書&lt;br/&gt;en がフォールバック&lt;br/&gt;data-i18n 属性 + t()&lt;br/&gt;切替時は全ペイン再描画]
     C --&gt;|設定システムタブの&lt;br/&gt;タイムゾーン入力&lt;br/&gt;（IANA名・空欄=ブラウザ既定&lt;br/&gt;datalist に代表ゾーン）&lt;br/&gt;localStorage 永続化| TZ[表示タイムゾーン&lt;br/&gt;fmtTs/fmtTm が Intl で変換&lt;br/&gt;chat・console・一覧の時刻表示&lt;br/&gt;保存 ts は UTC のまま]
-    L --&gt; M1[loop state]
-    L --&gt; M2[candidates/proposals]
-    L --&gt;|エディターナビ&lt;br/&gt;（処理状況の直下）| FT[フォルダツリー&lt;br/&gt;右ペインに展開&lt;br/&gt;カレントrepo の path を根&lt;br/&gt;dir は lazy 展開&lt;br/&gt;GET /api/fs/tree&lt;br/&gt;.git/node_modules 等は除外&lt;br/&gt;秘匿系は 🔒 で選択不可]
+    R --&gt; M1[loop state&lt;br/&gt;version/port/repos/chats/candidates&lt;br/&gt;+ KPI（status別件数・done率・MTTR）&lt;br/&gt;行ラベルは i18n 辞書で言語化]
+    R --&gt; M2[candidates/issues/proposals&lt;br/&gt;candidates は人の判断待ちのみ表示&lt;br/&gt;（未起票・gated・queued・failed。&lt;br/&gt;起票は自動が既定で実行中・終端の&lt;br/&gt;課題行は出さない）&lt;br/&gt;candidate 行は起票済み課題の status を併記&lt;br/&gt;rate-limit 保留の candidate は&lt;br/&gt;deferred ピルで明示&lt;br/&gt;全行に 対応/却下ボタン:&lt;br/&gt;対応=起票/承認/再実行を兼ねた即時 dispatch&lt;br/&gt;（未起票は rate-limit を人判断で bypass）&lt;br/&gt;却下=rejected（未起票は起票して即 rejected）&lt;br/&gt;proposal カードはクリックで&lt;br/&gt;中央ペインへ詳細表示&lt;br/&gt;queued issue は対応ボタンで即時 dispatch&lt;br/&gt;issue 行は priority バッジ（P2/P3）を併記&lt;br/&gt;一覧は状態→priority→更新時刻順に整列&lt;br/&gt;status・source・kind の表示は&lt;br/&gt;i18n 辞書で言語化（未知の値は原文）&lt;br/&gt;各行の body/rationale は&lt;br/&gt;data-tip ホバーでポップアップ表示]
+    M2 --&gt;|proposal カードクリック&lt;br/&gt;詳細（vet 検査結果・changes 本文・&lt;br/&gt;採否ボタン）を中央ペインに表示| C
+    L --&gt;|エディターナビ&lt;br/&gt;（AIチャットの直下）| FT[フォルダツリー&lt;br/&gt;右ペインに展開&lt;br/&gt;カレントrepo の path を根&lt;br/&gt;dir は lazy 展開&lt;br/&gt;GET /api/fs/tree&lt;br/&gt;.git/node_modules 等は除外&lt;br/&gt;秘匿系は 🔒 で選択不可]
     FT --&gt;|file 選択&lt;br/&gt;GET /api/fs/file&lt;br/&gt;（登録 repo 配下・非秘匿のみ&lt;br/&gt;binary は本文を返さない）| C
-    L --&gt;|縦並びナビ&lt;br/&gt;AIチャット/AGENTS/SKILL| R
+    L --&gt;|AIチャットナビ&lt;br/&gt;doc/ツリー表示を閉じて&lt;br/&gt;chat 表示へ戻す| C
+    L --&gt;|縦並びナビ&lt;br/&gt;AGENTS/SKILL| R
     L --&gt;|マニュアルナビ&lt;br/&gt;中央ペインを iframe 表示| C
     C --&gt;|GET /docs/* 静的配信| MAN[docs/ マニュアルサイト&lt;br/&gt;正本=diagrams/docs/&lt;br/&gt;（1ページ1.md・frontmatter title&lt;br/&gt;nav.json=章立て&lt;br/&gt;template.html/style.css=書式&lt;br/&gt;Canvas docs 参考）&lt;br/&gt;tools/sync-docs.mjs が生成]
     L --&gt;|git ナビ（設定下の区切り線以下・ナビ末尾）&lt;br/&gt;コミット=メッセージ入力→&lt;br/&gt;POST /api/git/commit&lt;br/&gt;（git add -A + commit・変更なしは noop）&lt;br/&gt;プッシュ=確認後&lt;br/&gt;POST /api/git/push（人ゲートの承認）| GIT[カレント repo で git を spawn&lt;br/&gt;60s timeout&lt;br/&gt;出力は conlog 集約&lt;br/&gt;→ console タブへ SSE push]
@@ -229,19 +261,22 @@ flowchart LR
     AC --&gt;|新規 chat の実行体&lt;br/&gt;（chat 作成時に固定し&lt;br/&gt;chats.json へ永続化）| ACPX[接続AI 実行体&lt;br/&gt;acp=CLI spawn /&lt;br/&gt;agent=/agent HTTP /&lt;br/&gt;openai=chat/completions]
     ACPX --&gt;|stderr / 非JSON stdout&lt;br/&gt;（acp 型の spawn のみ）| CON[conlog.rs&lt;br/&gt;実行体出力 + control 自身の&lt;br/&gt;stdio をリングバッファ集約]
     C --&gt;|console タブ&lt;br/&gt;GET /api/console +&lt;br/&gt;SSE console push| CON
-    C --&gt;|処理モード select&lt;br/&gt;（入力行の先頭・添付ボタンの左&lt;br/&gt;目立たせるため強調表示）&lt;br/&gt;POST /api/chat/mode| EM[execMode&lt;br/&gt;（既定=parallel）&lt;br/&gt;direct=逐次 /&lt;br/&gt;parallel=kasugai-split で&lt;br/&gt;子chat自動起動・結果を親へ集約&lt;br/&gt;sessions一覧は親子でグループ表示]
+    C --&gt;|処理モード select&lt;br/&gt;（入力行の先頭・添付ボタンの左&lt;br/&gt;目立たせるため強調表示）&lt;br/&gt;POST /api/chat/mode| EM[execMode&lt;br/&gt;（既定=parallel）&lt;br/&gt;direct=逐次 /&lt;br/&gt;parallel=kasugai-split で&lt;br/&gt;子chat自動起動・結果を親へ集約&lt;br/&gt;同時実行上限超過分は&lt;br/&gt;pendingSplits待機キュー・&lt;br/&gt;子完了で順次起動&lt;br/&gt;ボードの子chatカードは↳印で識別]
     C --&gt;|repo設定 保存/登録解除&lt;br/&gt;POST /api/repos/update&lt;br/&gt;POST /api/repos/remove| RC[config.json の repos&lt;br/&gt;SSE push で即時反映]
     C --&gt;|repo登録（設定ビューの&lt;br/&gt;path入力・参照ピッカー /&lt;br/&gt;IDE管理下の登録ボタン）&lt;br/&gt;POST /api/repos| RC
     C --&gt;|path 参照&lt;br/&gt;GET /api/fs/dirs| FS[ローカルFSブラウザ&lt;br/&gt;サブdir + .git 検出&lt;br/&gt;loopback 限定]
     RC --&gt;|選択肢へ追加し&lt;br/&gt;SSE即時反映| RS
-    L --&gt;|処理状況ナビ&lt;br/&gt;idle/exec/verify/resume/live&lt;br/&gt;の順の状態別カンバン列&lt;br/&gt;exec列は busy+waiting を統合&lt;br/&gt;カードに実行中/実行待機中ピル&lt;br/&gt;カードに ctx 消費量ピル（usage_update 由来。&lt;br/&gt;行は最小表示のため詳細は data-tip）&lt;br/&gt;verify列は実装ターン終了で自動遷移&lt;br/&gt;（touched あり → autoVerify で検証&lt;br/&gt;prompt 送信・検証中も列に留まる）| C
-    C --&gt;|statusカードクリック| PICK[該当 chat を選択表示]
+    L --&gt;|処理状況ナビ&lt;br/&gt;（起動時の初期表示）&lt;br/&gt;idle/exec/verify/resume/unresolved/live&lt;br/&gt;の順の状態別カンバン列&lt;br/&gt;（列幅は内容量で可変: 空列=半分幅 /&lt;br/&gt;2件以上=件数比例で広げ&lt;br/&gt;カードを多段グリッド表示）&lt;br/&gt;exec列は busy+waiting を統合&lt;br/&gt;カードに実行中/実行待機中ピル&lt;br/&gt;カードに ctx 消費量ピル（usage_update 由来。&lt;br/&gt;行は最小表示のため詳細は data-tip）&lt;br/&gt;verify列は実装ターン終了で自動遷移&lt;br/&gt;（touched あり → autoVerify で検証&lt;br/&gt;prompt 送信・検証中も列に留まる）&lt;br/&gt;idle列は proc無し・saved sid無しの chat&lt;br/&gt;（起動失敗時は prompt を保留し&lt;br/&gt;開始/処理再開で再送）&lt;br/&gt;完了は「人の操作が必要か」で分岐:&lt;br/&gt;live列=接続中の完了セッション全般&lt;br/&gt;（実装完了 doneKind=done と&lt;br/&gt;無印=実装ターンを経ずに終了したもの）&lt;br/&gt;unresolved列=要対応のみ&lt;br/&gt;（検証NG=ng / verdict未取得=unverified /&lt;br/&gt;差し戻し再送待ち・要人対応）を区分ピルで明示。&lt;br/&gt;検証NGの差し戻しは prompt を保留して&lt;br/&gt;同列で再送待ち（自動送信しない）とし、&lt;br/&gt;上限到達は「要人対応」ピルを付す。&lt;br/&gt;doneKind=done は終端: 新規ターンでも消さず&lt;br/&gt;live列に留まる。done の chat で変更が生じた&lt;br/&gt;ターンは派生課題として candidate intake へ&lt;br/&gt;起票（source=derived）し chat 側は done を維持| C
+    C --&gt;|statusカードクリック| PICK[該当 chat を選択表示&lt;br/&gt;選択時は最終行へスクロール&lt;br/&gt;（SSE 更新の追尾は末尾付近のみ）]
     C --&gt;|検証列カードの検証ボタン&lt;br/&gt;POST /api/chat/verify| VR[検証ターン起動&lt;br/&gt;対象EXE起動+Playwright等の&lt;br/&gt;実機確認を指示&lt;br/&gt;SSE push で即時反映]
     C --&gt;|verify=running/pending| VSH[chat 画面にも検証中/検証待ちを明示&lt;br/&gt;ヘッダ status＋メッセージ末尾の&lt;br/&gt;インジケータ＋送信ボタン&lt;br/&gt;SSE push で即時反映]
-    C --&gt;|完了列カードの×ボタン&lt;br/&gt;POST /api/chat/close| DEL[chat 削除&lt;br/&gt;SSE push で即時反映]
-    C --&gt;|完了列ヘッダの「すべて削除」&lt;br/&gt;POST /api/chat/close-completed&lt;br/&gt;カレントrepoの完了列を一括削除| DEL
-    C --&gt;|再開可列カードの再開ボタン&lt;br/&gt;POST /api/chat/resume| RLOAD[session/load で再接続&lt;br/&gt;SSE push で即時反映]
-    C --&gt;|ボード上部の「処理再開」ボタン&lt;br/&gt;（停止中の件数を併記・0件は無効）&lt;br/&gt;POST /api/chat/resume-all| RALL[止まった処理を一括再開&lt;br/&gt;再開可→session/load再接続+&lt;br/&gt;中断作業の続行prompt送信&lt;br/&gt;検証待ち→検証ターン起動&lt;br/&gt;ブロッカー消失の実行待機→&lt;br/&gt;解放して保留prompt再送&lt;br/&gt;（busy中・repo確認待ちは触らない）&lt;br/&gt;SSE push で即時反映]
+    C --&gt;|doneKind 確定（検証フェーズ解消）| VEND[chat 末尾に終了区分をピル表示&lt;br/&gt;実装完了=done / 検証NG上限=ng /&lt;br/&gt;未検証=unverified&lt;br/&gt;（busy・verify待ちの表示より優先度は低い）&lt;br/&gt;SSE push で即時反映]
+    C --&gt;|各列カードの×ボタン&lt;br/&gt;（全カード・ホバー表示。&lt;br/&gt;右下にボタンがあるカードは右上）&lt;br/&gt;POST /api/chat/close| DEL[chat 削除&lt;br/&gt;SSE push で即時反映]
+    C --&gt;|chat画面ヘッダの削除ボタン&lt;br/&gt;（タイトル前・処理が終わった chat のみ表示。&lt;br/&gt;実行中・検証中・要対応では非表示。&lt;br/&gt;内容確認後にその場で削除）&lt;br/&gt;POST /api/chat/close| DEL
+    C --&gt;|完了列ヘッダの「すべて削除」&lt;br/&gt;POST /api/chat/close-completed&lt;br/&gt;カレントrepoの完了列を一括削除&lt;br/&gt;（live列=doneKind=done・無印が対象。&lt;br/&gt;要対応列は残る）| DEL
+    C --&gt;|要対応列カードの差し戻しボタン&lt;br/&gt;POST /api/chat/rework| RWK[保留の差し戻しpromptがあればそれを、&lt;br/&gt;無ければ終了区分に応じた再作業promptを送信&lt;br/&gt;doneKind/verify系・要人対応をリセットし&lt;br/&gt;exec列へ戻す&lt;br/&gt;SSE push で即時反映]
+    C --&gt;|再開可列カードの再開ボタン・&lt;br/&gt;未着手列カードの開始ボタン&lt;br/&gt;POST /api/chat/resume| RLOAD[session/load で再接続&lt;br/&gt;saved sid 無しは session/new で起動&lt;br/&gt;未送信の保留promptがあれば再送&lt;br/&gt;SSE push で即時反映]
+    C --&gt;|ボード上部の「処理再開」ボタン&lt;br/&gt;（停止中の件数を併記・0件は無効）&lt;br/&gt;POST /api/chat/resume-all| RALL[止まった処理を一括再開&lt;br/&gt;差し戻し待ち→保留の差し戻しprompt再送&lt;br/&gt;再開可→session/load再接続+&lt;br/&gt;中断作業の続行prompt送信&lt;br/&gt;未着手→session/newで起動+&lt;br/&gt;起動失敗で保留のprompt再送&lt;br/&gt;検証待ち→検証ターン起動&lt;br/&gt;ブロッカー消失の実行待機→&lt;br/&gt;解放して保留prompt再送&lt;br/&gt;（busy中・repo確認待ち・要人対応は触らない）&lt;br/&gt;SSE push で即時反映]
     R --&gt;|doc一覧 GET /api/agents&lt;br/&gt;GET /api/skills&lt;br/&gt;SKILL は global scope を&lt;br/&gt;一覧から除外| REG[doc registry&lt;br/&gt;agents.rs /&lt;br/&gt;skills.rs]
     R --&gt;|doc/参照ファイル選択&lt;br/&gt;GET /api/doc| C
     R --&gt;|GET /api/refs&lt;br/&gt;AGENTS: 切替時に全doc分を&lt;br/&gt;マージして一覧化&lt;br/&gt;SKILL: doc選択時| RF[参照ファイル抽出&lt;br/&gt;registry/refs.rs&lt;br/&gt;秘匿・未作成は無効表示]
@@ -305,17 +340,20 @@ flowchart TD
     WATCH[実行 exe の更新検知&lt;br/&gt;（cargo build 成果物の mtime）] --&gt; EN{autoRestartOnDrift?}
     EN --&gt;|off| END[何もしない]
     MAN[手動再起動&lt;br/&gt;設定ビューのボタン or&lt;br/&gt;POST /api/control/restart] --&gt; BUSY
-    EN --&gt;|on| BUSY{実行中 run あり?}
+    EN --&gt;|on| BUSY{実行中 run（busy）あり?&lt;br/&gt;実行待機（waiting）は含まない}
     BUSY --&gt;|yes| FORCE{force 指定?}
     FORCE --&gt;|no| DEFER[空くまで延期&lt;br/&gt;SSE restart pending push]
-    FORCE --&gt;|yes| STOP[runner 停止&lt;br/&gt;busy も含め全 proc を畳む]
+    FORCE --&gt;|yes| STOP[runner 停止&lt;br/&gt;busy も含め全 proc を畳む&lt;br/&gt;待機状態・保留 prompt は&lt;br/&gt;chats.json へ persist]
     BUSY --&gt;|no| STOP
     DEFER --&gt; BUSY
-    STOP --&gt; START[control 再起動&lt;br/&gt;detached respawner が親終了を&lt;br/&gt;待って新プロセスを起動]
-    START --&gt; RSM{autoResumeOnStart かつ&lt;br/&gt;resumable chat あり?}
-    RSM --&gt;|yes| LOAD[全対象を session/load で自動再接続&lt;br/&gt;失敗時は session/new へフォールバック]
+    STOP --&gt; RSP{respawner 起動}
+    RSP --&gt;|失敗| ABORT[再起動を中止&lt;br/&gt;exit せず SSE で失敗を通知]
+    RSP --&gt;|ok| START[control 再起動&lt;br/&gt;detached respawner が親終了を&lt;br/&gt;待って新プロセスを起動]
+    START --&gt; RSM{autoResumeOnStart?}
+    RSM --&gt;|yes| LOAD[resumable chat を session/load で&lt;br/&gt;自動再接続&lt;br/&gt;失敗時は session/new へフォールバック]
+    LOAD --&gt; RPROC[停止中の処理を自動再処理:&lt;br/&gt;差し戻し待ち→保留 prompt 再送 /&lt;br/&gt;検証待ち→検証ターン起動 /&lt;br/&gt;宙ぶら待機→解放して再送 /&lt;br/&gt;未着手の保留 prompt→起動して再送&lt;br/&gt;（再開可への続行 prompt・&lt;br/&gt;要人対応・repo 確認待ちは除く）]
     RSM --&gt;|no| READY[idle 待機]
-    LOAD --&gt; READY
+    RPROC --&gt; READY
 </pre>
 <h3>環境起動（docs ナビの起動ボタン）</h3>
 <!-- diagram: env-launch -->
@@ -339,7 +377,7 @@ flowchart TD
 
     subgraph COLD[冷起動の入口（control 全停止時）]
         TS[ログオン自動起動&lt;br/&gt;HKCU Run キー KasugaiAgentDispatcher&lt;br/&gt;ログオンで prod 常駐&lt;br/&gt;--install-task / パネル設定で登録]
-        MANUAL[exe 直起動 / cargo run&lt;br/&gt;（npm run dev）]
+        MANUAL[exe 直起動 / npm run dev&lt;br/&gt;（tools/dev.mjs: 対象ポートの占有を強制停止→cargo run。&lt;br/&gt;通常版・開発版とも :8586。検証の並走は PORT= で適宜指定）]
         PROTO2[kasugai-agent:// プロトコル&lt;br/&gt;（本図のフォールバック経路）]
     end
 </pre>

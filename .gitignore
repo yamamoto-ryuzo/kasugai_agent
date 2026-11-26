@@ -37,3 +37,7 @@ assets/
 dist/
 .verify-tmp/
 control.log
+.verify-run/
+server/target-verify/
+*.tmp.json
+*.bak-preimport

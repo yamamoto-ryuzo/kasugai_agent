@@ -10,10 +10,10 @@ flowchart LR
     end
 
     subgraph Core[コア server/src/]
-        N[normalize + dedupe<br/>store.rs]
+        N[normalize + dedupe<br/>detectors/mod.rs + store.rs]
         A[assess<br/>pipeline.rs]
         G[gate<br/>人ゲート]
-        R[runner<br/>session.rs]
+        R[runner<br/>runner.rs + chat/]
         V[verify<br/>verify.rs]
         K[knowledge<br/>knowledge.rs]
     end

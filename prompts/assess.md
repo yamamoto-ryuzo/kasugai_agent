@@ -13,6 +13,12 @@
   - L2: `exe` / `実機` / `qgis` を含む、または label `binary`
   - L0: `doc` / `mermaid` / `.mmd` を含む、または label `documentation`
   - 上記以外: L1
+- priority（0〜3。対応順の目安）:
+  - 3: label `urgent` / `critical` / `security`、または security / CVE / 脆弱性を含む
+  - 2: source `ci-failure` / `local-health`、label `bug`、
+    または bug / panic / crash / エラー / 失敗を含む
+  - 0: label `documentation` / `enhancement` / `chore`
+  - 上記以外: 1
 - 受入条件: 「{title} が期待どおり動作することを実機で確認する」
 
 <!-- TODO(LLM 判定口): ルール判定の上に LLM 評価を差し込む場合はここに

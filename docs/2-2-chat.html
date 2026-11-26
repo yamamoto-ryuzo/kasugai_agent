@@ -21,7 +21,7 @@
       <h2 class="ptitle">2-2 AIチャット</h2>
       <p>チャットは接続AIを実行体に持つ対話面です。</p>
 <h3>基本操作</h3>
-<ul><li><strong>新規チャット</strong> — 右ペイン「＋ 新規チャット」。cwd はカレント repo の path</li><li><strong>送信</strong> — Enter（Shift+Enter で改行）。実行中の送信は追加指示（steer）になる</li><li><strong>修正</strong> — 最後の送信を ↑ キーまたは ✎ で取り消してやり直し</li><li><strong>中断 / リセット</strong> — 実行中断 / セッションを畳んで次の送信で新規開始</li><li><strong>変更復元</strong> — その chat が変更したファイルを、選択した turn 時点の スナップショットへ復元</li><li><strong>添付</strong> — 📎 ボタンまたは貼り付け。<code>chat-uploads/</code> に保存</li></ul>
+<ul><li><strong>新規チャット</strong> — チャットヘッダまたは処理状況ボード上部の 「＋ 新規チャット」。cwd はカレント repo の path</li><li><strong>切替</strong> — chat の切替は処理状況ボードのカードで行う。 ヘッダの「◀ 戻る / 進む ▶」は処理状況ボードと同じ並びで 前後の chat を順に表示する</li><li><strong>送信</strong> — Enter（Shift+Enter で改行）。実行中の送信は追加指示（steer）になる</li><li><strong>修正</strong> — 最後の送信を ↑ キーまたは ✎ で取り消してやり直し</li><li><strong>中断 / リセット</strong> — 実行中断 / セッションを畳んで次の送信で新規開始</li><li><strong>削除</strong> — タイトル左のボタン。処理が終わった chat でのみ表示 （実行中・検証中・要対応では非表示）。内容を確認してからその場で削除</li><li><strong>変更復元</strong> — その chat が変更したファイルを、選択した turn 時点の スナップショットへ復元</li><li><strong>添付</strong> — 📎 ボタンまたは貼り付け。<code>chat-uploads/</code> に保存</li></ul>
 <h3>処理モード</h3>
 <p>入力欄の select で切替（chat ごとに永続化）:</p>
 <ul><li><strong>直接</strong> — 従来どおり逐次処理（分割子チャットもこの固定モード）</li><li><strong>並列</strong>（既定） — <code>kasugai-split</code> で課題を分割し子チャットを自動起動。 各子の最終回答はダイジェストとして親へ集約される</li></ul>

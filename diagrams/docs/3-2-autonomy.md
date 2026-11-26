@@ -25,7 +25,7 @@ flowchart TB
     G -->|却下| X[rejected]
     G -->|承認| R[dispatch<br/>runner = 接続AI]
     R --> V[verify L0〜L4<br/>実機検証・証跡・push]
-    V -->|NG 差し戻し| R
+    V -->|NG 差し戻し<br/>（保留 → 処理再開・再起動で再送）| R
     V -->|合格| K[learn<br/>SKILL 蓄積 → .devin/skills/<br/>（draft・mermaid 図を必ず明示）]
     K --> P[proposals<br/>skills / prompts / config]
     P --> G
@@ -38,9 +38,9 @@ flowchart TB
 | detect | detector（github-issues / ci-failure / local-health / manual-chat）が課題候補を emit |
 | normalize/dedupe | 統一 candidate 形式に正規化し `source+repo+symptomHash` で重複排除 |
 | assess | 課題の性質と検証深度（verifyLevel L0〜L4）を決定 |
-| gate | external 起票・proposal 採否・push 可否など人だけが越えられる判定地点 |
-| dispatch | runner（接続AI 実行体）に実装を委譲 |
-| verify | 実機起動・証跡採取・push 可否。NG なら retry に差し戻し |
+| gate | dispatch（対応）判断・external 起票承認・proposal 採否・push 可否など人だけが越えられる判定地点 |
+| dispatch | runner（接続AI 実行体）に実装を委譲。起動は ISSUES 一覧の「対応」ボタンによる人判断のみ（自動起動しない） |
+| verify | 実機起動・証跡採取・push 可否。NG なら差し戻し prompt を保留し、処理再開・再起動時の自動再処理で retry へ（上限到達は要人対応） |
 | learn | 結果・証跡を SKILL（draft・mermaid 図必須）として `.devin/skills/` へ蓄積し proposals を生成 |
 
 LOOP が「要」なのは、これが**自律性そのもの**だからです。

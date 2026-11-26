@@ -13,9 +13,9 @@ KASUGAI Agent は、**課題の検出 → 評価 → 対応 → 実機検証 →
 
 | UI 領域 | 内容 |
 |---|---|
-| 左ペイン | title・カレントリポジトリ選択・管理セクション（loop state / candidates）・縦並びナビ（AIチャット / 処理状況 / エディター / AGENTS / SKILL / マニュアル / 設定） |
+| 左ペイン | title・カレントリポジトリ選択・縦並びナビ（処理状況 / AIチャット / エディター / AGENTS / SKILL / マニュアル / 設定。初期表示は処理状況） |
 | 中央ペイン | chat messages（chat/console タブ切替）・doc 本文・処理状況カンバン・設定ビュー・マニュアル（本サイト） |
-| 右ペイン | chat sessions 一覧 / エディター（フォルダツリー） / doc browser（doc + 参照ファイル） |
+| 右ペイン | 管理セクション（loop state / candidates / issues / proposals）/ エディター（フォルダツリー） / doc browser（doc + 参照ファイル）。エディター/AGENTS/SKILL 選択時は doc browser、それ以外は管理セクション |
 
 左ペインのナビから各ビューを開き、右ペインまたは中央ペインに表示します。
 このマニュアルは「マニュアル」ナビで開いた `docs/` サイトそのものです。

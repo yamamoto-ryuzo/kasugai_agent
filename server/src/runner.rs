@@ -1,0 +1,1422 @@
+// runner.rs — 課題 run の実行体（issue-lifecycle.mmd / verify-levels.mmd、
+// README §5.4-5.5）
+//
+// dispatch は人判断のみ: queued 課題の起動は一覧の対応ボタン
+// （POST /api/issues/:key/dispatch → dispatch_issue）だけが行う。
+// control::spawn_watchers の定期 drain は起票 reconcile・中断した
+// verifying の再開・孤児 running の failed 化のみを担い、queued を
+// 自動起動しない（issue-lifecycle.mmd）。起動した課題ごとの run タスクが
+// 次を担う:
+//   1. queued → running 遷移・runs[] へ {startedAt, sessionLog} 追記
+//   2. 課題・受入条件・knowledge/<key> の知見・MAIN 運用指示を prompt に
+//      組立て、chatAgents 実行体を `-p` 非対話モードで spawn
+//      （stdout/stderr → conlog + evidence/<slug>/run.log）
+//   3. 終了で running → verifying へ遷移し verifyLevel 別の検証を実施
+//      （L0: 差分・構文 / L1: build・test 試行 / L2+: locks で実機排他し
+//       verifyExe 起動・応答確認。画面駆動は後続課題）
+//   4. 合格なら未pushコミットの帰属を確認し、`Issue: <key>` トレーラを
+//      持たない混入コミットを git revert で除去（reset 禁止）してから push
+//      （repo.requirePushApproval 時は pushApproved まで verifying で待機）
+//   5. NG は verifying → retry → queued へ自動差し戻し
+//      （verifyBackLimit 超過で failed。再 dispatch は対応ボタン）
+// 状態遷移は pipeline::request_transition のみを経由する。
+use serde_json::{json, Map, Value};
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Duration;
+
+use crate::conlog::conlog;
+use crate::config::*;
+use crate::control::{App, Shared};
+use crate::github;
+use crate::knowledge;
+use crate::locks;
+use crate::pipeline;
+use crate::repomatch::repo_slug;
+use crate::store;
+use crate::util::{hide_console_tokio, now_iso};
+
+// drain 再入防止（root 単位）と、run/verify 実行中（in-flight）の課題キー。
+// 再起動で in-flight は空になるため、残存 running/verifying は drain が復帰処理する
+static IN_FLIGHT: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+static DRAINING: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
+static DISPATCHING: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+
+fn in_flight() -> &'static Mutex<HashSet<String>> {
+    IN_FLIGHT.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+fn flight_add(key: &str) -> bool {
+    in_flight().lock().unwrap().insert(key.to_string())
+}
+fn flight_has(key: &str) -> bool {
+    in_flight().lock().unwrap().contains(key)
+}
+fn flight_del(key: &str) {
+    in_flight().lock().unwrap().remove(key);
+}
+
+fn draining() -> &'static Mutex<HashSet<PathBuf>> {
+    DRAINING.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+fn dispatching() -> &'static tokio::sync::Mutex<()> {
+    DISPATCHING.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
+fn key_of(issue: &Value) -> String {
+    issue
+        .get("key")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string()
+}
+
+fn find_issue(root: &Path, key: &str) -> Option<Value> {
+    store::load_issues(root)
+        .into_iter()
+        .find(|i| key_of(i) == key)
+}
+
+// ---------- drain（control から定期呼び出し） ----------
+
+pub async fn drain(app: &Shared) {
+    {
+        let mut d = draining().lock().unwrap();
+        if !d.insert(app.root.clone()) {
+            return;
+        }
+    }
+    drain_inner(app).await;
+    draining().lock().unwrap().remove(&app.root);
+}
+
+async fn drain_inner(app: &Shared) {
+    let root = app.root.clone();
+    // (0) 起票の reconcile（起票は自動が既定。detect-pipeline.mmd）:
+    //     candidate に課題が無ければ intake で補起票する
+    let (filed, deferred) = crate::detectors::backfill_issues(&root);
+    if filed > 0 {
+        app.sse("candidates", &json!({}));
+        app.sse("issues", &json!({}));
+    } else if deferred > 0 {
+        // レート制限の deferred ピル表示のため candidates も即時反映
+        app.sse("candidates", &json!({}));
+    }
+    // (a) 中断・承認待ちの再処理。run/verify は in-flight タスク側で完結するが、
+    //     control 再起動や pushApproved 付与で残った分をここで拾う
+    for it in store::load_issues(&root) {
+        let key = key_of(&it);
+        if key.is_empty() || flight_has(&key) {
+            continue;
+        }
+        match it.get("status").and_then(|v| v.as_str()) {
+            Some(pipeline::ST_VERIFYING) => {
+                if !flight_add(&key) {
+                    continue;
+                }
+                let app2 = app.clone();
+                tokio::spawn(async move {
+                    resume_verify(&app2, &key).await;
+                    flight_del(&key);
+                });
+            }
+            Some(pipeline::ST_RUNNING) => {
+                // run 追跡を持たない running（再起動で子プロセスの待機を喪失）
+                // は失敗扱いにする。再実行は failed → queued で人が戻す
+                let _ = pipeline::set_field(
+                    &root,
+                    &key,
+                    "verifyNote",
+                    json!("control 再起動で run の追跡を喪失"),
+                );
+                if pipeline::request_transition(&root, &key, pipeline::ST_FAILED).is_ok() {
+                    conlog(
+                        "runner",
+                        "sys",
+                        &format!("{}: 中断 run を failed に遷移", key),
+                    );
+                    app.sse("issues", &json!({}));
+                }
+            }
+            _ => {}
+        }
+    }
+    // (h) retention 掃除（housekeep.mmd・README §11）: retentionDays を超えた
+    //     終端課題の evidence と古い logs を削除する（0=掃除しない）
+    let days = cfg_u64(&app.cfg().await, "retentionDays", 0);
+    if days > 0 {
+        let n = crate::housekeep::sweep(&root, days);
+        if n > 0 {
+            conlog(
+                "housekeep",
+                "sys",
+                &format!("retention: {} 件削除（{}日超）", n, days),
+            );
+        }
+    }
+    // queued の起動はここでは行わない —— dispatch は人判断のみで、
+    // 一覧の対応ボタン（dispatch_issue）だけが課題を起動する
+    // （issue-lifecycle.mmd: queued → running は自動起動しない）
+}
+
+/// queued 課題を起動する唯一の経路（一覧の対応ボタン → dispatch API）。
+/// can_dispatch の論理競合規則を使い、同一 repo の running|verifying や
+/// 同時の dispatch 要求と競合しないよう lock する。
+pub async fn dispatch_issue(app: &Shared, key: &str) -> Result<Value, String> {
+    let _dispatch_guard = dispatching().lock().await;
+    if flight_has(key) {
+        return Err("already running".into());
+    }
+    let issues = store::load_issues(&app.root);
+    pipeline::can_dispatch(&issues, key)?;
+    let issue = issues
+        .into_iter()
+        .find(|i| key_of(i) == key)
+        .ok_or_else(|| "issue not found".to_string())?;
+    start_run(app, issue).await?;
+    find_issue(&app.root, key).ok_or_else(|| "issue not found".to_string())
+}
+
+// ---------- run（実装実行） ----------
+
+/// 実行体の解決: chatAgents の active agent の exe。promptArgs（既定 ["-p"]）
+/// が非対話モードの引数で、最後に prompt を1引数として連結する。
+/// active が exe を持たない場合は exe 持ちの agent を探す。
+fn resolve_agent(cfg: &Value) -> Option<(String, Vec<String>)> {
+    let (active, agents) = App::chat_agents(cfg);
+    let pick = |a: &Value| -> Option<(String, Vec<String>)> {
+        let exe = a
+            .get("exe")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())?
+            .to_string();
+        let args = a
+            .get("promptArgs")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|x| x.as_str().map(String::from))
+                    .collect::<Vec<_>>()
+            })
+            .filter(|arr: &Vec<String>| !arr.is_empty())
+            .unwrap_or_else(|| vec!["-p".to_string()]);
+        Some((exe, args))
+    };
+    active
+        .and_then(|id| agents.get(&id))
+        .and_then(pick)
+        .or_else(|| agents.values().find_map(pick))
+}
+
+async fn start_run(app: &Shared, issue: Value) -> Result<(), String> {
+    let root = app.root.clone();
+    let key = key_of(&issue);
+    let title = issue
+        .get("title")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let cfg = app.cfg().await;
+    let agent = resolve_agent(&cfg);
+    let repo = App::git_repo(
+        &cfg,
+        issue.get("repo").and_then(|v| v.as_str()).unwrap_or(""),
+    )
+    .cloned();
+
+    if let Err(e) = pipeline::request_transition(&root, &key, pipeline::ST_RUNNING) {
+        let msg = format!("{}: running 遷移失敗: {}", key, e);
+        conlog("runner", "err", &msg);
+        return Err(msg);
+    }
+    app.sse("issues", &json!({}));
+    flight_add(&key);
+
+    // runs[] 追記 {startedAt, sessionLog}
+    let slug = knowledge::key_slug(&key);
+    let ev_dir = root.join("evidence").join(&slug);
+    let _ = std::fs::create_dir_all(&ev_dir);
+    let log_rel = format!("evidence/{}/run.log", slug);
+    let cur = find_issue(&root, &key).unwrap_or(issue.clone());
+    let mut runs = cur
+        .get("runs")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    runs.push(json!({"startedAt": now_iso(), "sessionLog": log_rel}));
+    let run_idx = runs.len() - 1;
+    let _ = pipeline::set_field(&root, &key, "runs", json!(runs));
+    conlog("runner", "sys", &format!("run 開始: {} {}", key, title));
+
+    let app2 = app.clone();
+    tokio::spawn(async move {
+        run_and_verify(&app2, &key, &issue, agent, repo, &ev_dir, run_idx).await;
+        flight_del(&key);
+    });
+    Ok(())
+}
+
+/// run レコード（runs[idx]）へフィールド追記
+fn update_run(root: &Path, key: &str, idx: usize, extra: Map<String, Value>) {
+    let Some(it) = find_issue(root, key) else {
+        return;
+    };
+    let mut runs = it
+        .get("runs")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    if let Some(r) = runs.get_mut(idx).and_then(|r| r.as_object_mut()) {
+        r.extend(extra);
+    }
+    let _ = pipeline::set_field(root, key, "runs", json!(runs));
+}
+
+/// 実行不能・異常終了時の failed 処理（running → failed）
+async fn fail_run(app: &Shared, key: &str, run_idx: usize, reason: &str) {
+    let mut extra = Map::new();
+    extra.insert("endedAt".into(), json!(now_iso()));
+    extra.insert("error".into(), json!(reason));
+    update_run(&app.root, key, run_idx, extra);
+    let _ = pipeline::set_field(&app.root, key, "verifyNote", json!(reason));
+    if pipeline::request_transition(&app.root, key, pipeline::ST_FAILED).is_ok() {
+        conlog("runner", "err", &format!("{}: run 失敗: {}", key, reason));
+        if let Some(it) = find_issue(&app.root, key) {
+            report_issue(app, &it, &format!("[kasugai-agent] 自動処理失敗: {}", reason))
+                .await;
+        }
+    }
+    app.sse("issues", &json!({}));
+}
+
+async fn run_and_verify(
+    app: &Shared,
+    key: &str,
+    issue: &Value,
+    agent: Option<(String, Vec<String>)>,
+    repo: Option<Value>,
+    ev_dir: &Path,
+    run_idx: usize,
+) {
+    let root = &app.root;
+    let Some((exe, prompt_args)) = agent else {
+        fail_run(app, key, run_idx, "chatAgents に実行可能な exe がありません").await;
+        return;
+    };
+    let Some(repo_v) = repo else {
+        fail_run(app, key, run_idx, "課題の repo が config.repos に未登録").await;
+        return;
+    };
+    let repo_path = PathBuf::from(
+        repo_v
+            .get("path")
+            .and_then(|v| v.as_str())
+            .unwrap_or(""),
+    );
+    if !repo_path.is_dir() {
+        fail_run(app, key, run_idx, "repo path が存在しない").await;
+        return;
+    }
+
+    let prompt = build_prompt(root, issue);
+    let log_path = ev_dir.join("run.log");
+    let mut cmd = tokio::process::Command::new(&exe);
+    cmd.args(&prompt_args)
+        .arg(&prompt)
+        .current_dir(&repo_path)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    hide_console_tokio(&mut cmd);
+    conlog(
+        "runner",
+        "sys",
+        &format!("{}: spawn {} {:?}", key, exe, prompt_args),
+    );
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            fail_run(app, key, run_idx, &format!("実行体の起動失敗: {}", e)).await;
+            return;
+        }
+    };
+
+    // stdout/stderr → conlog + run.log バッファ
+    let src = format!("run {}", key.rsplit(':').next().unwrap_or(key));
+    let buf = Arc::new(Mutex::new(String::new()));
+    let mut readers = Vec::new();
+    let pipes: Vec<(&str, Option<Box<dyn tokio::io::AsyncRead + Unpin + Send>>)> = vec![
+        ("out", child.stdout.take().map(|p| Box::new(p) as _)),
+        ("err", child.stderr.take().map(|p| Box::new(p) as _)),
+    ];
+    for (stream, pipe) in pipes {
+        let Some(pipe) = pipe else { continue };
+        let src = src.clone();
+        let buf = buf.clone();
+        readers.push(tokio::spawn(async move {
+            use tokio::io::AsyncBufReadExt;
+            let mut lines = tokio::io::BufReader::new(pipe).lines();
+            while let Ok(Some(l)) = lines.next_line().await {
+                conlog(&src, stream, &l);
+                let mut b = buf.lock().unwrap();
+                b.push_str(&l);
+                b.push('\n');
+            }
+        }));
+    }
+    let cfg = app.cfg().await;
+    let timeout =
+        Duration::from_secs_f64(cfg_f64(&cfg, "runTimeoutMinutes", 120.0) * 60.0);
+    let res = tokio::time::timeout(timeout, child.wait()).await;
+    let (code, timed_out, wait_err) = match res {
+        Ok(Ok(st)) => (st.code(), false, None),
+        Ok(Err(e)) => (None, false, Some(e.to_string())),
+        Err(_) => {
+            let _ = child.kill().await;
+            (None, true, None)
+        }
+    };
+    for r in readers {
+        let _ = r.await;
+    }
+    let _ = std::fs::write(&log_path, buf.lock().unwrap().as_str());
+    {
+        let mut extra = Map::new();
+        extra.insert("endedAt".into(), json!(now_iso()));
+        if let Some(c) = code {
+            extra.insert("exitCode".into(), json!(c));
+        }
+        if timed_out {
+            extra.insert("timedOut".into(), json!(true));
+        }
+        if let Some(e) = &wait_err {
+            extra.insert("error".into(), json!(e));
+        }
+        update_run(root, key, run_idx, extra);
+    }
+    conlog(
+        "runner",
+        "sys",
+        &format!(
+            "{}: run 終了（code={:?}{}{}）",
+            key,
+            code,
+            if timed_out { " timeout" } else { "" },
+            wait_err.map(|e| format!(" err={}", e)).unwrap_or_default()
+        ),
+    );
+    // 終了コードに関わらず検証へ進める（コミット済み成果の評価は verify の責務）
+    if let Err(e) = pipeline::request_transition(root, key, pipeline::ST_VERIFYING) {
+        conlog(
+            "runner",
+            "err",
+            &format!("{}: verifying 遷移失敗: {}", key, e),
+        );
+        return;
+    }
+    app.sse("issues", &json!({}));
+    resume_verify(app, key).await;
+}
+
+// ---------- prompt 組立（dispatch。非対話 -p 実行） ----------
+
+const DEFAULT_DISPATCH: &str = r#"以下の課題に対応してください。
+
+- key: `{{key}}`
+- repo: `{{repo}}`
+- verifyLevel: L{{verifyLevel}}
+- priority: P{{priority}}
+- 受入条件: {{acceptance}}
+
+## 課題
+
+{{title}}
+
+{{body}}
+
+## 運用ルール
+
+1. 対象リポジトリ内で実装を行う。課題の状態遷移・ラベル操作は
+   パイプライン側が行うので触れない
+2. 変更は `Issue: {{key}}` トレーラ付きで git commit する
+   （未pushコミットの帰属判定に使用。`git reset` は禁止）
+3. verifyLevel L{{verifyLevel}} に従って実機で確認し、証跡
+   （スクショ・応答・ログ）を `evidence/` に残す
+4. 完了したら実施内容・結果を簡潔に報告する
+5. 対応できない場合は、ブロック理由を明確に報告する
+6. この実行は非対話（-p）モード。確認を求めず、最後に
+   完了またはブロックの報告を出力して終了すること"#;
+
+fn build_prompt(root: &Path, issue: &Value) -> String {
+    let get = |k: &str| {
+        issue
+            .get(k)
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string()
+    };
+    let key = get("key");
+    let level = issue
+        .get("verifyLevel")
+        .map(|v| v.to_string())
+        .unwrap_or_else(|| "1".into());
+    let prio = issue
+        .get("priority")
+        .map(|v| v.to_string())
+        .unwrap_or_else(|| "1".into());
+    let tpl = knowledge::load_prompt(root, "dispatch").unwrap_or_else(|| DEFAULT_DISPATCH.into());
+    let fields = [
+        ("key", key.clone()),
+        ("repo", get("repo")),
+        ("verifyLevel", level),
+        ("priority", prio),
+        ("acceptance", get("acceptance")),
+        ("title", get("title")),
+        ("body", get("body")),
+    ];
+    let subst = |s: String| -> String {
+        let mut out = s;
+        for (k, v) in &fields {
+            out = out.replace(&format!("{{{{{}}}}}", k), v);
+        }
+        out
+    };
+    let mut p = subst(tpl);
+    // runbook（kind 別対処手順。runbook.mmd・README §5.4）:
+    // prompts/runbook/ を <source>-<kind> → <kind> → <source> の順に探す
+    if let Some((name, rb)) = knowledge::load_runbook(root, &get("source"), &get("kind")) {
+        let rb: String = subst(rb.chars().take(4000).collect());
+        p.push_str(&format!("\n\n## 対処手順（runbook: {}）\n\n{}", name, rb));
+    }
+    // knowledge/<slug>.md の知見を注入（課題 key 単位の蓄積）
+    let kfile = root
+        .join("knowledge")
+        .join(format!("{}.md", knowledge::key_slug(&key)));
+    if let Ok(kn) = std::fs::read_to_string(&kfile) {
+        let kn: String = kn.chars().take(4000).collect();
+        if !kn.trim().is_empty() {
+            p.push_str("\n\n## 既知の知見（knowledge/）\n\n");
+            p.push_str(&kn);
+        }
+    }
+    p
+}
+
+// ---------- verify（L0〜L4） + push ----------
+
+/// verifying の再開: verifyOk 未記録なら検証を（再）実行、記録済みなら
+/// push 段階（帰属整理 → 承認判定 → push）へ進む
+async fn resume_verify(app: &Shared, key: &str) {
+    let root = &app.root;
+    let Some(issue) = find_issue(root, key) else {
+        return;
+    };
+    if issue.get("status").and_then(|v| v.as_str()) != Some(pipeline::ST_VERIFYING)
+    {
+        return;
+    }
+    let cfg = app.cfg().await;
+    let repo = App::git_repo(
+        &cfg,
+        issue.get("repo").and_then(|v| v.as_str()).unwrap_or(""),
+    )
+    .cloned();
+    let Some(repo_v) = repo else {
+        send_back(app, key, "repo が config.repos に未登録").await;
+        return;
+    };
+    let ev_dir = root.join("evidence").join(knowledge::key_slug(key));
+    let verified = issue
+        .get("verifyOk")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    if !verified {
+        let (ok, _note) = run_checks(app, &issue, &repo_v, &ev_dir).await;
+        if !ok {
+            send_back(app, key, "verify 不合格（evidence の verify.log を参照）")
+                .await;
+            return;
+        }
+        let _ = pipeline::set_field(root, key, "verifyOk", json!(true));
+    }
+    let issue = find_issue(root, key).unwrap_or(issue);
+    finalize(app, key, &issue, &repo_v).await;
+}
+
+/// NG 差し戻し: verifying → retry（verifyBacks++）→ queued or failed
+/// （verifyBackLimit 超過で failed）
+async fn send_back(app: &Shared, key: &str, reason: &str) {
+    let root = &app.root;
+    let _ = pipeline::set_field(root, key, "verifyNote", json!(reason));
+    if pipeline::request_transition(root, key, pipeline::ST_RETRY).is_err() {
+        return;
+    }
+    let it = find_issue(root, key).unwrap_or_default();
+    let backs = it
+        .get("verifyBacks")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let limit = cfg_u64(&app.cfg().await, "verifyBackLimit", 3);
+    if backs > limit {
+        let _ = pipeline::request_transition(root, key, pipeline::ST_FAILED);
+        conlog(
+            "runner",
+            "err",
+            &format!("{}: 差し戻し上限（{}）超過 → failed", key, limit),
+        );
+        report_issue(
+            app,
+            &it,
+            &format!(
+                "[kasugai-agent] 自動処理が失敗しました（差し戻し {} 回超過）: {}",
+                backs, reason
+            ),
+        )
+        .await;
+    } else {
+        let _ = pipeline::request_transition(root, key, pipeline::ST_QUEUED);
+        conlog(
+            "runner",
+            "sys",
+            &format!("{}: verify NG → 差し戻し ({}/{}): {}", key, backs, limit, reason),
+        );
+    }
+    app.sse("issues", &json!({}));
+}
+
+/// verify 合格後の仕上げ: 帰属整理（非本課題コミットを revert で除去）
+/// → requirePushApproval/pushApproved 判定 → git push → done
+async fn finalize(app: &Shared, key: &str, issue: &Value, repo: &Value) {
+    let root = &app.root;
+    let repo_path = PathBuf::from(
+        repo.get("path").and_then(|v| v.as_str()).unwrap_or(""),
+    );
+    match clean_unpushed(&repo_path, key).await {
+        Ok(removed) => {
+            for s in &removed {
+                conlog(
+                    "runner",
+                    "sys",
+                    &format!("{}: 混入コミットを revert 除去: {}", key, s),
+                );
+            }
+        }
+        Err(e) => {
+            send_back(app, key, &format!("帰属整理に失敗: {}", e)).await;
+            return;
+        }
+    }
+    let need_approval = repo
+        .get("requirePushApproval")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+    let approved = issue
+        .get("pushApproved")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    if need_approval && !approved {
+        conlog(
+            "runner",
+            "sys",
+            &format!("{}: verify 合格。push は承認待ち（requirePushApproval）", key),
+        );
+        return; // drain が pushApproved を拾って再開する
+    }
+    match git_push(&repo_path).await {
+        Ok(_) => {
+            let _ = pipeline::set_field(root, key, "pushedAt", json!(now_iso()));
+            if pipeline::request_transition(root, key, pipeline::ST_DONE).is_ok() {
+                conlog(
+                    "runner",
+                    "sys",
+                    &format!("{}: verify 合格・push 済み → done", key),
+                );
+                report_issue(
+                    app,
+                    issue,
+                    "[kasugai-agent] 対応完了: 検証合格・コミットを push しました",
+                )
+                .await;
+            }
+        }
+        Err(e) => {
+            conlog("runner", "err", &format!("{}: push 失敗: {}", key, e));
+            let _ = pipeline::set_field(
+                root,
+                key,
+                "verifyNote",
+                json!(format!("push 失敗: {}", e)),
+            );
+            // verifying のまま残し、drain が再試行する
+        }
+    }
+    app.sse("issues", &json!({}));
+}
+
+/// gh issue への結果報告（slug+number がある課題のみ。失敗は conlog のみ）
+async fn report_issue(app: &Shared, issue: &Value, body: &str) {
+    let cfg = app.cfg().await;
+    let Some(repo) = App::git_repo(
+        &cfg,
+        issue.get("repo").and_then(|v| v.as_str()).unwrap_or(""),
+    ) else {
+        return;
+    };
+    let slug = issue
+        .get("slug")
+        .and_then(|v| v.as_str())
+        .map(String::from)
+        .or_else(|| repo_slug(Some(repo)))
+        .unwrap_or_default();
+    let Some(number) = issue.get("number").and_then(|v| v.as_u64()) else {
+        return;
+    };
+    if slug.is_empty() {
+        return;
+    }
+    let dir = Path::new(repo.get("path").and_then(|v| v.as_str()).unwrap_or(""));
+    if let Err(e) = github::issue_comment(dir, &slug, number, body).await {
+        conlog(
+            "runner",
+            "err",
+            &format!("issue #{} への報告失敗: {}", number, e),
+        );
+    }
+}
+
+// ---- git 補助 ----
+
+/// git 実行（120s timeout）。戻り値 (code, stdout+stderr)
+async fn git(dir: &Path, args: &[&str]) -> (i32, String) {
+    let mut c = tokio::process::Command::new("git");
+    c.args(args)
+        .current_dir(dir)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    hide_console_tokio(&mut c);
+    let out = tokio::time::timeout(Duration::from_secs(120), c.output()).await;
+    match out {
+        Ok(Ok(o)) => (
+            o.status.code().unwrap_or(-1),
+            format!(
+                "{}{}",
+                String::from_utf8_lossy(&o.stdout),
+                String::from_utf8_lossy(&o.stderr)
+            )
+            .trim()
+            .to_string(),
+        ),
+        Ok(Err(e)) => (-1, e.to_string()),
+        Err(_) => (-1, "timeout".to_string()),
+    }
+}
+
+/// 任意コマンド実行（build/test 試行用。600s timeout）
+async fn run_cmd(dir: &Path, argv: &[String], timeout_secs: u64) -> (i32, String) {
+    let Some((prog, args)) = argv.split_first() else {
+        return (-1, "empty command".into());
+    };
+    let mut c = tokio::process::Command::new(prog);
+    c.args(args)
+        .current_dir(dir)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    hide_console_tokio(&mut c);
+    let out = tokio::time::timeout(Duration::from_secs(timeout_secs), c.output()).await;
+    match out {
+        Ok(Ok(o)) => (
+            o.status.code().unwrap_or(-1),
+            format!(
+                "$ {}\n{}{}",
+                argv.join(" "),
+                String::from_utf8_lossy(&o.stdout),
+                String::from_utf8_lossy(&o.stderr)
+            )
+            .trim()
+            .to_string(),
+        ),
+        Ok(Err(e)) => (-1, format!("$ {} → {}", argv.join(" "), e)),
+        Err(_) => (-1, format!("$ {} → timeout", argv.join(" "))),
+    }
+}
+
+struct Unpushed {
+    sha: String,
+    subject: String,
+    /// コミット本文の `Issue: <key>` トレーラ値（帰属先課題）
+    issue: Option<String>,
+}
+
+fn parse_issue_trailer(body: &str) -> Option<String> {
+    body.lines()
+        .filter_map(|l| {
+            let l = l.trim();
+            l.strip_prefix("Issue:")
+                .or_else(|| l.strip_prefix("issue:"))
+        })
+        .map(|v| v.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .last()
+}
+
+/// 未push範囲（`@{u}..HEAD`。upstream 未設定は `origin/HEAD..HEAD`、
+/// どちらも無ければ None＝未pushが判定不能。この場合全履歴を対象にすると
+/// 帰属整理で過去コミットまで revert してしまうため呼び出し側で拒否する）
+async fn unpushed_range(repo: &Path) -> Option<String> {
+    let (c, up) = git(
+        repo,
+        &[
+            "rev-parse",
+            "--abbrev-ref",
+            "--symbolic-full-name",
+            "@{u}",
+        ],
+    )
+    .await;
+    if c == 0 && !up.trim().is_empty() {
+        return Some(format!("{}..HEAD", up.trim()));
+    }
+    let (c2, d) = git(
+        repo,
+        &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
+    )
+    .await;
+    if c2 == 0 && !d.trim().is_empty() {
+        Some(format!("{}..HEAD", d.trim()))
+    } else {
+        None
+    }
+}
+
+/// 未pushコミット（新しい順、直近50件で頭打ち）
+async fn unpushed_commits(repo: &Path) -> Vec<Unpushed> {
+    let Some(range) = unpushed_range(repo).await else {
+        return vec![];
+    };
+    let (c, out) = git(
+        repo,
+        &["log", "--max-count=50", "--format=%H%x00%s%x00%b%x1e", &range],
+    )
+    .await;
+    if c != 0 {
+        return vec![];
+    }
+    out.split('\x1e')
+        .filter_map(|rec| {
+            let mut it = rec.trim_start_matches('\n').split('\x00');
+            let sha = it.next()?.trim().to_string();
+            if sha.is_empty() {
+                return None;
+            }
+            let subject = it.next().unwrap_or("").to_string();
+            let body = it.next().unwrap_or("");
+            // トレーラは本文が正規だが、件名へ書かれた場合も拾う
+            Some(Unpushed {
+                sha,
+                issue: parse_issue_trailer(body)
+                    .or_else(|| parse_issue_trailer(&subject)),
+                subject,
+            })
+        })
+        .collect()
+}
+
+/// 帰属整理: `Issue: <key>` トレーラを持たない未pushコミットを
+/// git revert で除去する（reset 禁止。新しい順に revert し、
+/// 除去コミット自体にも本課題のトレーラを付ける）。
+/// 他課題・closed・devin:rejected・帰属不明の混入もここで落とす
+/// （検証済みでないコミットは push しない規則）。
+async fn clean_unpushed(repo: &Path, key: &str) -> Result<Vec<String>, String> {
+    // upstream 基準が無いと未push範囲が全履歴になり revert が履歴を壊すため拒否
+    if unpushed_range(repo).await.is_none() {
+        return Err("upstream/origin 未設定のため未push範囲を特定できない".into());
+    }
+    let mut removed = Vec::new();
+    for c in unpushed_commits(repo).await {
+        if c.issue.as_deref() == Some(key) {
+            continue;
+        }
+        let (rc, rout) = git(repo, &["revert", "--no-commit", &c.sha]).await;
+        if rc != 0 {
+            let _ = git(repo, &["revert", "--abort"]).await;
+            return Err(format!("revert {} 失敗: {}", &c.sha[..8.min(c.sha.len())], rout));
+        }
+        let msg = format!(
+            "Revert \"{}\"\n\nThis reverts commit {}.\n\nIssue: {}",
+            c.subject, c.sha, key
+        );
+        let (cc, cout) = git(repo, &["commit", "-m", &msg]).await;
+        if cc != 0 {
+            let _ = git(repo, &["revert", "--abort"]).await;
+            return Err(format!("revert コミット失敗: {}", cout));
+        }
+        removed.push(format!("{} {}", &c.sha[..8.min(c.sha.len())], c.subject));
+    }
+    Ok(removed)
+}
+
+/// git push（upstream 未設定なら -u origin <branch> で再試行）
+async fn git_push(repo: &Path) -> Result<String, String> {
+    let (c, out) = git(repo, &["push"]).await;
+    if c == 0 {
+        return Ok(out);
+    }
+    let (uc, _) = git(
+        repo,
+        &[
+            "rev-parse",
+            "--abbrev-ref",
+            "--symbolic-full-name",
+            "@{u}",
+        ],
+    )
+    .await;
+    if uc == 0 {
+        return Err(out);
+    }
+    let (_, br) = git(repo, &["branch", "--show-current"]).await;
+    let br = br.trim().to_string();
+    if br.is_empty() {
+        return Err(out);
+    }
+    let (_, rem) = git(repo, &["remote"]).await;
+    let remote = rem
+        .lines()
+        .map(|l| l.trim())
+        .find(|l| *l == "origin")
+        .or_else(|| rem.lines().map(|l| l.trim()).find(|l| !l.is_empty()))
+        .map(String::from);
+    let Some(remote) = remote else {
+        return Err(out);
+    };
+    let (c2, out2) = git(repo, &["push", "-u", &remote, &br]).await;
+    if c2 == 0 {
+        Ok(out2)
+    } else {
+        Err(out2)
+    }
+}
+
+/// build/test 試行コマンド列: repo.verifyCmds があればそれ、
+/// 無ければ repo 構成から自動検出（sync ツール・cargo build）
+fn detect_checks(repo: &Value, repo_path: &Path) -> Vec<Vec<String>> {
+    if let Some(arr) = repo.get("verifyCmds").and_then(|v| v.as_array()) {
+        let cmds: Vec<Vec<String>> = arr
+            .iter()
+            .filter_map(|c| match c {
+                Value::String(s) => {
+                    #[cfg(windows)]
+                    {
+                        Some(vec!["cmd".into(), "/C".into(), s.clone()])
+                    }
+                    #[cfg(not(windows))]
+                    {
+                        Some(vec!["sh".into(), "-c".into(), s.clone()])
+                    }
+                }
+                Value::Array(a) => {
+                    let v: Vec<String> =
+                        a.iter().filter_map(|x| x.as_str().map(String::from)).collect();
+                    (!v.is_empty()).then_some(v)
+                }
+                _ => None,
+            })
+            .collect();
+        if !cmds.is_empty() {
+            return cmds;
+        }
+    }
+    let mut v: Vec<Vec<String>> = vec![];
+    let s = |p: &str| repo_path.join(p).is_file();
+    if s("tools/sync-diagrams.mjs") {
+        v.push(vec![
+            "node".into(),
+            "tools/sync-diagrams.mjs".into(),
+            "--check".into(),
+        ]);
+    }
+    if s("tools/sync-docs.mjs") {
+        v.push(vec![
+            "node".into(),
+            "tools/sync-docs.mjs".into(),
+            "--check".into(),
+        ]);
+    }
+    if s("server/Cargo.toml") {
+        v.push(vec![
+            "cargo".into(),
+            "build".into(),
+            "--manifest-path".into(),
+            "server/Cargo.toml".into(),
+        ]);
+    } else if s("Cargo.toml") {
+        v.push(vec!["cargo".into(), "build".into()]);
+    }
+    v
+}
+
+/// verifyLevel 別の検証を実行し証跡を evidence/<slug>/ へ残す。
+/// 戻り値 (合格?, 不合格理由)
+async fn run_checks(app: &Shared, issue: &Value, repo: &Value, ev_dir: &Path) -> (bool, String) {
+    let root = &app.root;
+    let key = key_of(issue);
+    let repo_path = PathBuf::from(
+        repo.get("path").and_then(|v| v.as_str()).unwrap_or(""),
+    );
+    let level = issue
+        .get("verifyLevel")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(1);
+    let _ = std::fs::create_dir_all(ev_dir);
+    let mut log = String::new();
+    let mut ok = true;
+    let mut note = String::new();
+
+    // ---- L0: 差分（Issue:<key> トレーラ付き実装コミットの存在） ----
+    let unpushed = unpushed_commits(&repo_path).await;
+    log.push_str(&format!("== unpushed ({} commits)\n", unpushed.len()));
+    for c in &unpushed {
+        let tag = match c.issue.as_deref() {
+            Some(k) if k == key => "[本課題]",
+            Some(_) => "[他課題]",
+            None => "[帰属不明]",
+        };
+        log.push_str(&format!(
+            "  {} {} {}\n",
+            &c.sha[..8.min(c.sha.len())],
+            c.subject,
+            tag
+        ));
+    }
+    let (_, status_out) = git(&repo_path, &["status", "--porcelain"]).await;
+    let _ = std::fs::write(
+        ev_dir.join("status.txt"),
+        format!("{}\n", status_out),
+    );
+    if !unpushed.iter().any(|c| c.issue.as_deref() == Some(key.as_str())) {
+        ok = false;
+        note = "Issue トレーラ付きの実装コミットが見つからない".into();
+        log.push_str(&format!("NG: {}\n", note));
+    }
+
+    // ---- L1: build/test 試行 ----
+    if ok && level >= 1 {
+        let checks = detect_checks(repo, &repo_path);
+        if checks.is_empty() {
+            log.push_str("== L1: 自動検出チェックなし\n");
+        }
+        for argv in checks {
+            let (code, out) = run_cmd(&repo_path, &argv, 600).await;
+            log.push_str(&format!("\n== L1 {}\n{}\n", argv.join(" "), out));
+            if code != 0 {
+                ok = false;
+                note = format!("チェック失敗: {}", argv.join(" "));
+                break;
+            }
+        }
+    }
+
+    // ---- L2+: 実機起動（実機リソースを locks で排他取得） ----
+    if ok && level >= 2 {
+        let mut got = locks::acquire(root, "machine");
+        let mut waited = 0u64;
+        while !got && waited < 120 {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            got = locks::acquire(root, "machine");
+            waited += 2;
+        }
+        if !got {
+            log.push_str("== L2: machine ロック取得断念（他 run が保持中）→ 排他なしで続行\n");
+        }
+        let r = launch_probe(repo, &repo_path, &mut log).await;
+        if got {
+            locks::release(root, "machine");
+        }
+        if !r {
+            ok = false;
+            note = "実機起動・応答確認に失敗".into();
+        }
+    }
+
+    let _ = std::fs::write(ev_dir.join("verify.log"), &log);
+    let _ = std::fs::write(
+        ev_dir.join("verdict.json"),
+        serde_json::to_string_pretty(&json!({
+            "level": level, "ok": ok, "note": note, "at": now_iso(),
+        }))
+        .unwrap_or_default(),
+    );
+    conlog(
+        "runner",
+        if ok { "sys" } else { "err" },
+        &format!(
+            "{}: verify L{} {} {}",
+            key,
+            level,
+            if ok { "合格" } else { "NG" },
+            note
+        ),
+    );
+    (ok, note)
+}
+
+/// L2+ の実機起動確認（最小実装）: repo.verifyExe を起動し、
+/// verifyPort 指定なら TCP 応答を、無指定なら生存を確認して kill する。
+/// verifyExe 未設定なら L1 チェック結果で代用（画面駆動は後続課題）。
+async fn launch_probe(repo: &Value, repo_path: &Path, log: &mut String) -> bool {
+    let exe_s = repo.get("verifyExe").and_then(|v| v.as_str()).unwrap_or("");
+    if exe_s.is_empty() {
+        log.push_str("== L2: verifyExe 未設定 — 実機起動はスキップ（L1 で代用）\n");
+        return true;
+    }
+    let exe = crate::util::resolve(&repo_path.to_string_lossy(), exe_s);
+    if !Path::new(&exe).is_file() {
+        log.push_str(&format!("== L2 NG: verifyExe が存在しない: {}\n", exe));
+        return false;
+    }
+    let args: Vec<String> = repo
+        .get("verifyArgs")
+        .and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+        .unwrap_or_default();
+    let mut c = tokio::process::Command::new(&exe);
+    c.args(&args)
+        .current_dir(repo_path)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    hide_console_tokio(&mut c);
+    let mut child = match c.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            log.push_str(&format!("== L2 NG: 起動失敗 {}: {}\n", exe, e));
+            return false;
+        }
+    };
+    log.push_str(&format!("== L2: {} を起動\n", exe));
+    let port = repo
+        .get("verifyPort")
+        .and_then(|v| v.as_u64())
+        .map(|v| v as u16);
+    let wait_secs = repo
+        .get("verifyWaitSec")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(10)
+        .max(1);
+    let alive = match port {
+        Some(p) => {
+            // ポート応答確認（最大 wait_secs+20 秒）
+            let mut responded = false;
+            for _ in 0..(wait_secs + 20) {
+                if crate::launch::port_alive(p).await {
+                    responded = true;
+                    break;
+                }
+                if let Ok(Some(_)) = child.try_wait() {
+                    break; // 早期終了
+                }
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+            log.push_str(&format!(
+                "== L2: :{} 応答{}\n",
+                p,
+                if responded { "あり" } else { "なし" }
+            ));
+            responded
+        }
+        None => {
+            tokio::time::sleep(Duration::from_secs(wait_secs)).await;
+            let a = matches!(child.try_wait(), Ok(None));
+            log.push_str(&format!(
+                "== L2: {}秒後の生存確認{}\n",
+                wait_secs,
+                if a { "OK" } else { "（早期終了）" }
+            ));
+            a
+        }
+    };
+    let _ = child.kill().await;
+    alive
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, AtomicI64};
+    use std::time::Instant;
+    use tokio::sync::{broadcast, mpsc};
+
+    fn temp_root(tag: &str) -> PathBuf {
+        let p = std::env::temp_dir().join(format!(
+            "kasugai-runner-test-{}-{}",
+            tag,
+            crate::util::rand_hex(4)
+        ));
+        std::fs::create_dir_all(&p).unwrap();
+        p
+    }
+
+    fn std_git(dir: &Path, args: &[&str]) {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .expect("git spawn");
+        assert!(out.status.success(), "git {:?} → {:?}", args, out);
+    }
+
+    /// temp_root 配下に git repo（初期 commit 済み。remote=true なら bare
+    /// remote を origin として push -u 済み）を作る
+    fn make_repo(root: &Path, name: &str, remote: bool) -> PathBuf {
+        let repo = root.join(name);
+        std::fs::create_dir_all(&repo).unwrap();
+        std_git(&repo, &["init"]);
+        std_git(&repo, &["config", "user.email", "t@t"]);
+        std_git(&repo, &["config", "user.name", "t"]);
+        std::fs::write(repo.join("README.md"), "x\n").unwrap();
+        std_git(&repo, &["add", "-A"]);
+        std_git(&repo, &["commit", "-m", "init"]);
+        if remote {
+            let bare = root.join(format!("{}.git", name));
+            std_git(&repo, &["init", "--bare", &bare.to_string_lossy()]);
+            std_git(&repo, &["remote", "add", "origin", &bare.to_string_lossy()]);
+            std_git(&repo, &["push", "-u", "origin", "HEAD"]);
+        }
+        repo
+    }
+
+    fn test_app(root: &Path, cfg: Value) -> Shared {
+        let (sse, _) = broadcast::channel(8);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        Arc::new(App {
+            root: root.to_path_buf(),
+            panel: root.join("panel"),
+            uploads: root.join("chat-uploads"),
+            snaps: root.join("chat-snapshots"),
+            ws_root: root.to_string_lossy().replace('\\', "/"),
+            cfg: tokio::sync::RwLock::new(cfg),
+            port: 0,
+            chats: tokio::sync::Mutex::new(std::collections::BTreeMap::new()),
+            chat_seq: AtomicI64::new(0),
+            sse,
+            evt_tx: tx,
+            started: Instant::now(),
+            restart_pending: AtomicBool::new(false),
+            restarting: AtomicBool::new(false),
+            busy_prev: tokio::sync::Mutex::new(std::collections::HashMap::new()),
+            assets: tokio::sync::Mutex::new(crate::assets::Mgr::new()),
+            http: reqwest::Client::new(),
+        })
+    }
+
+    fn queued_issue(key: &str, repo: &str, level: u64) -> Value {
+        let now = now_iso();
+        json!({
+            "key": key, "source": "manual", "repo": repo,
+            "title": "テスト課題", "body": "", "labels": [],
+            "symptomHash": "t", "status": pipeline::ST_QUEUED,
+            "autonomous": true, "verifyLevel": level,
+            "acceptance": "動くこと", "retries": 0, "verifyBacks": 0,
+            "detectedAt": now, "lastSeen": now, "updatedAt": now,
+            "runs": [],
+        })
+    }
+
+    fn seed(root: &Path, issue: &Value) {
+        save_j(
+            &store::issues_path(root),
+            &json!([issue]),
+        );
+        save_j(
+            &store::queue_path(root),
+            &json!([{ "key": issue["key"], "enqueuedAt": now_iso() }]),
+        );
+    }
+
+    fn issue_status(root: &Path, key: &str) -> String {
+        find_issue(root, key)
+            .and_then(|i| i.get("status").and_then(|v| v.as_str()).map(String::from))
+            .unwrap_or_default()
+    }
+
+    async fn wait_status(root: &Path, key: &str, want: &str, secs: u64) -> String {
+        for _ in 0..(secs * 4) {
+            let s = issue_status(root, key);
+            if s == want {
+                return s;
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+        issue_status(root, key)
+    }
+
+    fn cfg_for(repo: &Path, exe: &str, prompt_args: Value, approval: bool) -> Value {
+        json!({
+            "chatAgent": "t",
+            "chatAgents": {
+                "t": {"label": "t", "exe": exe, "promptArgs": prompt_args}
+            },
+            "verifyBackLimit": 3,
+            "repos": [{
+                "slug": "t/r", "path": repo.to_string_lossy().replace('\\', "/"),
+                "requirePushApproval": approval,
+            }],
+        })
+    }
+
+    /// 実装コミットを行う偽実行体（prompt 引数は無視）。cwd は repo。
+    /// Windows cmd バッチ: git add+commit（Issue: トレーラ付き）
+    fn fake_agent(root: &Path, key: &str) -> PathBuf {
+        let bat = root.join("fake-agent.cmd");
+        std::fs::write(
+            &bat,
+            format!(
+                "@echo off\r\necho RUN-OK\r\necho x >> impl.txt\r\ngit add -A\r\ngit commit -m \"impl\" -m \"Issue: {}\"\r\nexit /b 0\r\n",
+                key
+            ),
+        )
+        .unwrap();
+        bat
+    }
+
+    #[tokio::test]
+    async fn dispatch_issue_starts_queued_issue() {
+        let root = temp_root("dispatch");
+        let repo = make_repo(&root, "repo", true);
+        let key = "manual:t/r:dispatch1";
+        let agent = fake_agent(&root, key);
+        let app = test_app(
+            &root,
+            cfg_for(&repo, "cmd", json!(["/C", agent.to_string_lossy()]), false),
+        );
+        let issue = queued_issue(key, "t/r", 0);
+        seed(&root, &issue);
+
+        let started = dispatch_issue(&app, key).await.unwrap();
+        assert_eq!(started["status"], json!(pipeline::ST_RUNNING));
+        assert!(dispatch_issue(&app, key).await.is_err());
+        let s = wait_status(&root, key, pipeline::ST_DONE, 60).await;
+        assert_eq!(s, pipeline::ST_DONE);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn drain_does_not_autostart_queued() {
+        // dispatch は人判断のみ: drain は queued を起動しない（issue-lifecycle.mmd）
+        let root = temp_root("noauto");
+        let repo = make_repo(&root, "repo", true);
+        let key = "manual:t/r:noauto1";
+        let agent = fake_agent(&root, key);
+        let app = test_app(
+            &root,
+            cfg_for(&repo, "cmd", json!(["/C", agent.to_string_lossy()]), false),
+        );
+        let issue = queued_issue(key, "t/r", 0);
+        seed(&root, &issue);
+
+        drain(&app).await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert_eq!(issue_status(&root, key), pipeline::ST_QUEUED);
+        assert!(find_issue(&root, key).unwrap()["runs"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn dispatch_run_to_done_with_push() {
+        let root = temp_root("done");
+        let repo = make_repo(&root, "repo", true);
+        let key = "manual:t/r:done1";
+        let agent = fake_agent(&root, key);
+        let app = test_app(
+            &root,
+            cfg_for(&repo, "cmd", json!(["/C", agent.to_string_lossy()]), false),
+        );
+        let issue = queued_issue(key, "t/r", 0);
+        seed(&root, &issue);
+
+        dispatch_issue(&app, key).await.unwrap();
+        let s = wait_status(&root, key, pipeline::ST_DONE, 60).await;
+        assert_eq!(s, pipeline::ST_DONE);
+        let it = find_issue(&root, key).unwrap();
+        assert_eq!(it["verifyOk"], json!(true));
+        assert!(it["pushedAt"].is_string());
+        // run 記録・証跡
+        assert_eq!(it["runs"].as_array().unwrap().len(), 1);
+        assert!(root
+            .join("evidence")
+            .join(knowledge::key_slug(key))
+            .join("run.log")
+            .is_file());
+        // リモートへ実際に push されている
+        let (c, _) = git(&repo, &["rev-list", "--count", "@{u}..HEAD"]).await;
+        assert_eq!(c, 0);
+        let (_, n) = git(&repo, &["rev-list", "--count", "@{u}..HEAD"]).await;
+        assert_eq!(n.trim(), "0");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn dispatch_waits_push_approval() {
+        let root = temp_root("gate");
+        let repo = make_repo(&root, "repo", true);
+        let key = "manual:t/r:gate1";
+        let agent = fake_agent(&root, key);
+        let app = test_app(
+            &root,
+            cfg_for(&repo, "cmd", json!(["/C", agent.to_string_lossy()]), true),
+        );
+        let issue = queued_issue(key, "t/r", 0);
+        seed(&root, &issue);
+
+        dispatch_issue(&app, key).await.unwrap();
+        // requirePushApproval → verify 合格後も verifying で待機
+        let s = wait_status(&root, key, pipeline::ST_VERIFYING, 60).await;
+        assert_eq!(s, pipeline::ST_VERIFYING);
+        for _ in 0..240 {
+            let it = find_issue(&root, key).unwrap();
+            if it["verifyOk"] == json!(true) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+        assert_eq!(find_issue(&root, key).unwrap()["verifyOk"], json!(true));
+        // push 承認 → 定期 drain（本番の15s tick相当）が push して done。
+        // 承認時点で run タスクが in-flight なら次回 drain が拾うため繰り返す
+        let _ = pipeline::set_field(&root, key, "pushApproved", json!(true));
+        let mut s = String::new();
+        for _ in 0..40 {
+            drain(&app).await;
+            s = issue_status(&root, key);
+            if s == pipeline::ST_DONE {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+        assert_eq!(s, pipeline::ST_DONE);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn dispatch_verify_ng_goes_back_to_queue() {
+        let root = temp_root("ng");
+        let repo = make_repo(&root, "repo", false);
+        let key = "manual:t/r:ng1";
+        // 実装しない偽実行体（echo のみ）
+        let app = test_app(&root, cfg_for(&repo, "cmd", json!(["/C", "echo", "RUN-OK"]), false));
+        let issue = queued_issue(key, "t/r", 0);
+        seed(&root, &issue);
+
+        dispatch_issue(&app, key).await.unwrap();
+        // Issue: トレーラ付きコミット無し → NG → retry → queued
+        let s = wait_status(&root, key, pipeline::ST_QUEUED, 60).await;
+        assert_eq!(s, pipeline::ST_QUEUED);
+        let it = find_issue(&root, key).unwrap();
+        assert_eq!(it["verifyBacks"], json!(1));
+        assert_eq!(it["runs"].as_array().unwrap().len(), 1);
+        assert!(it["verifyNote"].is_string());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+}

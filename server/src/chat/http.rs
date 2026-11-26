@@ -250,7 +250,31 @@ impl HttpChat {
                 return Ok(());
             }
         }
-        self.ensure_session().await?;
+        if let Err(e) = self.ensure_session().await {
+            // 起動失敗: prompt を保留キューへ退避（ACP 型と同じ規則）
+            let mut c = self.core.lock().await;
+            c.push("user", &display.clone().unwrap_or_else(|| text.clone()));
+            c.held_prompts.push(text);
+            c.push(
+                "sys",
+                &format!("[起動失敗] {}（「開始」/「処理再開」で再送します）", e),
+            );
+            drop(c);
+            self.changed();
+            return Err(e);
+        }
+        // セッション確立。起動失敗で滞留した保留 prompt があれば併せて送る
+        let text = {
+            let mut c = self.core.lock().await;
+            let held = std::mem::take(&mut c.held_prompts);
+            if held.is_empty() {
+                text
+            } else {
+                let mut v = held;
+                v.push(text);
+                v.join("\n")
+            }
+        };
         {
             let mut c = self.core.lock().await;
             let d = display.clone().unwrap_or_else(|| text.clone());
