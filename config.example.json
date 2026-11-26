@@ -35,6 +35,9 @@
   "retryLimit": 3,
   "verifyBackLimit": 3,
   "intakeMaxPerHour": 0,
+  "intakeObserveMinutes": 10,
+  "intakeObserveMinHits": 2,
+  "observingExempt": ["manual", "derived"],
   "retentionDays": 0,
   "repos": [
     {

@@ -92,11 +92,14 @@ flowchart LR
 title: detect → normalize → dedupe
 ---
 flowchart TD
-    DET[detector / manual API /<br/>派生（done chat の<br/>変更ターン source=derived）<br/>github-issues は open issue 全件<br/>（ラベル選別なし）<br/>closed は --import-github で<br/>終端取込] -->|candidate<br/>source/repo/title/body/<br/>symptomHash/detectedAt| NORM[正規化]
+    DET[detector / manual API /<br/>派生（done chat の<br/>変更ターン source=derived）<br/>github-issues は open issue 全件<br/>（ラベル選別なし）<br/>closed は --import-github で<br/>終端取込] -->|candidate<br/>source/repo/title/body/<br/>symptomHash/detectedAt<br/>（任意: kind/labels/<br/>count/durationSeconds）| NORM[正規化]
     NORM --> HASH[issue key =<br/>source+repo+symptomHash]
     HASH --> EXIST{既出?}
     EXIST -->|yes| BUMP[既存課題の<br/>lastSeen 更新のみ]
-    EXIST -->|no| RATE{起票レート超過?<br/>intakeMaxPerHour<br/>source+repo 単位<br/>0=無制限}
+    EXIST -->|no| OBS{observing 昇格?<br/>intakeObserveMinutes 継続<br/>or intakeObserveMinHits 回<br/>再検出<br/>（manual/derived は即起票）}
+    OBS -->|未昇格<br/>単発・窓内消滅| OHOLD[candidate に留め置く<br/>deferred=observing<br/>課題は作らない]
+    OBS -->|昇格| RATE{起票レート超過?<br/>intakeMaxPerHour<br/>source+repo 単位<br/>0=無制限}
+    OHOLD -.->|再検出・duration 蓄積で<br/>次回 emit/reconcile が昇格判定| OBS
     RATE -->|超過| DEFER[candidate に留め置く<br/>deferred=rate-limit<br/>課題は作らない]
     DEFER -.->|次回 reconcile で再試行| BF
     RATE -->|以内| NEW[課題レコード作成<br/>＋assess<br/>verifyLevel・受入条件・<br/>priority・自律可否<br/>起票＝本システムの課題<br/>（GitHub 登録は別機構）]
@@ -105,6 +108,7 @@ flowchart TD
     GATE -->|no| Q[queued<br/>一覧の対応ボタンで<br/>人が dispatch]
     GATE -->|yes| G[gated<br/>候補一覧で人が<br/>dispatch 判断]
     DEFER --> INBOX
+    OHOLD --> INBOX
     Q --> INBOX
     G --> INBOX
     INBOX[候補一覧 = 判断待ち inbox<br/>未起票・gated・queued・failed のみ表示<br/>（実行中・終端の課題行は出さない）<br/>全行 対応/却下ボタンで人が一括判断:<br/>対応=起票/承認/再実行を兼ねた即時 dispatch<br/>（未起票は rate-limit を人判断で bypass）<br/>却下=rejected（未起票は起票して即 rejected）]

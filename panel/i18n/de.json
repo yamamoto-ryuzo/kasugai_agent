@@ -331,5 +331,7 @@
   "st.chats": "Chats",
   "st.candidates": "Kandidaten",
   "st.open": "offen",
-  "st.doneRate": "Erfolgsrate"
+  "st.doneRate": "Erfolgsrate",
+  "cand.df.rate-limit": "zurückgestellt (rate-limit)",
+  "cand.df.observing": "Beobachtung"
 }

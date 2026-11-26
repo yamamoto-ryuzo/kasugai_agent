@@ -41,8 +41,9 @@ fn candidate_key(cand: &Value) -> String {
 }
 
 /// candidates.json の candidate に deferred マークを付け/外す
-/// （起票レート制限で留め置いたことを一覧へ表示するため。課題状態ではなく
-/// 受信箱の表示用メタ）
+/// （起票レート制限や観測保留で留め置いたことを一覧へ表示するため。
+/// 課題状態ではなく受信箱の表示用メタ。解除時は抑制理由の inhibitedBy
+/// も併せて消す）
 fn set_candidate_deferred(root: &Path, key: &str, deferred: Option<&str>) {
     let mut cands = store::load_candidates(root);
     let mut touched = false;
@@ -60,7 +61,10 @@ fn set_candidate_deferred(root: &Path, key: &str, deferred: Option<&str>) {
                 }
             }
             None => {
-                if o.remove("deferred").is_some() | o.remove("deferredAt").is_some() {
+                if o.remove("deferred").is_some()
+                    | o.remove("deferredAt").is_some()
+                    | o.remove("inhibitedBy").is_some()
+                {
                     touched = true;
                 }
             }
@@ -71,42 +75,78 @@ fn set_candidate_deferred(root: &Path, key: &str, deferred: Option<&str>) {
     }
 }
 
+/// candidates.json の candidate の任意フィールドを更新する表示用メタの
+/// 汎用書込み（inhibitedBy・stormKey 等。deferred は set_candidate_deferred）
+fn patch_candidate(root: &Path, key: &str, fields: &[(&str, Value)]) {
+    let mut cands = store::load_candidates(root);
+    let mut touched = false;
+    if let Some(c) = cands
+        .iter_mut()
+        .find(|c| c.get("key").and_then(|v| v.as_str()) == Some(key))
+    {
+        let o = c.as_object_mut().unwrap();
+        for (f, v) in fields {
+            if o.get(*f) != Some(v) {
+                o.insert((*f).to_string(), v.clone());
+                touched = true;
+            }
+        }
+    }
+    if touched {
+        store::save_candidates(root, &cands);
+    }
+}
+
+/// Deferred の理由文字列（"tag:detail"）を tag に正規化して
+/// set_candidate_deferred に渡す。tag=inhibited の detail は
+/// 原因課題の key として inhibitedBy へ併記する
+fn mark_deferred(root: &Path, key: &str, reason: &str) {
+    let (tag, detail) = reason.split_once(':').unwrap_or((reason, ""));
+    set_candidate_deferred(root, key, Some(tag));
+    if tag == "inhibited" && !detail.is_empty() {
+        patch_candidate(root, key, &[("inhibitedBy", json!(detail))]);
+    }
+}
+
 /// emitted candidate の入口: candidates.json に dedupe 記録してから
 /// pipeline::intake へ渡す。戻り値は (issue, created?, deferred?)。
 /// レート制限で留め置かれた場合は (null, false, true) で、candidate に
 /// deferred マークが付く（deferred は candidates の SSE push 判定に使う）。
 pub fn ingest(root: &Path, cand: &Value) -> (Value, bool, bool) {
     let _g = INGEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    record_candidate(root, cand);
-    let key = candidate_key(cand);
-    match crate::pipeline::intake(root, cand) {
+    // 蓄積済み（hits/lastSeen/durationSeconds 更新済み）の candidate を
+    // intake へ渡す —— observing 昇格判定は蓄積値で行う
+    let stored = record_candidate(root, cand);
+    let key = candidate_key(&stored);
+    match crate::pipeline::intake(root, &stored) {
         crate::pipeline::IntakeOutcome::Created(i) => {
             set_candidate_deferred(root, &key, None);
             (i, true, false)
         }
         crate::pipeline::IntakeOutcome::Existing(i) => (i, false, false),
         crate::pipeline::IntakeOutcome::Deferred(reason) => {
-            set_candidate_deferred(root, &key, Some(&reason));
+            mark_deferred(root, &key, &reason);
             (Value::Null, false, true)
         }
     }
 }
 
 /// 人操作（candidates 一覧の対応/却下ボタン）による即時起票。
-/// pipeline::intake_forced 経由で起票レート制限を bypass する点以外は
-/// ingest と同じ（人判断はレート制限より優先。detect-pipeline.mmd）
+/// pipeline::intake_forced 経由で入口ゲート全般（レート制限・観測窓・
+/// silence・抑制・クールダウン）を bypass する点以外は ingest と同じ
+/// （人判断は自動ゲートより優先。detect-pipeline.mmd）
 pub fn ingest_forced(root: &Path, cand: &Value) -> (Value, bool, bool) {
     let _g = INGEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    record_candidate(root, cand);
-    let key = candidate_key(cand);
-    match crate::pipeline::intake_forced(root, cand) {
+    let stored = record_candidate(root, cand);
+    let key = candidate_key(&stored);
+    match crate::pipeline::intake_forced(root, &stored) {
         crate::pipeline::IntakeOutcome::Created(i) => {
             set_candidate_deferred(root, &key, None);
             (i, true, false)
         }
         crate::pipeline::IntakeOutcome::Existing(i) => (i, false, false),
         crate::pipeline::IntakeOutcome::Deferred(reason) => {
-            set_candidate_deferred(root, &key, Some(&reason));
+            mark_deferred(root, &key, &reason);
             (Value::Null, false, true)
         }
     }
@@ -141,7 +181,7 @@ pub fn backfill_issues(root: &Path) -> (usize, usize) {
                 n += 1;
             }
             crate::pipeline::IntakeOutcome::Deferred(reason) => {
-                set_candidate_deferred(root, &key, Some(&reason));
+                mark_deferred(root, &key, &reason);
                 deferred += 1;
             }
             crate::pipeline::IntakeOutcome::Existing(_) => {}
@@ -151,8 +191,10 @@ pub fn backfill_issues(root: &Path) -> (usize, usize) {
 }
 
 /// candidates.json は検出の受信箱。issue key（source+repo+symptomHash）で
-/// 既出判定し、既出は lastSeen のみ更新（detect-pipeline.mmd と同規則）。
-fn record_candidate(root: &Path, cand: &Value) {
+/// 既出判定し、既出は lastSeen 更新＋hits インクリメント（observing の
+/// 昇格判定材料。detector が count/durationSeconds を emit した場合は
+/// それを下限・持続情報として蓄積する）。戻り値は蓄積後の candidate。
+fn record_candidate(root: &Path, cand: &Value) -> Value {
     let title = cand.get("title").and_then(|v| v.as_str()).unwrap_or("");
     let body = cand.get("body").and_then(|v| v.as_str()).unwrap_or("");
     let key = candidate_key(cand);
@@ -169,19 +211,42 @@ fn record_candidate(root: &Path, cand: &Value) {
     }) {
         let o = ex.as_object_mut().unwrap();
         o.insert("lastSeen".into(), json!(now));
+        let hits = o.get("hits").and_then(|v| v.as_u64()).unwrap_or(1) + 1;
+        // detector emit の count は再検出数の下限として扱う
+        let hits = cand
+            .get("count")
+            .and_then(|v| v.as_u64())
+            .map(|c| hits.max(c))
+            .unwrap_or(hits);
+        o.insert("hits".into(), json!(hits));
+        if let Some(d) = cand.get("durationSeconds").and_then(|v| v.as_f64()) {
+            let cur = o
+                .get("durationSeconds")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.0);
+            if d > cur {
+                o.insert("durationSeconds".into(), json!(d));
+            }
+        }
+        let out = ex.clone();
         store::save_candidates(root, &cands);
-        return;
+        return out;
     }
     let mut c = cand.clone();
     let o = c.as_object_mut().unwrap();
     o.insert("key".into(), json!(key));
     o.insert("symptomHash".into(), json!(sh));
+    o.insert(
+        "hits".into(),
+        json!(cand.get("count").and_then(|v| v.as_u64()).unwrap_or(1)),
+    );
     if o.get("detectedAt").is_none() {
         o.insert("detectedAt".into(), json!(now.clone()));
     }
     o.insert("lastSeen".into(), json!(now));
-    cands.push(c);
+    cands.push(c.clone());
     store::save_candidates(root, &cands);
+    c
 }
 
 #[cfg(test)]
@@ -208,7 +273,7 @@ mod tests {
             &[json!({
                 "source": "manual", "repo": "me/repo", "slug": "me/repo",
                 "title": "stray candidate", "body": "b",
-                "symptomHash": "h1", "detectedAt": "t",
+                "symptomHash": "h1", "detectedAt": "t", "hits": 99,
             })],
         );
         assert_eq!(backfill_issues(&root).0, 1);

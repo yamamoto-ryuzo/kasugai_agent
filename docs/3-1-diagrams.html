@@ -101,11 +101,14 @@ flowchart LR
 title: detect → normalize → dedupe
 ---
 flowchart TD
-    DET[detector / manual API /&lt;br/&gt;派生（done chat の&lt;br/&gt;変更ターン source=derived）&lt;br/&gt;github-issues は open issue 全件&lt;br/&gt;（ラベル選別なし）&lt;br/&gt;closed は --import-github で&lt;br/&gt;終端取込] --&gt;|candidate&lt;br/&gt;source/repo/title/body/&lt;br/&gt;symptomHash/detectedAt| NORM[正規化]
+    DET[detector / manual API /&lt;br/&gt;派生（done chat の&lt;br/&gt;変更ターン source=derived）&lt;br/&gt;github-issues は open issue 全件&lt;br/&gt;（ラベル選別なし）&lt;br/&gt;closed は --import-github で&lt;br/&gt;終端取込] --&gt;|candidate&lt;br/&gt;source/repo/title/body/&lt;br/&gt;symptomHash/detectedAt&lt;br/&gt;（任意: kind/labels/&lt;br/&gt;count/durationSeconds）| NORM[正規化]
     NORM --&gt; HASH[issue key =&lt;br/&gt;source+repo+symptomHash]
     HASH --&gt; EXIST{既出?}
     EXIST --&gt;|yes| BUMP[既存課題の&lt;br/&gt;lastSeen 更新のみ]
-    EXIST --&gt;|no| RATE{起票レート超過?&lt;br/&gt;intakeMaxPerHour&lt;br/&gt;source+repo 単位&lt;br/&gt;0=無制限}
+    EXIST --&gt;|no| OBS{observing 昇格?&lt;br/&gt;intakeObserveMinutes 継続&lt;br/&gt;or intakeObserveMinHits 回&lt;br/&gt;再検出&lt;br/&gt;（manual/derived は即起票）}
+    OBS --&gt;|未昇格&lt;br/&gt;単発・窓内消滅| OHOLD[candidate に留め置く&lt;br/&gt;deferred=observing&lt;br/&gt;課題は作らない]
+    OBS --&gt;|昇格| RATE{起票レート超過?&lt;br/&gt;intakeMaxPerHour&lt;br/&gt;source+repo 単位&lt;br/&gt;0=無制限}
+    OHOLD -.-&gt;|再検出・duration 蓄積で&lt;br/&gt;次回 emit/reconcile が昇格判定| OBS
     RATE --&gt;|超過| DEFER[candidate に留め置く&lt;br/&gt;deferred=rate-limit&lt;br/&gt;課題は作らない]
     DEFER -.-&gt;|次回 reconcile で再試行| BF
     RATE --&gt;|以内| NEW[課題レコード作成&lt;br/&gt;＋assess&lt;br/&gt;verifyLevel・受入条件・&lt;br/&gt;priority・自律可否&lt;br/&gt;起票＝本システムの課題&lt;br/&gt;（GitHub 登録は別機構）]
@@ -114,6 +117,7 @@ flowchart TD
     GATE --&gt;|no| Q[queued&lt;br/&gt;一覧の対応ボタンで&lt;br/&gt;人が dispatch]
     GATE --&gt;|yes| G[gated&lt;br/&gt;候補一覧で人が&lt;br/&gt;dispatch 判断]
     DEFER --&gt; INBOX
+    OHOLD --&gt; INBOX
     Q --&gt; INBOX
     G --&gt; INBOX
     INBOX[候補一覧 = 判断待ち inbox&lt;br/&gt;未起票・gated・queued・failed のみ表示&lt;br/&gt;（実行中・終端の課題行は出さない）&lt;br/&gt;全行 対応/却下ボタンで人が一括判断:&lt;br/&gt;対応=起票/承認/再実行を兼ねた即時 dispatch&lt;br/&gt;（未起票は rate-limit を人判断で bypass）&lt;br/&gt;却下=rejected（未起票は起票して即 rejected）]

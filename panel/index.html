@@ -2240,6 +2240,15 @@ const scheduleMgmt = () => {
 // 内部値（status/source/kind）の表示用変換: 辞書にキーがあれば訳文、
 // 無ければ内部値をそのまま出す（未知の値の混入でも落ちない）
 const tx = (key, raw) => { const v = t(key); return v === key ? String(raw ?? '') : v; };
+// deferred 理由ピル（rate-limit / observing / cooldown / inhibited /
+// silenced / storm）。inhibited は抑制元課題 key の末尾を併記する
+const dfPill = (c) => {
+  if (!c.deferred) return '';
+  const tag = String(c.deferred).split(':')[0];
+  const by = tag === 'inhibited' && c.inhibitedBy
+    ? ` ${esc(String(c.inhibitedBy).split(':').pop())}` : '';
+  return `<span class="pill def">${esc(tx('cand.df.' + tag, tag))}${by}</span>`;
+};
 // data-tip 用に長文を丸める（ホバーポップアップが巨大化しないよう打切り）
 const tipText = (s, n = 800) => { s = String(s || '').trim(); return s.length > n ? s.slice(0, n) + '…' : s; };
 
@@ -2304,7 +2313,7 @@ async function loadMgmt() {
     return `<div class="item${c.key === curItemKey && centerMode === 'candidate' ? ' sel' : ''}"` +
       ` onclick="openCand('${esc(c.key)}')" data-tip="${esc(tipText((c.title ? c.title + '\n\n' : '') + (c.body ? c.body + '\n\n' : '') + t('prop.open.tip')))}">` +
       `<div>${st ? `<span class="pill ${issuePill[st] || ''}">${esc(tx('iss.st.' + st, st))}</span>` : `<span class="pill wait">${esc(t('cand.unfiled'))}</span>`}` +
-      `${c.deferred ? `<span class="pill def">${esc(t('cand.deferred'))}</span>` : ''}<b>${esc(c.title)}</b></div>` +
+      `${dfPill(c)}<b>${esc(c.title)}</b></div>` +
       `<div class="muted">${esc(tx('src.' + (c.source || 'manual'), c.source || 'manual'))} · ${esc(fmtTs(c.detectedAt))}</div>` +
       (btns.length ? `<div class="pbtns">${btns.join('')}</div>` : '') + `</div>`;
   }).join('') : `<div class="empty">${esc(t('cand.none'))}</div>`;
@@ -2522,7 +2531,7 @@ function renderItemHead(it, isIssue) {
   return '<div class="rcard" style="max-width:none"><div><b>' + esc(it.title) + '</b> ' +
     (st ? `<span class="pill ${pillCls}">${esc(tx('iss.st.' + st, st))}</span>` : '') +
     (!isIssue && !st ? `<span class="pill wait">${esc(t('cand.unfiled'))}</span>` : '') +
-    (!isIssue && it.deferred ? `<span class="pill def">${esc(t('cand.deferred'))}</span>` : '') +
+    (!isIssue ? dfPill(it) : '') +
     `<span class="pill">${esc(tx('src.' + (it.source || ''), it.source || ''))}</span>` +
     (isIssue && it.verifyLevel != null ? `<span class="pill">L${it.verifyLevel}</span>` : '') +
     (isIssue && it.priority != null ? `<span class="pill">P${it.priority}</span>` : '') +

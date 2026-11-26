@@ -12,7 +12,7 @@
 use serde_json::{json, Value};
 use std::path::Path;
 
-use crate::config::{cfg_u64, load_config};
+use crate::config::{cfg_arr, cfg_f64, cfg_u64, load_config};
 use crate::store;
 use crate::util::now_iso;
 
@@ -268,11 +268,73 @@ pub enum IntakeOutcome {
     Deferred(String),
 }
 
+/// candidate の症状持続秒数。lastSeen−detectedAt（入口での再検出期間）と
+/// detector emit の durationSeconds（検出時点で既に継続していた時間。
+/// medik8s UnhealthyConditions.duration 相当）の大きい方
+fn span_seconds(cand: &Value) -> f64 {
+    let emitted = cand
+        .get("durationSeconds")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.0);
+    let parse = |k: &str| {
+        cand.get(k)
+            .and_then(|v| v.as_str())
+            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+    };
+    let span = match (parse("lastSeen"), parse("detectedAt")) {
+        (Some(a), Some(b)) => (a - b).num_seconds() as f64,
+        _ => 0.0,
+    };
+    emitted.max(span).max(0.0)
+}
+
+/// observing（保留観測。detect-pipeline.mmd OBS）の保留判定。
+/// 一過性 flap の起票を構造的に排除するため、detector 由来の candidate は
+/// 「N 分継続 or M 回再検出」を満たすまで課題化せず保留する:
+///   - config.intakeObserveMinutes（既定 10）… lastSeen−detectedAt または
+///     emit の durationSeconds がこの窓を超えると昇格
+///   - config.intakeObserveMinHits（既定 2）… 再検出がこの回数に達すれば昇格
+///   - config.observingExempt（既定 ["manual","derived"]）… 人・派生の
+///     明示入力は観測せず即起票する
+/// 単発検出で窓内に消えた（再検出されない）症状は hits=1・span=0 のまま
+/// 昇格せず、課題を作らない。
+fn observing_hold(cfg: &Value, cand: &Value) -> bool {
+    let minutes = cfg_f64(cfg, "intakeObserveMinutes", 10.0);
+    let min_hits = cfg_u64(cfg, "intakeObserveMinHits", 2);
+    if minutes <= 0.0 && min_hits <= 1 {
+        return false; // 観測窓なし = 即起票（従来動作）
+    }
+    let source = cand.get("source").and_then(|v| v.as_str()).unwrap_or("manual");
+    let mut exempt: Vec<String> = cfg_arr(cfg, "observingExempt")
+        .iter()
+        .filter_map(|v| v.as_str().map(String::from))
+        .collect();
+    if exempt.is_empty() {
+        exempt = vec!["manual".to_string(), "derived".to_string()];
+    }
+    if exempt.iter().any(|s| s == source) {
+        return false;
+    }
+    // 昇格条件: 再検出回数 or 持続時間が閾値に達したら起票する
+    let hits = cand
+        .get("hits")
+        .or_else(|| cand.get("count"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(1);
+    if hits >= min_hits {
+        return false;
+    }
+    if minutes > 0.0 && span_seconds(cand) >= minutes * 60.0 {
+        return false;
+    }
+    true
+}
+
 /// 起票ストーム抑制（README §5.1）: config.intakeMaxPerHour（既定 0=無制限）
 /// を超える source+repo 単位の新規起票を止める。直近1時間の起票数を
 /// detectedAt で数える。
-fn rate_limited(root: &Path, issues: &[Value], source: &str, repo: &str) -> bool {
-    let max = cfg_u64(&load_config(root), "intakeMaxPerHour", 0);
+fn rate_limited(cfg: &Value, issues: &[Value], source: &str, repo: &str) -> bool {
+    let max = cfg_u64(cfg, "intakeMaxPerHour", 0);
     if max == 0 {
         return false;
     }
@@ -334,9 +396,16 @@ fn intake_inner(root: &Path, cand: &Value, force: bool) -> IntakeOutcome {
         return IntakeOutcome::Existing(out);
     }
 
+    let cfg = load_config(root);
+    // observing（detect-pipeline.mmd OBS）: 一過性症状を即起票しない。
+    // 昇格条件（再検出回数・持続時間）未満は課題を作らず candidate に留め置く
+    if !force && observing_hold(&cfg, cand) {
+        return IntakeOutcome::Deferred("observing".into());
+    }
+
     // 起票レート制限（detect-pipeline.mmd RATE）。超過時は課題を作らず
     // candidate に留め置き、drain の reconcile が窓の空いた後に再試行する
-    if !force && rate_limited(root, &issues, source, repo) {
+    if !force && rate_limited(&cfg, &issues, source, repo) {
         return IntakeOutcome::Deferred("rate-limit".into());
     }
 
@@ -441,7 +510,15 @@ mod tests {
     }
 
     fn cand(title: &str, body: &str) -> Value {
-        json!({"source": "test", "repo": "me/repo", "title": title, "body": body})
+        // hits=99 で observing 昇格済み扱い（従来テストは即起票の挙動を見る）
+        json!({"source": "test", "repo": "me/repo", "title": title, "body": body,
+               "hits": 99})
+    }
+
+    /// detector 由来（観測対象。hits 未設定=初検出）の candidate
+    fn det_cand(title: &str, body: &str) -> Value {
+        json!({"source": "ci-failure", "repo": "me/repo", "title": title,
+               "body": body})
     }
 
     fn issue_at(status: &str) -> Value {
@@ -640,6 +717,80 @@ mod tests {
         // 既定 = P1
         let (i, _) = intake_v(&root, &cand("add feature x", "b"));
         assert_eq!(i["priority"], json!(1));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // ---- observing（保留観測） ----
+
+    #[test]
+    fn observing_holds_single_shot_and_promotes_on_reemit() {
+        let root = temp_root("observe");
+        // 単発検出は課題を作らない（deferred=observing）
+        match intake(&root, &det_cand("flaky port", "bind failed once")) {
+            IntakeOutcome::Deferred(reason) => assert_eq!(reason, "observing"),
+            _ => panic!("expected observing deferral"),
+        }
+        assert!(store::load_issues(&root).is_empty());
+        // 再検出（hits>=intakeObserveMinHits 既定2）で昇格して queued 起票
+        let mut c2 = det_cand("flaky port", "bind failed once");
+        c2["hits"] = json!(2);
+        match intake(&root, &c2) {
+            IntakeOutcome::Created(i) => assert_eq!(i["status"], json!(ST_QUEUED)),
+            _ => panic!("expected promotion to issue"),
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn observing_promotes_on_duration_and_emit_count() {
+        let root = temp_root("observe-dur");
+        // durationSeconds（detector が載せる持続情報）が窓を超えれば初回でも昇格
+        let mut c = det_cand("long outage", "b");
+        c["durationSeconds"] = json!(3600.0); // 60分 >= 既定窓10分
+        match intake(&root, &c) {
+            IntakeOutcome::Created(i) => assert_eq!(i["status"], json!(ST_QUEUED)),
+            _ => panic!("expected durationSeconds promotion"),
+        }
+        // count（emit 時の検出回数）でも昇格
+        let root = temp_root("observe-count");
+        let mut c = det_cand("burst", "b");
+        c["count"] = json!(5);
+        match intake(&root, &c) {
+            IntakeOutcome::Created(_) => {}
+            _ => panic!("expected count promotion"),
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn observing_exempt_and_disabled_paths() {
+        // manual/derived は観測対象外で即起票
+        let root = temp_root("observe-exempt");
+        for src in ["manual", "derived"] {
+            let mut c = det_cand(&format!("{} cand", src), "b");
+            c["source"] = json!(src);
+            match intake(&root, &c) {
+                IntakeOutcome::Created(_) => {}
+                _ => panic!("{} should be exempt from observing", src),
+            }
+        }
+        // config で無効化（窓0・回数1）は従来どおり即起票
+        let root = temp_root("observe-off");
+        std::fs::write(
+            root.join("config.json"),
+            r#"{"intakeObserveMinutes": 0, "intakeObserveMinHits": 1}"#,
+        )
+        .unwrap();
+        match intake(&root, &det_cand("one shot", "b")) {
+            IntakeOutcome::Created(_) => {}
+            _ => panic!("expected immediate filing when observing disabled"),
+        }
+        // 人判断（intake_forced）は観測窓を bypass する
+        let root = temp_root("observe-force");
+        match intake_forced(&root, &det_cand("one shot", "b")) {
+            IntakeOutcome::Created(_) => {}
+            _ => panic!("expected forced filing to bypass observing"),
+        }
         let _ = std::fs::remove_dir_all(&root);
     }
 }

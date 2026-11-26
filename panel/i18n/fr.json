@@ -331,5 +331,7 @@
   "st.chats": "chats",
   "st.candidates": "candidats",
   "st.open": "ouverts",
-  "st.doneRate": "taux réussi"
+  "st.doneRate": "taux réussi",
+  "cand.df.rate-limit": "différé (rate-limit)",
+  "cand.df.observing": "observation"
 }

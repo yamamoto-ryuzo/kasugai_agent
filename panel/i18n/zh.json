@@ -331,5 +331,7 @@
   "st.chats": "聊天",
   "st.candidates": "候选",
   "st.open": "未完结",
-  "st.doneRate": "完成率"
+  "st.doneRate": "完成率",
+  "cand.df.rate-limit": "已暂缓（rate-limit）",
+  "cand.df.observing": "观测中"
 }

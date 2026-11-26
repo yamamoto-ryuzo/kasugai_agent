@@ -331,5 +331,7 @@
   "st.chats": "채팅",
   "st.candidates": "후보",
   "st.open": "미완료",
-  "st.doneRate": "완료율"
+  "st.doneRate": "완료율",
+  "cand.df.rate-limit": "보류 (rate-limit)",
+  "cand.df.observing": "관측 중"
 }
