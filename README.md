@@ -1049,6 +1049,7 @@ kasugai_agent/
       runner.rs        # 課題 run の実行体（dispatch→run→verify→push・retry 差し戻し。drain は reconcile/再開のみ）
       verify.rs        # L0-L4 検証 prompt・kasugai-verify 結果判定・差し戻し
       housekeep.rs     # drain 定期 retention 掃除（housekeep.mmd・§11）
+      heartbeat.rs     # デッドマンスイッチ heartbeat（外部 ping・heartbeat.mmd・§11）
       knowledge.rs     # 知見蓄積 → proposals
       proposals.rs     # proposals 格納・vet（機械検査・採否の前提）
       github.rs        # gh CLI ラッパ
@@ -1100,6 +1101,30 @@ kasugai_agent/
   `logs/*.log` を drain 定期 tick で削除する。進行中課題の証跡は保持する
 - **loop KPI**: 右ペイン loop state カードに、選択リポジトリの課題を集計した
   status 別件数・done 率・MTTR（検出→done の平均）を併記する
+- **dead man's switch heartbeat**（heartbeat.mmd）: agent 自身の死を外部へ
+  通知する経路（loopback 完結のため監視対象パイプラインでは自己破壊を
+  報告できない）。稼働中は `secrets.json` の `heartbeatUrl` へ
+  `config.heartbeatMinutes`（既定5・<=0 で無効）間隔で単純 GET ping を
+  送る。送信先未設定時は無効のまま（外部サービス登録は人が行う）。
+  ping 途絶 = agent 全停止として外部サービス側が通知する。
+  runner/verify/drain とは別経路の独立タスクで、最終 ping の成否は
+  `/api/state` の `heartbeat` と loop state カードに出る
+
+<!-- diagram: heartbeat -->
+```mermaid
+---
+title: デッドマンスイッチ heartbeat（agent 自身の死の外部通知）
+---
+flowchart LR
+    HB[heartbeat タスク<br/>server/src/heartbeat.rs<br/>control 起動時に spawn。<br/>runner/verify/drain の<br/>監視対象パイプラインとは別経路] --> CFG{secrets.heartbeatUrl 設定済<br/>かつ heartbeatMinutes>0?}
+    CFG -->|no| IDLE[無効のまま待機<br/>60s ごとに secrets/config を再読込<br/>外部サービス登録は人が行う]
+    IDLE -.-> HB
+    CFG -->|yes| PING[GET ping<br/>timeout 15s<br/>成否は heartbeat status に記録]
+    PING --> SLEEP[heartbeatMinutes 経過で次回 ping<br/>ping 成否の変化時のみ SSE push]
+    SLEEP -.-> HB
+    PING --> EXT[外部 heartbeat サービス<br/>healthchecks.io /<br/>Dead Man's Snitch 互換の単純 GET]
+    EXT -->|ping 途絶 = agent 全停止| ALERT[外部サービス側で通知<br/>loopback 完結のパイプラインを<br/>通らない唯一の外部経路]
+```
 
 <!-- diagram: housekeep -->
 ```mermaid

@@ -1600,6 +1600,7 @@ async fn api_state(State(app): State<Shared>) -> Response {
         "chats": app.chat_list().await,
         "assets": crate::assets::status(&app).await,
         "autostart": crate::launch::autostart_status(),
+        "heartbeat": crate::heartbeat::status(),
     }))
 }
 
@@ -3896,7 +3897,10 @@ pub fn spawn_watchers(app: Shared) {
     spawn_detector_poller(app.clone(), "issues", 120.0);
     spawn_detector_poller(app.clone(), "ciFailure", 300.0);
     spawn_detector_poller(app.clone(), "specDrift", 300.0);
-    spawn_detector_poller(app, "health", 300.0);
+    spawn_detector_poller(app.clone(), "health", 300.0);
+    // dead man's switch heartbeat（heartbeat.mmd・§11）: agent 自身の死の
+    // 外部通知。監視対象パイプラインと別経路の独立タスク
+    crate::heartbeat::spawn(app);
 }
 
 /// kind は pollSeconds のキー（"issues"→github-issues / "health"→local-health /

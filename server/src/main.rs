@@ -26,6 +26,7 @@ mod config;
 mod control;
 mod detectors;
 mod github;
+mod heartbeat;
 mod housekeep;
 mod knowledge;
 mod launch;

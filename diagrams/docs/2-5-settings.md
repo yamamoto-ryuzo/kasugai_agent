@@ -56,6 +56,13 @@ GitHub を利用していないユーザーリポジトリも「ユーザー」�
 chat・コンソール・各一覧の時刻表示に適用されます
 （保存される時刻データ自体は UTC のままです）。
 
+dead man's switch heartbeat（agent 自身の死の外部通知）は
+`secrets.json` の `heartbeatUrl` に外部 heartbeat サービスの
+ping URL（healthchecks.io 等の単純 GET）を設定すると有効になり、
+`config.heartbeatMinutes`（既定5・0 以下で無効）間隔で ping を送ります。
+送信先未設定時は無効のままです。最終 ping の成否は右ペインの
+loop state カードに表示されます。
+
 ## アセット更新（CDN）
 
 CDN 配布アセットの状態カードです（「3-3 配布とアセット更新」参照）。

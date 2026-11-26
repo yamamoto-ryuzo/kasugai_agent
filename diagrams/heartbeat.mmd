@@ -1,0 +1,12 @@
+---
+title: デッドマンスイッチ heartbeat（agent 自身の死の外部通知）
+---
+flowchart LR
+    HB[heartbeat タスク<br/>server/src/heartbeat.rs<br/>control 起動時に spawn。<br/>runner/verify/drain の<br/>監視対象パイプラインとは別経路] --> CFG{secrets.heartbeatUrl 設定済<br/>かつ heartbeatMinutes>0?}
+    CFG -->|no| IDLE[無効のまま待機<br/>60s ごとに secrets/config を再読込<br/>外部サービス登録は人が行う]
+    IDLE -.-> HB
+    CFG -->|yes| PING[GET ping<br/>timeout 15s<br/>成否は heartbeat status に記録]
+    PING --> SLEEP[heartbeatMinutes 経過で次回 ping<br/>ping 成否の変化時のみ SSE push]
+    SLEEP -.-> HB
+    PING --> EXT[外部 heartbeat サービス<br/>healthchecks.io /<br/>Dead Man's Snitch 互換の単純 GET]
+    EXT -->|ping 途絶 = agent 全停止| ALERT[外部サービス側で通知<br/>loopback 完結のパイプラインを<br/>通らない唯一の外部経路]

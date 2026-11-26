@@ -33,6 +33,7 @@
 <p>「システム再起動 / 強制再起動」ボタン（<code>POST /api/control/restart</code>）。<br>実行中 run が残る間は空くまで延期し、強制なら実行中の chat を中断して<br>即時再起動します。</p>
 <p>実行 exe の更新検知時は <code>autoRestartOnDrift</code>（既定 ON）により<br>タスク空きを待って自動再起動します（判断フローは「3-1 統一モデル図」の<br>自動再起動図を参照）。</p>
 <p>「時刻表示」カードでタイムゾーンを IANA 名（例: <code>Asia/Tokyo</code>）で指定できます。<br>空欄はブラウザ既定（OS のゾーン）です。選択は localStorage に保存され、<br>chat・コンソール・各一覧の時刻表示に適用されます<br>（保存される時刻データ自体は UTC のままです）。</p>
+<p>dead man's switch heartbeat（agent 自身の死の外部通知）は<br><code>secrets.json</code> の <code>heartbeatUrl</code> に外部 heartbeat サービスの<br>ping URL（healthchecks.io 等の単純 GET）を設定すると有効になり、<br><code>config.heartbeatMinutes</code>（既定5・0 以下で無効）間隔で ping を送ります。<br>送信先未設定時は無効のままです。最終 ping の成否は右ペインの<br>loop state カードに表示されます。</p>
 <h3>アセット更新（CDN）</h3>
 <p>CDN 配布アセットの状態カードです（「3-3 配布とアセット更新」参照）。<br><code>cdnBaseUrl</code> 設定時にチャネル（panel/docs/prompts）ごとの<br>適用済版・最新版・保留状態を表示し、「更新確認」で manifest 取得、<br>「適用」「ロールバック」で個別操作できます。<br>panel/docs は自動適用、prompts は proposals の採否ゲート経由です。</p>
     </main>

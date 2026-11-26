@@ -2352,12 +2352,19 @@ async function loadMgmt() {
     (b.priority ?? 1) - (a.priority ?? 1) ||
     String(b.updatedAt || '').localeCompare(String(a.updatedAt || '')));
   issueList = issues;
+  // dead man's switch heartbeat の状態行（/api/state.heartbeat。§11）
+  const hb = st.heartbeat || {};
+  const hbCell = hb.enabled
+    ? `${esc(t('st.hbOn', { m: fmtDur((hb.minutes || 0) * 60) }))}` +
+      (hb.lastPingOk === false ? ` <span class="pill unres">${esc(t('st.hbNg'))}</span>` : '')
+    : esc(t('st.hbOff'));
   document.getElementById('mstate').innerHTML =
     `<div class="kv"><span>${esc(t('st.version'))}</span><b>${esc(st.version || '-')}</b></div>` +
     `<div class="kv"><span>${esc(t('st.port'))}</span><b>${esc(st.port || '-')}</b></div>` +
     `<div class="kv"><span>${esc(t('st.repos'))}</span><b>${(st.repos || []).length}</b></div>` +
     `<div class="kv"><span>${esc(t('st.chats'))}</span><b>${sessions.length}</b></div>` +
     `<div class="kv"><span>${esc(t('st.candidates'))}</span><b>${candidates.length}</b></div>` +
+    `<div class="kv"><span>${esc(t('st.heartbeat'))}</span><b>${hbCell}</b></div>` +
     kpiRows(issues);
   const issuePill = { gated: 'wait', queued: 'wait', retry: 'wait',
                       running: 'run', verifying: 'ver', done: 'live' };
@@ -2784,6 +2791,7 @@ es.addEventListener('chat', (e) => {
 es.addEventListener('chats', () => { loadSessions(); scheduleMgmt(); scheduleStatus(); });
 es.addEventListener('candidates', scheduleMgmt);
 es.addEventListener('issues', scheduleMgmt);
+es.addEventListener('heartbeat', scheduleMgmt);
 es.addEventListener('proposals', scheduleMgmt);
 es.addEventListener('silences', () => { silRefresh(); scheduleMgmt(); });
 es.addEventListener('console', (e) => appendConLines(JSON.parse(e.data).lines));
