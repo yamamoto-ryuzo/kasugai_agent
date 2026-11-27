@@ -70,6 +70,8 @@
   "consolidateIdleMinutes": 30,
   "consolidateMinCluster": 3,
   "stormBatchMin": 5,
+  "runCycleCap": 3,
+  "allowAutoLoop": false,
   "budgetMaxSteps": 2000,
   "budgetMaxWallMinutes": 0,
   "budgetMaxCostUsd": 0,

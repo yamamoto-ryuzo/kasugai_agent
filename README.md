@@ -348,6 +348,13 @@ flowchart TD
   `RunCtl.cancel` を立てて旧 run を中断（child kill）し `queued` へ戻してから
   起動する。人の「中断」ボタンも同じ経路で `queued` へ戻す
   （verifyBacks は消費しない）
+- **課題あたりの run サイクル上限（manual-175e7229）**: `runCycleCap`
+  （既定3・0=無制限）を `runs` 累計で判定し、超過は `can_dispatch` が
+  Err（人へのエスカレーション）。`POST /api/issues/:key/extend` で
+  `cycleCapExtend` を引き上げて再 dispatch する。verify NG の
+  review↔fix 自動反復は `allowAutoLoop`（既定 OFF）の包括許可トグル
+  —— ON の間だけ drain が verify NG 差し戻しの queued を自動 dispatch
+  する（runCycleCap・retryAfter の制約はそのまま効く）
 - **課題単位の実行予算（manual-94172864）**: assess が `issue.budget`
   `{maxSteps, maxWallMinutes, maxCostUsd}` を設定する
   （config 既定: `budgetMaxSteps`/`budgetMaxWallMinutes`/

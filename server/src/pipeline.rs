@@ -1258,6 +1258,28 @@ pub fn can_dispatch(cfg: &Value, issues: &[Value], key: &str) -> Result<(), Stri
         {
             return Err(format!("retry backoff until {}", ra));
         }
+    // 課題あたりの run サイクル上限（manual-175e7229・run-control.mmd）:
+    // 自身の起票・生成物への反復処理サイクルが runCycleCap（既定3・
+    // 0=無制限）+ cycleCapExtend を超えたら人へのエスカレーション。
+    // 上限延長は POST /api/issues/:key/extend が行う
+    let cap = cfg_u64(cfg, "runCycleCap", 3);
+    if cap > 0 {
+        let runs = issue
+            .get("runs")
+            .and_then(|v| v.as_array())
+            .map(|a| a.len())
+            .unwrap_or(0) as u64;
+        let extra = issue
+            .get("cycleCapExtend")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        if runs >= cap + extra {
+            return Err(format!(
+                "runCycleCap {} reached (extend で上限延長)",
+                cap + extra
+            ));
+        }
+    }
     // 累積費用予算（manual-94172864）: budget.maxCostUsd + budgetExtend
     // .maxCostUsd を runs[].usage.costUsd の累計が超えたら
     // LimitsExceeded → 上限延長の人判断を要求（0=無制限）
