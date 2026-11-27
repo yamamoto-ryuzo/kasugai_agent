@@ -24,7 +24,7 @@ use serde_json::{json, Map, Value};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::cases;
 use crate::conlog::conlog;
@@ -889,6 +889,7 @@ async fn run_and_verify(
         "sys",
         &format!("{}: spawn {} {:?}", key, exe, prompt_args),
     );
+    let exec_t0 = Instant::now();
     let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
@@ -955,9 +956,24 @@ async fn run_and_verify(
     for r in readers {
         let _ = r.await;
     }
-    let _ = std::fs::write(&log_path, buf.lock().unwrap().as_str());
+    let out_text = buf.lock().unwrap().clone();
+    let _ = std::fs::write(&log_path, out_text.as_str());
+    // run コスト（run-cost.mmd）: 経過時間・入出力は常時記録、
+    // トークン/費用は出力末尾の usage JSON を検出できた実行体のみ
+    let usage = {
+        let mut u = Map::new();
+        u.insert("elapsedMs".into(), json!(exec_t0.elapsed().as_millis() as u64));
+        u.insert("promptChars".into(), json!(prompt.chars().count()));
+        u.insert("outputChars".into(), json!(out_text.chars().count()));
+        u.insert("outputLines".into(), json!(out_text.lines().count()));
+        for (k, v) in extract_usage(&out_text) {
+            u.insert(k, v);
+        }
+        u
+    };
     {
         let mut extra = Map::new();
+        extra.insert("usage".into(), Value::Object(usage.clone()));
         extra.insert("endedAt".into(), json!(now_iso()));
         if let Some(c) = code {
             extra.insert("exitCode".into(), json!(c));
@@ -1005,6 +1021,49 @@ async fn run_and_verify(
     app.sse("issues", &json!({}));
     tstep(&traj, "state", "verifying", json!({}));
     resume_verify(app, key, obs).await;
+}
+
+/// 実行体出力の末尾からトークン/費用を抽出する（run-cost.mmd）。
+/// claude -p 等が JSON 応答で返す usage/total_cost_usd を拾う。
+/// 対応しない実行体では空 Map（経過時間・文字数は呼出側で常時記録）
+fn extract_usage(out: &str) -> Map<String, Value> {
+    let mut found = Map::new();
+    for l in out.lines().rev().take(200) {
+        let l = l.trim();
+        if !l.starts_with('{') {
+            continue;
+        }
+        let Ok(v) = serde_json::from_str::<Value>(l) else {
+            continue;
+        };
+        for k in ["total_cost_usd", "cost_usd"] {
+            if let Some(c) = v.get(k).and_then(|x| x.as_f64()) {
+                found.insert("costUsd".into(), json!(c));
+            }
+        }
+        if let Some(u) = v.get("usage") {
+            let tot = u
+                .get("input_tokens")
+                .and_then(|x| x.as_u64())
+                .unwrap_or(0)
+                + u
+                    .get("output_tokens")
+                    .and_then(|x| x.as_u64())
+                    .unwrap_or(0);
+            let tot = if tot > 0 {
+                tot
+            } else {
+                u.get("total_tokens").and_then(|x| x.as_u64()).unwrap_or(0)
+            };
+            if tot > 0 {
+                found.insert("tokens".into(), json!(tot));
+            }
+        }
+        if !found.is_empty() {
+            break;
+        }
+    }
+    found
 }
 
 // ---------- prompt 組立（dispatch。非対話 -p 実行） ----------

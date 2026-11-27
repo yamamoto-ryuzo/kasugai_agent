@@ -701,6 +701,40 @@ flowchart TD
   verify NG の差し戻しは `verify_ng`、差し戻し上限・タイムアウトは `limit`、
   control 再起動で追跡を失った孤児 run は drain が `aborted` を補記する
 
+### 5.11 run コスト可視化（トークン/費用/経過時間）
+
+Devin Session Insights 参考に、run ごとのトークン量・費用・経過時間を
+`runs[].usage` へ記録してパネルに表示する。verifyLevel ごとのコスト
+分布が見えることで assess の深度決定を改善できる。
+
+<!-- diagram: run-cost -->
+```mermaid
+---
+title: run コスト記録（トークン/費用/経過時間）
+---
+flowchart TD
+    RUN[runner.rs run 実行] --> CAP[出力バッファ<br/>stdout/stderr 監視]
+    RUN --> T0[startedAt]
+    RUN --> T1[endedAt]
+    CAP --> PARSE[usage 抽出<br/>末尾JSON行の usage/<br/>total_cost_usd を検出<br/>対応実行体のみ]
+    T0 & T1 --> USG[runs[].usage<br/>elapsedMs/promptChars/<br/>outputChars/outputLines]
+    PARSE -->|あれば| USG
+    USG --> ISS[issues.json<br/>GET /api/issues 応答に含む]
+    ISS --> LIST[パネル ISSUES 一覧行<br/>Σ経過時間・費用]
+    ISS --> CARD[ISSUES 詳細 runs カード<br/>run ごとの経過時間/<br/>トークン/費用]
+    USG --> SPAN[trace span 属性<br/>gen_ai.usage.*]
+    USG --> MET[/api/metrics<br/>KPI のコスト集計/]
+```
+
+- `runs[].usage` = `{elapsedMs, promptChars, outputChars, outputLines,
+  tokens?, cost?}`。経過時間・入出力文字数は全実行体で記録、
+  トークン/費用は出力末尾の JSON 行（`usage`・`total_cost_usd` 等）を
+  検出できた実行体のみ。同じ値が trace span の `gen_ai.usage.*` と
+  /api/metrics のコスト集計にも流れる
+- パネルは ISSUES 一覧行に Σ経過時間・費用、ISSUES 詳細の runs
+  カードに run ごとの内訳を表示する（issues API 応答に含まれるため
+  SSE push で自動更新）
+
 ## 6. 状態とファイル
 
 | ファイル | 内容 | Git 管理 |

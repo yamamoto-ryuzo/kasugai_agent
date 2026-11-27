@@ -2312,6 +2312,17 @@ const dfPill = (c) => {
 };
 // data-tip 用に長文を丸める（ホバーポップアップが巨大化しないよう打切り）
 const tipText = (s, n = 800) => { s = String(s || '').trim(); return s.length > n ? s.slice(0, n) + '…' : s; };
+const runCostHtml = (i) => {
+  let ms = 0, tok = 0, usd = 0;
+  for (const r of i.runs || []) {
+    const u = r.usage || {};
+    ms += u.elapsedMs || 0; tok += u.tokens || 0; usd += u.costUsd || 0;
+  }
+  return (ms ? ` · ⏱${esc(fmtDur(ms / 1000))}` : '') +
+    (tok ? ` · ${tok}tok` : '') + (usd ? ` · $${usd.toFixed(3)}` : '');
+};
+
+
 
 // loop state の KPI 行（README §11）: 選択 repo スコープの課題から
 // オープン件数・done 率・MTTR（detectedAt→done の平均）を集計する
@@ -2426,7 +2437,7 @@ async function loadMgmt() {
       `<span class="pill ${issuePill[st] || ''}">${esc(tx('iss.st.' + st, st))}</span>` +
       `${i.retryAfter && new Date(i.retryAfter) > new Date() ? `<span class="pill def">${esc(t('iss.backoff'))}</span>` : ''}` +
       `${(i.priority ?? 1) >= 2 ? `<span class="pill prio">P${i.priority}</span>` : ''}<b>${esc(i.title)}</b></div>` +
-      `<div class="muted">${esc(tx('src.' + (i.source || ''), i.source || ''))}${lvl} · ${esc(fmtTs(i.updatedAt))}</div>` +
+      `<div class="muted">${esc(tx('src.' + (i.source || ''), i.source || ''))}${lvl} · ${esc(fmtTs(i.updatedAt))}${runCostHtml(i)}</div>` +
       (btns.length ? `<div class="pbtns">${btns.join('')}</div>` : '') + `</div>`;
   };
   const incEmitted = new Set();
@@ -2793,7 +2804,13 @@ function renderIssue(i) {
     ? '<div class="rcard" style="max-width:none"><b>' + esc(t('iss.runs')) + '</b>' +
       (i.runs || []).map((r) =>
         `<div class="muted">${esc(fmtTs(r.startedAt))}` +
-        (r.sessionLog ? ` &middot; ${esc(r.sessionLog)}` : '') + '</div>').join('') +
+        (r.sessionLog ? ` &middot; ${esc(r.sessionLog)}` : '') +
+        // run コスト（run-cost.mmd）: 経過時間は常時、token/費用は
+        // usage を返す実行体のみ
+        (r.usage ? ` &middot; ${esc(fmtDur((r.usage.elapsedMs || 0) / 1000))}` +
+          (r.usage.tokens ? ` &middot; ${r.usage.tokens} tok` : '') +
+          (r.usage.costUsd ? ` &middot; $${r.usage.costUsd}` : '') : '') +
+        '</div>').join('') +
       '</div>' : '';
   // intake スナップショット + followUps（起票後の追記は本文に混入せず
   // 次回 run のフォローアップ入力として渡す。intake-snapshot.mmd）

@@ -1,0 +1,15 @@
+---
+title: run コスト記録（トークン/費用/経過時間）
+---
+flowchart TD
+    RUN[runner.rs run 実行] --> CAP[出力バッファ<br/>stdout/stderr 監視]
+    RUN --> T0[startedAt]
+    RUN --> T1[endedAt]
+    CAP --> PARSE[usage 抽出<br/>末尾JSON行の usage/<br/>total_cost_usd を検出<br/>対応実行体のみ]
+    T0 & T1 --> USG[runs[].usage<br/>elapsedMs/promptChars/<br/>outputChars/outputLines]
+    PARSE -->|あれば| USG
+    USG --> ISS[issues.json<br/>GET /api/issues 応答に含む]
+    ISS --> LIST[パネル ISSUES 一覧行<br/>Σ経過時間・費用]
+    ISS --> CARD[ISSUES 詳細 runs カード<br/>run ごとの経過時間/<br/>トークン/費用]
+    USG --> SPAN[trace span 属性<br/>gen_ai.usage.*]
+    USG --> MET[/api/metrics<br/>KPI のコスト集計/]
