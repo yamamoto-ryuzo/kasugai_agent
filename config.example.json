@@ -74,6 +74,8 @@
   "budgetMaxWallMinutes": 0,
   "budgetMaxCostUsd": 0,
   "stuckDetect": true,
+  "riskConfirm": true,
+  "riskHighPatterns": [],
   "stormWindowMinutes": 10,
   "maxConcurrentRuns": 4,
   "retentionDays": 0,

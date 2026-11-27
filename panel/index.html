@@ -2506,6 +2506,11 @@ async function loadMgmt() {
       btns.push(`<button onclick="event.stopPropagation();issueAct('${esc(i.key)}','reject')">${esc(t('iss.reject'))}</button>`);
     } else if (st === 'queued') {
       btns.push(`<button onclick="event.stopPropagation();issueAct('${esc(i.key)}','dispatch')">${esc(t('iss.dispatch'))}</button>`);
+      // HIGH リスク確認（manual-cf669d09）: riskHold の行動を人が採否
+      if (i.riskHold) {
+        btns.push(`<button onclick="event.stopPropagation();issueRiskAck('${esc(i.key)}','allow')">${esc(t('iss.riskAllow'))}</button>`);
+        btns.push(`<button onclick="event.stopPropagation();issueRiskAck('${esc(i.key)}','deny')">${esc(t('iss.riskDeny'))}</button>`);
+      }
       // 上限延長（manual-94172864/-175e7229）: 予算 halt 済み・
       // 延長歴のある課題は上限を引き上げて再 dispatch する
       if (i.budgetHold || i.cycleCapExtend != null) {
@@ -2531,6 +2536,7 @@ async function loadMgmt() {
       (indent ? ' style="margin-left:22px"' : '') +
       ` onclick="openIssue('${esc(i.key)}')" data-tip="${esc(tipText((i.title ? i.title + '\n\n' : '') + (i.body ? i.body + '\n\n' : '') + t('prop.open.tip')))}"><div>` +
       `<span class="pill ${issuePill[st] || ''}">${esc(tx('iss.st.' + st, st))}</span>` +
+      `${i.riskHold ? `<span class="pill def">${esc(t('iss.riskHold'))}</span>` : ''}` +
       `${i.budgetHold ? `<span class="pill def">${esc(t('iss.budgetHold'))}</span>` : ''}` +
       `${i.lastStuck ? `<span class="pill def">${esc(t('iss.stuck'))}</span>` : ''}` +
       `${i.retryAfter && new Date(i.retryAfter) > new Date() ? `<span class="pill def">${esc(t('iss.backoff'))}</span>` : ''}` +
@@ -2624,6 +2630,16 @@ async function issueSteer(key) {
 async function issueExtend(key) {
   if (!confirm(t('iss.extendConfirm'))) return;
   await issueAct(key, 'extend', {});
+}
+// HIGH リスク行動の採否（manual-cf669d09）: allow は許可記録→即 dispatch、
+// deny は理由を riskRejected へ記録し queued で待機（次回 prompt に注入）
+async function issueRiskAck(key, decision) {
+  let reason = '';
+  if (decision === 'deny') {
+    reason = prompt(t('iss.riskDenyPrompt'));
+    if (reason == null) return;
+  } else if (!confirm(t('iss.riskAllowConfirm'))) return;
+  await issueAct(key, 'risk-ack', { decision, reason });
 }
 }
 // follow-up 追記: 起票時 freeze の課題本文（intakeSnapshot）には混入せず
@@ -2807,6 +2823,11 @@ function renderItemHead(it, isIssue) {
     btns.push(`<button onclick="issueAct('${esc(it.key)}','reject')">${esc(t('iss.reject'))}</button>`);
   } else if (st === 'queued') {
     btns.push(`<button onclick="issueAct('${esc(it.key)}','dispatch')">${esc(t('iss.dispatch'))}</button>`);
+    // HIGH リスク確認・上限延長（run-control.mmd）
+    if (it.riskHold) {
+      btns.push(`<button onclick="issueRiskAck('${esc(it.key)}','allow')">${esc(t('iss.riskAllow'))}</button>`);
+      btns.push(`<button onclick="issueRiskAck('${esc(it.key)}','deny')">${esc(t('iss.riskDeny'))}</button>`);
+    }
     btns.push(`<button onclick="issueExtend('${esc(it.key)}')">${esc(t('iss.extend'))}</button>`);
     btns.push(`<button onclick="issueAct('${esc(it.key)}','reject')">${esc(t('iss.reject'))}</button>`);
   } else if (st === 'failed') {
@@ -2845,6 +2866,7 @@ function renderItemHead(it, isIssue) {
     (!isIssue && !st ? `<span class="pill wait">${esc(t('cand.unfiled'))}</span>` : '') +
     (!isIssue ? dfPill(it) : '') +
     (isIssue && it.retryAfter && new Date(it.retryAfter) > new Date()
+    (isIssue && it.riskHold ? `<span class="pill def">${esc(t('iss.riskHold'))}</span>` : '') +
     (isIssue && it.budgetHold ? `<span class="pill def">${esc(t('iss.budgetHold'))}</span>` : '') +
     (isIssue && it.lastStuck ? `<span class="pill def">${esc(t('iss.stuck'))}</span>` : '') +
       ? `<span class="pill def">${esc(t('iss.backoff'))}: ${esc(fmtTs(it.retryAfter))}</span>` : '') +
@@ -2887,6 +2909,8 @@ function renderIssue(i) {
       // 保全先・リスク採否を表示する
       (i.lastStuck ? `<div class="muted">${esc(t('iss.stuck'))}: ${esc(i.lastStuck.pattern || '')} ${esc(i.lastStuck.detail || '')}</div>` : '') +
       (i.budgetHold ? `<div class="muted">${esc(t('iss.budgetHold'))}: ${esc(i.budgetHold.field || '')} ${i.budgetHold.limit ?? ''}</div>` : '') +
+      (i.riskHold ? `<div class="muted">${esc(t('iss.riskHold'))}: ${esc(i.riskHold.label || '')} ${esc(i.riskHold.line || '')}</div>` : '') +
+      (i.riskRejected ? `<div class="muted">${esc(t('iss.riskRejected'))}: ${esc(i.riskRejected.reason || '')}</div>` : '') +
       (i.remediation ? `<div class="muted">${esc(t('iss.remediation'))}: ${esc(i.remediation)} (#${(i.remediationStage ?? 0) + 1})</div>` : '') +
       `<div class="muted">retries: ${i.retries ?? 0} &middot; verifyBacks: ${i.verifyBacks ?? 0}</div>` +
       '</div>' : '';

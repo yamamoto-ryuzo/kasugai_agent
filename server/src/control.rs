@@ -3409,6 +3409,88 @@ async fn api_issues_action(
             Err(e) => err(StatusCode::CONFLICT, &e),
         };
     }
+    // risk-ack は body {decision:"allow"|"deny", reason?} で riskHold の
+    // HIGH リスク行動を人が採否する（manual-cf669d09）。
+    // allow → riskAllowed に記録して即 dispatch、
+    // deny → riskRejected に記録して queued で待機（次回 prompt に
+    // 却下理由を注入して別アプローチを促す）
+    if action == "risk-ack" {
+        let a = body_json(b).await;
+        let decision = a
+            .get("decision")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let Some(it) = crate::store::load_issues(&app.root)
+            .into_iter()
+            .find(|i| i.get("key").and_then(|v| v.as_str()) == Some(key.as_str()))
+        else {
+            return err(StatusCode::NOT_FOUND, "issue not found");
+        };
+        let hold = it.get("riskHold").cloned().unwrap_or(Value::Null);
+        if hold.is_null() {
+            return err(StatusCode::CONFLICT, "issue has no riskHold");
+        }
+        crate::audit::record(
+            &app.root,
+            &key,
+            "human",
+            "risk-ack",
+            None,
+            Map::from_iter([("decision".into(), json!(decision))]),
+        );
+        match decision {
+            "allow" => {
+                let _ = crate::pipeline::set_field(
+                    &app.root,
+                    &key,
+                    "riskAllowed",
+                    json!({"at": crate::util::now_iso(), "hold": hold}),
+                );
+                let _ = crate::pipeline::set_field(
+                    &app.root,
+                    &key,
+                    "riskHold",
+                    Value::Null,
+                );
+                return match crate::runner::dispatch_issue(&app, &key).await {
+                    Ok(issue) => {
+                        app.sse("issues", &json!({}));
+                        j(json!({"ok": true, "issue": issue}))
+                    }
+                    Err(e) => err(StatusCode::CONFLICT, &e),
+                };
+            }
+            "deny" => {
+                let reason = a
+                    .get("reason")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let _ = crate::pipeline::set_field(
+                    &app.root,
+                    &key,
+                    "riskRejected",
+                    json!({"at": crate::util::now_iso(), "reason": reason, "hold": hold}),
+                );
+                let _ = crate::pipeline::set_field(
+                    &app.root,
+                    &key,
+                    "riskHold",
+                    Value::Null,
+                );
+                app.sse("issues", &json!({}));
+                return match crate::store::load_issues(&app.root)
+                    .into_iter()
+                    .find(|i| {
+                        i.get("key").and_then(|v| v.as_str()) == Some(key.as_str())
+                    }) {
+                    Some(issue) => j(json!({"ok": true, "issue": issue})),
+                    None => err(StatusCode::NOT_FOUND, "issue not found"),
+                };
+            }
+            _ => return err(StatusCode::BAD_REQUEST, "decision must be allow|deny"),
+        }
+    }
     }
     let (from, to) = match action.as_str() {
         "approve" => (crate::pipeline::ST_GATED, crate::pipeline::ST_QUEUED),

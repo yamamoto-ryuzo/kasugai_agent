@@ -360,6 +360,13 @@ flowchart TD
   （`POST /api/issues/:key/steer {text}`）。in-flight run の child stdin
   へ best-effort で注入し、常に `followUps`（kind=steer）にも記録して
   次回 dispatch prompt の「フォローアップ入力」へ入れる
+- **action レベルのリスク確認（manual-cf669d09）**: verifyLevel とは別軸で、
+  実行体の出力行をリスク分類（risk.rs。外部通信・ファイル削除・設定変更等。
+  `riskHighPatterns` で HIGH パターン追加可）。HIGH 検出は `riskConfirm`
+  （既定 on）なら run を halt して `riskHold` で人確認を要求する。
+  「許可」は `riskAllowed` に記録して即 dispatch、「拒否 {reason}」は
+  `riskRejected` に記録して queued で待機し、次回 prompt に却下理由を
+  注入して別アプローチを促す
 - **Stuck Detector（manual-1a459b0c）**: 実行体の出力行から非生産
   パターンを検出（stuck.rs。同一行4回・同一 error 行3回・同一行3連続の
   独白相当・2パターン交互6行・context window error 連続）して run を
@@ -983,6 +990,9 @@ flowchart TD
 - `POST /api/issues/:key/extend` — `{cycles?,steps?,wallMinutes?,costUsd?}` で
   runCycleCap・issue.budget の上限を延長して再 dispatch
   （省略時は config の extend* 既定増分）
+- `POST /api/issues/:key/risk-ack` — `{decision:"allow"|"deny", reason?}` で
+  `riskHold` の HIGH リスク行動を許可（riskAllowed 記録→即 dispatch）/
+  拒否（riskRejected 記録→queued で別アプローチ待ち）
 - `POST /api/issues/:key/dispatch` / `POST /api/issues/:key/approve` / `reject`
 - `GET /api/proposals` / `POST /api/proposals/:id/accept|decline`
 - `GET /api/repos` — repos 一覧。`config.repos` 登録済みに加え、IDE ワークスペース

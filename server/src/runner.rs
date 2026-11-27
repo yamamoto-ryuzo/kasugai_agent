@@ -38,6 +38,7 @@ use crate::knowledge;
 use crate::lessons;
 use crate::locks;
 use crate::pipeline;
+use crate::risk;
 use crate::stuck;
 use crate::repomatch::repo_slug;
 use crate::store;
@@ -1818,6 +1819,20 @@ fn build_prompt_full(root: &Path, issue: &Value) -> (String, Value) {
             "前回の run は非生産パターン検出で中断された（pattern: {}）。\n検出行: {}\n\
              同じ操作の繰り返し・同じエラーの再試行を避け、別の切り口で対応すること\n",
             pat, det
+        ));
+    }
+    if let Some(r) = issue.get("riskRejected").filter(|v| !v.is_null()) {
+        let reason = r.get("reason").and_then(|v| v.as_str()).unwrap_or("");
+        let label = r
+            .get("hold")
+            .and_then(|h| h.get("label"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        p.push_str("\n\n## HIGH リスク行動の却下（別アプローチ必須）\n\n");
+        p.push_str(&format!(
+            "前回 run の行動（{}）は人に却下された。理由: {}\n\
+             同じ方針を取らず、リスクの低い別アプローチで対応すること\n",
+            label, reason
         ));
     }
     }
