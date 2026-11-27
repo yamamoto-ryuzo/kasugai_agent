@@ -12,6 +12,7 @@ acp-options.json
 acp-sessions.json
 steer-requests.json
 kill-requests.json
+detector-health.json
 knowledge/
 proposals/
 evidence/

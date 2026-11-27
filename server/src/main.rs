@@ -24,6 +24,7 @@ mod claims;
 mod conlog;
 mod config;
 mod control;
+mod detector_health;
 mod detectors;
 mod github;
 mod heartbeat;

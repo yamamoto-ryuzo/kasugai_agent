@@ -33,6 +33,7 @@
   "autoVerify": true,
   "autoResumeOnStart": true,
   "heartbeatMinutes": 5,
+  "detectorSilentMinutes": 30,
   "retryLimit": 3,
   "verifyBackLimit": 3,
   "verifyBackoffMinutes": 5,

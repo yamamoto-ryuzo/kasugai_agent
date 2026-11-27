@@ -1050,6 +1050,7 @@ kasugai_agent/
       verify.rs        # L0-L4 検証 prompt・kasugai-verify 結果判定・差し戻し
       housekeep.rs     # drain 定期 retention 掃除（housekeep.mmd・§11）
       heartbeat.rs     # デッドマンスイッチ heartbeat（外部 ping・heartbeat.mmd・§11）
+      detector_health.rs # detector 沈黙検知 meta 監視台帳（detector-health.mmd・§11）
       knowledge.rs     # 知見蓄積 → proposals
       proposals.rs     # proposals 格納・vet（機械検査・採否の前提）
       github.rs        # gh CLI ラッパ
@@ -1124,6 +1125,34 @@ flowchart LR
     SLEEP -.-> HB
     PING --> EXT[外部 heartbeat サービス<br/>healthchecks.io /<br/>Dead Man's Snitch 互換の単純 GET]
     EXT -->|ping 途絶 = agent 全停止| ALERT[外部サービス側で通知<br/>loopback 完結のパイプラインを<br/>通らない唯一の外部経路]
+```
+
+- **detector 沈黙検知**（detector-health.mmd）: 「検出0件」自体が異常に
+  なり得るための meta 監視。detector ごとの最終実行時刻（lastRunAt）と
+  最終 emit 時刻（lastEmitAt）を `detector-health.json` 台帳に記録し、
+  `detectorSilentMinutes`（既定30・<=0 で無効）を超えて emit のない
+  detector を `source=local-health` の meta candidate（kind=detector-silent /
+  実行停止は detector-stopped）として emit する。lastRunAt≠lastEmitAt の
+  区別で「検出0件・正常」と「detector 停止・異常」を分け、安定
+  symptomHash で detector ごと1課題に収束する。状態は `/api/state` の
+  `detectorHealth` と loop state カードに出る
+
+<!-- diagram: detector-health -->
+```mermaid
+---
+title: detector 沈黙検知（meta 監視台帳）
+---
+flowchart LR
+    POLL[spawn_detector_poller<br/>issues / ciFailure /<br/>specDrift / health<br/>pollSeconds.&lt;kind&gt; 周期] --> RUN[poll 実行<br/>返却 = 実行成功<br/>panic/タスク死は記録停止]
+    RUN --> LED[detector_health.rs 台帳<br/>detector-health.json<br/>lastRunAt = 毎回更新<br/>lastEmitAt = candidates 1件以上<br/>の時のみ更新<br/>firstSeenAt / runs / emits]
+    RUN --> ING[detectors::ingest<br/>検出候補を intake へ]
+    LED --> CHK{沈黙判定<br/>detectorSilentMinutes<br/>既定30・&lt;=0 で無効}
+    CHK -->|lastRunAt が停滞<br/>= poller 死亡・クラッシュ<br/>・起動失敗| STOP[detector 停止として emit<br/>kind=detector-stopped<br/>hash=detector-stopped:&lt;kind&gt;]
+    CHK -->|lastRunAt は新しいが<br/>lastEmitAt が停滞<br/>= 実行継続・検出0件| SIL[detector 沈黙として emit<br/>kind=detector-silent<br/>hash=detector-silent:&lt;kind&gt;<br/>未 emit は firstSeenAt 起点]
+    CHK -->|閾値内| OK[正常<br/>lastRunAt ≠ lastEmitAt で<br/>0件検出・正常 と<br/>detector 停止・異常 を区別]
+    STOP --> META[source=local-health の<br/>meta candidate として ingest<br/>通常の intake 経路で起票]
+    SIL --> META
+    META --> DD[source+repo+symptomHash で<br/>detector ごと1課題に収束<br/>再 emit は lastSeen 更新のみ]
 ```
 
 <!-- diagram: housekeep -->

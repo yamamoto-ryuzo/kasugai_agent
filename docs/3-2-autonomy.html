@@ -44,6 +44,24 @@ flowchart TB
 <table><thead><tr><th>段階</th><th>内容</th></tr></thead><tbody><tr><td>detect</td><td>detector（github-issues / ci-failure / local-health / manual-chat）が課題候補を emit</td></tr><tr><td>normalize/dedupe</td><td>統一 candidate 形式に正規化し <code>source+repo+symptomHash</code> で重複排除</td></tr><tr><td>assess</td><td>課題の性質と検証深度（verifyLevel L0〜L4）を決定</td></tr><tr><td>gate</td><td>dispatch（対応）判断・external 起票承認・proposal 採否・push 可否など人だけが越えられる判定地点</td></tr><tr><td>dispatch</td><td>runner（接続AI 実行体）に実装を委譲。起動は ISSUES 一覧の「対応」ボタンによる人判断のみ（自動起動しない）</td></tr><tr><td>verify</td><td>実機起動・証跡採取・push 可否。NG なら差し戻し prompt を保留し、処理再開・再起動時の自動再処理で retry へ（上限到達は要人対応）</td></tr><tr><td>learn</td><td>結果・証跡を SKILL（draft・mermaid 図必須）として <code>.devin/skills/</code> へ蓄積し proposals を生成</td></tr></tbody></table>
 <p>LOOP が「要」なのは、これが<strong>自律性そのもの</strong>だからです。</p>
 <ul><li><strong>終わらない</strong> — 常駐サーバが観測を続け、課題ごとにサイクルを回す</li><li><strong>閉じている</strong> — verify が「実装したつもり」を実機で弾き、learn が結果を 次のループの入力に還流する</li><li><strong>自己書換えする</strong> — learn → proposals → 採用 で agent 自身が更新され、 ループがループを改良する（meta-loop）</li></ul>
+<p>観測系自身も監視対象です。detector ごとの最終実行時刻と最終 emit 時刻を<br><code>detector-health.json</code> 台帳に記録し、<code>detectorSilentMinutes</code>（既定30）を<br>超えて emit のない detector は <code>source=local-health</code> の meta 課題として<br>このパイプラインへ emit します。「検出0件（正常）」と「detector 停止<br>（異常）」は lastRunAt と lastEmitAt の区別で分けます。</p>
+<!-- diagram: detector-health -->
+<pre class="mermaid">
+---
+title: detector 沈黙検知（meta 監視台帳）
+---
+flowchart LR
+    POLL[spawn_detector_poller&lt;br/&gt;issues / ciFailure /&lt;br/&gt;specDrift / health&lt;br/&gt;pollSeconds.&amp;lt;kind&amp;gt; 周期] --&gt; RUN[poll 実行&lt;br/&gt;返却 = 実行成功&lt;br/&gt;panic/タスク死は記録停止]
+    RUN --&gt; LED[detector_health.rs 台帳&lt;br/&gt;detector-health.json&lt;br/&gt;lastRunAt = 毎回更新&lt;br/&gt;lastEmitAt = candidates 1件以上&lt;br/&gt;の時のみ更新&lt;br/&gt;firstSeenAt / runs / emits]
+    RUN --&gt; ING[detectors::ingest&lt;br/&gt;検出候補を intake へ]
+    LED --&gt; CHK{沈黙判定&lt;br/&gt;detectorSilentMinutes&lt;br/&gt;既定30・&amp;lt;=0 で無効}
+    CHK --&gt;|lastRunAt が停滞&lt;br/&gt;= poller 死亡・クラッシュ&lt;br/&gt;・起動失敗| STOP[detector 停止として emit&lt;br/&gt;kind=detector-stopped&lt;br/&gt;hash=detector-stopped:&amp;lt;kind&amp;gt;]
+    CHK --&gt;|lastRunAt は新しいが&lt;br/&gt;lastEmitAt が停滞&lt;br/&gt;= 実行継続・検出0件| SIL[detector 沈黙として emit&lt;br/&gt;kind=detector-silent&lt;br/&gt;hash=detector-silent:&amp;lt;kind&amp;gt;&lt;br/&gt;未 emit は firstSeenAt 起点]
+    CHK --&gt;|閾値内| OK[正常&lt;br/&gt;lastRunAt ≠ lastEmitAt で&lt;br/&gt;0件検出・正常 と&lt;br/&gt;detector 停止・異常 を区別]
+    STOP --&gt; META[source=local-health の&lt;br/&gt;meta candidate として ingest&lt;br/&gt;通常の intake 経路で起票]
+    SIL --&gt; META
+    META --&gt; DD[source+repo+symptomHash で&lt;br/&gt;detector ごと1課題に収束&lt;br/&gt;再 emit は lastSeen 更新のみ]
+</pre>
 <h3>実装方式の比較（Rust 自前 / SDK / プラグイン）</h3>
 <table><thead><tr><th>観点</th><th>Rust 自前（本システム）</th><th>SDK 利用</th><th>プラグイン（MCP/skill 等）</th></tr></thead><tbody><tr><td>自律ループの制御</td><td>完全。state machine を自前で保有</td><td>部分的。課題ライフサイクルは別途自作</td><td>不可。ループはホスト側のもの</td></tr><tr><td>常駐・スケジューリング</td><td>自前デーモン + 自動再起動</td><td>プロセス管理は自前</td><td>ホストの起動中のみ</td></tr><tr><td>状態の正</td><td>control が state/issues/queue を保有し SSE push</td><td>SDK セッション状態と二重管理になりやすい</td><td>ホストの永続機構に依存</td></tr><tr><td>実機検証（L0〜L4）</td><td>EXE 起動・証跡・排他ロックまで実装可能</td><td>SDK の責務外。結局自前で書く</td><td>ホストのツール呼出に限定</td></tr><tr><td>AI 実行体の交換性</td><td>chatAgents 設定で ACP/HTTP/OpenAI互換を選択。<strong>プロバイダ非依存</strong></td><td>SDK 提供者のモデルに実質ロック</td><td>ホストが選んだ AI に従う</td></tr><tr><td>UI / 可視化</td><td>panel + SSE でリアルタイム表示</td><td>UI は丸ごと自作</td><td>ホスト UI 制約内</td></tr><tr><td>セキュリティ</td><td>loopback・secrets 一元・人ゲートを code に直接埋め込める</td><td>SDK 内部の送信先・ツール実行はブラックボックス</td><td>ホストの権限モデルに従う</td></tr><tr><td>開発・保守コスト</td><td>最大</td><td>中（エージェント部は SDK が吸収）</td><td>最小</td></tr></tbody></table>
 <p>本システムが Rust 自前を選んだのは「SDK を使わないことで速い」からではなく、<br><strong>SDK に依存しない分だけ、自律ループと検証ポリシーを完全に自分の仕様にできる</strong><br>からです。AI を内蔵するのではなく、外付けの実行体としてオーケストレート<br>する形です。</p>

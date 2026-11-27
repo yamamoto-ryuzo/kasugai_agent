@@ -51,6 +51,30 @@ LOOP が「要」なのは、これが**自律性そのもの**だからです�
 - **自己書換えする** — learn → proposals → 採用 で agent 自身が更新され、
   ループがループを改良する（meta-loop）
 
+観測系自身も監視対象です。detector ごとの最終実行時刻と最終 emit 時刻を
+`detector-health.json` 台帳に記録し、`detectorSilentMinutes`（既定30）を
+超えて emit のない detector は `source=local-health` の meta 課題として
+このパイプラインへ emit します。「検出0件（正常）」と「detector 停止
+（異常）」は lastRunAt と lastEmitAt の区別で分けます。
+
+<!-- diagram: detector-health -->
+```mermaid
+---
+title: detector 沈黙検知（meta 監視台帳）
+---
+flowchart LR
+    POLL[spawn_detector_poller<br/>issues / ciFailure /<br/>specDrift / health<br/>pollSeconds.&lt;kind&gt; 周期] --> RUN[poll 実行<br/>返却 = 実行成功<br/>panic/タスク死は記録停止]
+    RUN --> LED[detector_health.rs 台帳<br/>detector-health.json<br/>lastRunAt = 毎回更新<br/>lastEmitAt = candidates 1件以上<br/>の時のみ更新<br/>firstSeenAt / runs / emits]
+    RUN --> ING[detectors::ingest<br/>検出候補を intake へ]
+    LED --> CHK{沈黙判定<br/>detectorSilentMinutes<br/>既定30・&lt;=0 で無効}
+    CHK -->|lastRunAt が停滞<br/>= poller 死亡・クラッシュ<br/>・起動失敗| STOP[detector 停止として emit<br/>kind=detector-stopped<br/>hash=detector-stopped:&lt;kind&gt;]
+    CHK -->|lastRunAt は新しいが<br/>lastEmitAt が停滞<br/>= 実行継続・検出0件| SIL[detector 沈黙として emit<br/>kind=detector-silent<br/>hash=detector-silent:&lt;kind&gt;<br/>未 emit は firstSeenAt 起点]
+    CHK -->|閾値内| OK[正常<br/>lastRunAt ≠ lastEmitAt で<br/>0件検出・正常 と<br/>detector 停止・異常 を区別]
+    STOP --> META[source=local-health の<br/>meta candidate として ingest<br/>通常の intake 経路で起票]
+    SIL --> META
+    META --> DD[source+repo+symptomHash で<br/>detector ごと1課題に収束<br/>再 emit は lastSeen 更新のみ]
+```
+
 ## 実装方式の比較（Rust 自前 / SDK / プラグイン）
 
 | 観点 | Rust 自前（本システム） | SDK 利用 | プラグイン（MCP/skill 等） |

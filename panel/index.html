@@ -2358,6 +2358,13 @@ async function loadMgmt() {
     ? `${esc(t('st.hbOn', { m: fmtDur((hb.minutes || 0) * 60) }))}` +
       (hb.lastPingOk === false ? ` <span class="pill unres">${esc(t('st.hbNg'))}</span>` : '')
     : esc(t('st.hbOff'));
+  // detector 沈黙検知（/api/state.detectorHealth。detector-health.mmd・§11）
+  const detCell = Object.entries((st.detectorHealth || {}).kinds || {})
+    .map(([k, e]) => {
+      const s = (e || {}).state || 'ok';
+      return s === 'ok' ? esc(k)
+        : `${esc(k)} <span class="pill unres">${esc(t(s === 'stopped' ? 'st.detStopped' : 'st.detSilent'))}</span>`;
+    }).join(' ');
   document.getElementById('mstate').innerHTML =
     `<div class="kv"><span>${esc(t('st.version'))}</span><b>${esc(st.version || '-')}</b></div>` +
     `<div class="kv"><span>${esc(t('st.port'))}</span><b>${esc(st.port || '-')}</b></div>` +
@@ -2365,6 +2372,7 @@ async function loadMgmt() {
     `<div class="kv"><span>${esc(t('st.chats'))}</span><b>${sessions.length}</b></div>` +
     `<div class="kv"><span>${esc(t('st.candidates'))}</span><b>${candidates.length}</b></div>` +
     `<div class="kv"><span>${esc(t('st.heartbeat'))}</span><b>${hbCell}</b></div>` +
+    `<div class="kv"><span>${esc(t('st.detectors'))}</span><b>${detCell || '-'}</b></div>` +
     kpiRows(issues);
   const issuePill = { gated: 'wait', queued: 'wait', retry: 'wait',
                       running: 'run', verifying: 'ver', done: 'live' };
@@ -2792,6 +2800,7 @@ es.addEventListener('chats', () => { loadSessions(); scheduleMgmt(); scheduleSta
 es.addEventListener('candidates', scheduleMgmt);
 es.addEventListener('issues', scheduleMgmt);
 es.addEventListener('heartbeat', scheduleMgmt);
+es.addEventListener('detector-health', scheduleMgmt);
 es.addEventListener('proposals', scheduleMgmt);
 es.addEventListener('silences', () => { silRefresh(); scheduleMgmt(); });
 es.addEventListener('console', (e) => appendConLines(JSON.parse(e.data).lines));

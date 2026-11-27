@@ -1601,6 +1601,7 @@ async fn api_state(State(app): State<Shared>) -> Response {
         "assets": crate::assets::status(&app).await,
         "autostart": crate::launch::autostart_status(),
         "heartbeat": crate::heartbeat::status(),
+        "detectorHealth": crate::detector_health::status(&app.root, &cfg),
     }))
 }
 
@@ -3916,10 +3917,19 @@ fn spawn_detector_poller(app: Shared, kind: &'static str, default_secs: f64) {
                 "specDrift" => crate::detectors::spec_drift::poll(&cfg, &app.root).await,
                 _ => crate::detectors::github_issues::poll(&cfg).await,
             };
+            // detector 沈黙検知（detector-health.mmd・§11）: 最終実行/最終 emit
+            // を台帳に記録し、沈黙/停止した detector を local-health 候補として
+            // emit する（返却済み = 実行成功。panic は poller 死亡として検出）
+            crate::detector_health::record_run(&app.root, kind, cands.len());
             let mut created = false;
             let mut deferred = false;
             for c in &cands {
                 let (_i, cr, df) = crate::detectors::ingest(&app.root, c);
+                created |= cr;
+                deferred |= df;
+            }
+            for c in crate::detector_health::check_silent(&app.root, &cfg) {
+                let (_i, cr, df) = crate::detectors::ingest(&app.root, &c);
                 created |= cr;
                 deferred |= df;
             }
@@ -3930,6 +3940,7 @@ fn spawn_detector_poller(app: Shared, kind: &'static str, default_secs: f64) {
                 // レート制限の deferred ピル表示を即時反映
                 app.sse("candidates", &json!({}));
             }
+            app.sse("detector-health", &json!({}));
             let secs = cfg_obj(&cfg, "pollSeconds")
                 .and_then(|p| p.get(kind))
                 .and_then(|v| v.as_f64())
