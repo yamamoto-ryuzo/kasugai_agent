@@ -337,7 +337,7 @@ pub fn list(root: &Path) -> Vec<Value> {
                 .filter_map(|k| {
                     issues
                         .iter()
-                        .find(|i| str_of(i, "key") == str_of(k, ""))
+                        .find(|i| Some(str_of(i, "key")) == k.as_str())
                         .map(|i| {
                             json!({
                                 "key": str_of(i, "key"),
@@ -345,7 +345,7 @@ pub fn list(root: &Path) -> Vec<Value> {
                                 "status": str_of(i, "status"),
                             })
                         })
-                        .or_else(|| Some(json!({"key": str_of(k, ""), "missing": true})))
+                        .or_else(|| Some(json!({"key": k.as_str().unwrap_or(""), "missing": true})))
                 })
                 .collect();
             inc.as_object_mut()
