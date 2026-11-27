@@ -366,5 +366,14 @@
   "sil.remove": "entfernen",
   "sil.note": "Kandidaten mit passenden Matchern (source/repo/kind, leer = beliebig) werden für die Dauer nicht angelegt; läuft automatisch ab",
   "cand.df.inhibited": "unterdrückt",
-  "iss.backoff": "Backoff"
+  "iss.backoff": "Backoff",
+  "src.split": "Aufteilung",
+  "iss.split": "aufteilen",
+  "iss.splitProp": "Aufteilungsvorschlag",
+  "iss.splitPrompt": "Unter-Issue-Titel mit \" | \" trennen (mind. 2)",
+  "iss.splitConfirm": "{count} Unter-Issues anlegen und das übergeordnete Issue verwerfen",
+  "iss.splitNeed2": "Mindestens 2 Unter-Issues erforderlich",
+  "iss.splitFrom": "aufgeteiltes Issue",
+  "iss.splitInto": "in {count} aufgeteilt",
+  "aud.act.split": "Aufteilen"
 }

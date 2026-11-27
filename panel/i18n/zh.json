@@ -366,5 +366,14 @@
   "sil.remove": "解除",
   "sil.note": "匹配 matcher（source/repo/kind，留空=任意）的候选在指定时间内不登记为课题；到期自动解除",
   "cand.df.inhibited": "已抑制",
-  "iss.backoff": "退避"
+  "iss.backoff": "退避",
+  "src.split": "拆分",
+  "iss.split": "拆分提交",
+  "iss.splitProp": "拆分建议",
+  "iss.splitPrompt": "用 \" | \" 分隔编辑子议题标题（至少2个）",
+  "iss.splitConfirm": "将创建 {count} 个子议题并拒绝父议题",
+  "iss.splitNeed2": "至少需要2个子议题",
+  "iss.splitFrom": "拆分子议题",
+  "iss.splitInto": "已拆分为{count}个",
+  "aud.act.split": "拆分"
 }

@@ -366,5 +366,14 @@
   "sil.remove": "retirer",
   "sil.note": "les candidats correspondant aux matchers (source/repo/kind, vide = tous) ne sont pas transformés en tickets pendant la durée ; expiration automatique",
   "cand.df.inhibited": "inhibé",
-  "iss.backoff": "backoff"
+  "iss.backoff": "backoff",
+  "src.split": "scission",
+  "iss.split": "scinder",
+  "iss.splitProp": "proposition de scission",
+  "iss.splitPrompt": "Modifiez les titres des sous-tickets séparés par \" | \" (2 ou plus)",
+  "iss.splitConfirm": "Créer {count} sous-tickets et rejeter le parent",
+  "iss.splitNeed2": "Au moins 2 sous-tickets requis",
+  "iss.splitFrom": "sous-ticket issu d'une scission",
+  "iss.splitInto": "scindé en {count}",
+  "aud.act.split": "diviser"
 }

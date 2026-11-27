@@ -3199,17 +3199,34 @@ async fn api_candidates_action(
     }
 }
 
-// POST /api/issues/{key}/{approve|reject|requeue|push-approve|dispatch}
+// POST /api/issues/{key}/{approve|reject|requeue|push-approve|dispatch|split}
 // gated→queued(承認) / gated|queued|failed→rejected(却下) / failed→queued(再実行) /
 // verifying の課題へ pushApproved:true 付与（requirePushApproval repo の人ゲート） /
 // queued→running の即時 dispatch（runner の dispatch lock/can_dispatch 経由。
 // dispatch はこの人操作のみが行い、drain は queued を自動起動しない。
 // gated/failed からの dispatch は承認・再実行を兼ねる）。
+// split は {items:[{title,body}]}（省略時は splitProposal.items）で親課題を
+// 子課題群へ分割起票する（manual-0577d650。子=source:split・splitFrom=親key、
+// 親=splitInto 記録→rejected）
 // 遷移・フィールド更新は pipeline に委譲し、ここでは状態を直接触らない
 async fn api_issues_action(
     State(app): State<Shared>,
     AxPath((key, action)): AxPath<(String, String)>,
+    b: Bytes,
 ) -> Response {
+    // split は body {items:[{title,body}]} を受ける分割起票操作
+    // （manual-0577d650。items 省略時は課題の splitProposal.items を使う）
+    if action == "split" {
+        let a = body_json(b).await;
+        let items = a.get("items").and_then(|v| v.as_array());
+        return match crate::pipeline::split_issue(&app.root, &key, items) {
+            Ok(issue) => {
+                app.sse("issues", &json!({}));
+                j(json!({"ok": true, "issue": issue}))
+            }
+            Err(e) => err(StatusCode::CONFLICT, &e),
+        };
+    }
     let (from, to) = match action.as_str() {
         "approve" => (crate::pipeline::ST_GATED, crate::pipeline::ST_QUEUED),
         "reject" => ("", crate::pipeline::ST_REJECTED),

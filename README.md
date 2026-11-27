@@ -55,10 +55,10 @@ stateDiagram-v2
     detected --> deduped : 正規化・重複判定
     deduped --> dropped : 既知/重複
     deduped --> assessed : 新規
-    assessed --> gated : 人ゲート待ち (external等)
+    assessed --> gated : 人ゲート待ち (external・<br/>大規模=分割提案 等)
     assessed --> queued : 自律対象（対応待ち）
     gated --> queued : 人が承認
-    gated --> rejected : 人が却下
+    gated --> rejected : 人が却下 or 分割起票<br/>（splitInto に子 key 群）
     queued --> running : 一覧の対応ボタンで dispatch<br/>（自動起動しない）
     queued --> planning : dispatch（planGate 課題は<br/>先に計画生成）
     queued --> rejected : 人が却下
@@ -82,6 +82,13 @@ stateDiagram-v2
         対応/却下ボタンで人が一括判断する。
         対応は起票/承認/再実行を兼ねた即時 dispatch
         （未起票は rate-limit を人判断で bypass）
+    end note
+    note right of rejected
+        分割起票（manual-0577d650）: assess が閾値超
+        （splitMaxBytes/splitMaxItems）の大規模課題を
+        splitProposal 付きで gated へ。人の「分割起票」で
+        子課題群（source=split・splitFrom=親key）を起票し、
+        親は rejected へ。子は通常 intake で queued へ進む
     end note
     done --> [*]
     rejected --> [*]
@@ -259,6 +266,12 @@ flowchart TD
   ci-failure・local-health 由来や bug 系=2、既定=1、
   documentation/enhancement 系=0。一覧は状態→priority→更新時刻順に整列し、
   P2 以上をバッジ表示する
+- **分割提案** — 本文が `splitMaxBytes`（既定4000）超、または
+  トップレベル項目が `splitMaxItems`（既定8）超の大規模課題は
+  `splitProposal` 付きで gated へ。人が「分割起票」で子課題群
+  （`source=split`・`splitFrom`=親 key）へ分けると親は
+  `splitInto` を記録して rejected になる（§3・manual-0577d650）
+
 
 ### 5.3 gate（人ゲート）
 

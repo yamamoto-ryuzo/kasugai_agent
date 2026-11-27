@@ -366,5 +366,14 @@
   "sil.remove": "해제",
   "sil.note": "matcher(source/repo/kind, 빈칸=전체)에 맞는 후보를 지정 시간 동안 과제화하지 않습니다. 기한이 지나면 자동 해제됩니다",
   "cand.df.inhibited": "억제됨",
-  "iss.backoff": "백오프"
+  "iss.backoff": "백오프",
+  "src.split": "분할",
+  "iss.split": "분할 기안",
+  "iss.splitProp": "분할 제안",
+  "iss.splitPrompt": "하위 이슈 제목을 \" | \"로 구분해 편집 (2개 이상)",
+  "iss.splitConfirm": "하위 이슈 {count}건을 기안하고 상위 이슈는 반려합니다",
+  "iss.splitNeed2": "하위 이슈가 2개 이상 필요합니다",
+  "iss.splitFrom": "분할된 하위 이슈",
+  "iss.splitInto": "{count}건으로 분할됨",
+  "aud.act.split": "분할"
 }

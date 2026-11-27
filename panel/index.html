@@ -2475,6 +2475,25 @@ async function issueAct(key, action) {
   if (!r.ok) alert(r.error || 'error');
   loadMgmt();
 }
+// 分割起票（manual-0577d650）: splitProposal.items を初期値に、人が
+// | 区切りで子課題タイトル群を編集して分割する。提案 items に一致する
+// タイトルは提案の body を引き継ぐ
+async function issueSplit(key) {
+  const i = issueList.find((x) => x.key === key);
+  const sug = (((i || {}).splitProposal || {}).items) || [];
+  const text = prompt(t('iss.splitPrompt'), sug.map((x) => x.title).join(' | '));
+  if (text == null) return;
+  const items = text.split('|').map((s) => s.trim()).filter(Boolean)
+    .map((title) => {
+      const m = sug.find((x) => x.title === title);
+      return { title, body: m ? m.body : title };
+    });
+  if (items.length < 2) { alert(t('iss.splitNeed2')); return; }
+  if (!confirm(t('iss.splitConfirm', { count: items.length }))) return;
+  const r = await J('POST', `/api/issues/${encodeURIComponent(key)}/split`, { items });
+  if (!r.ok) alert(r.error || 'error');
+  loadMgmt();
+}
 
 // ---------- candidates（判断待ち inbox の人ゲート操作。未起票は即時起票して判断） ----------
 async function candAct(key, action) {
@@ -2613,6 +2632,11 @@ function renderItemHead(it, isIssue) {
       repoOfIssue(it)?.requirePushApproval) {
     btns.push(`<button onclick="issueAct('${esc(it.key)}','push-approve')">${esc(t('iss.pushApprove'))}</button>`);
   }
+  // 分割提案（manual-0577d650）: 大規模課題は gated で splitProposal を持ち、
+  // 人が「分割起票」で子課題群へ分ける（queued でも起票前なら可）
+  if (isIssue && it.splitProposal && (st === 'gated' || st === 'queued')) {
+    btns.push(`<button onclick="issueSplit('${esc(it.key)}')">${esc(t('iss.split'))}</button>`);
+  }
   const labels = (it.labels || [])
     .map((l) => `<span class="pill">${esc(l)}</span>`).join('');
   return '<div class="rcard" style="max-width:none"><div><b>' + esc(it.title) + '</b> ' +
@@ -2624,6 +2648,10 @@ function renderItemHead(it, isIssue) {
     `<span class="pill">${esc(tx('src.' + (it.source || ''), it.source || ''))}</span>` +
     (isIssue && it.verifyLevel != null ? `<span class="pill">L${it.verifyLevel}</span>` : '') +
     (isIssue && it.priority != null ? `<span class="pill">P${it.priority}</span>` : '') +
+    (isIssue && it.splitProposal
+      ? `<span class="pill def">${esc(t('iss.splitProp'))}${it.splitProposal.reason ? ': ' + esc(it.splitProposal.reason) : ''}</span>` : '') +
+    (isIssue && it.splitFrom ? `<span class="pill">${esc(t('iss.splitFrom'))}</span>` : '') +
+    (isIssue && it.splitInto ? `<span class="pill">${esc(t('iss.splitInto', { count: it.splitInto.length }))}</span>` : '') +
     labels + '</div>' +
     `<div class="muted">${esc(it.key || '')}</div>` +
     `<div class="muted">${esc(t('det.detected'))}: ${esc(fmtTs(it.detectedAt))}` +

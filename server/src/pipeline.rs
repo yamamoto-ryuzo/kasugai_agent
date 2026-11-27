@@ -140,6 +140,104 @@ pub fn set_field(root: &Path, key: &str, field: &str, v: Value) -> Result<Value,
     Ok(out)
 }
 
+/// 分割起票（manual-0577d650・issue-lifecycle.mmd）: 人操作で親課題を
+/// 子課題群へ分ける。items 省略時は splitProposal.items を使う。
+/// 子は source="split"・splitFrom=親 key で通常 intake 起票される
+/// （queued へ。force 起票なので沈黙・rate-limit・storm 等のゲートは
+/// 人判断として bypass）。親は splitInto に子 key 群を記録して
+/// rejected へ（分割後の親自体は実行しない）。gated|queued のみ分割可
+/// （run 開始後は手遅れ）。戻り値は更新後の親課題
+pub fn split_issue(
+    root: &Path,
+    key: &str,
+    items: Option<&Vec<Value>>,
+) -> Result<Value, String> {
+    let issues = store::load_issues(root);
+    let Some(parent) = issues.iter().find(|i| {
+        i.get("key").and_then(|v| v.as_str()) == Some(key)
+    }) else {
+        return Err("issue not found".into());
+    };
+    let cur = parent
+        .get("status")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if !matches!(cur, ST_GATED | ST_QUEUED) {
+        return Err(format!("issue is {} (gated|queued required)", cur));
+    }
+    let items: Vec<Value> = match items {
+        Some(v) if v.len() >= 2 => v.clone(),
+        _ => parent
+            .get("splitProposal")
+            .and_then(|p| p.get("items"))
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default(),
+    };
+    if items.len() < 2 {
+        return Err("2 項目以上の items が必要".into());
+    }
+    let parent = parent.clone();
+    let repo = parent.get("repo").and_then(|v| v.as_str()).unwrap_or("");
+    let mut child_keys: Vec<String> = Vec::new();
+    for it in &items {
+        let title = it
+            .get("title")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim();
+        if title.is_empty() {
+            continue;
+        }
+        let body = it
+            .get("body")
+            .and_then(|v| v.as_str())
+            .unwrap_or(title);
+        let cand = json!({
+            "source": "split",
+            "repo": repo,
+            "slug": parent.get("slug").cloned().unwrap_or(Value::Null),
+            "title": title,
+            "body": body,
+            "kind": parent.get("kind").cloned().unwrap_or(Value::Null),
+            "labels": parent.get("labels").cloned().unwrap_or(json!([])),
+            "planGate": parent.get("planGate").cloned().unwrap_or(Value::Null),
+            "detectedAt": now_iso(),
+        });
+        if let IntakeOutcome::Created(ch) = intake_inner(root, &cand, true) {
+            let ck = ch
+                .get("key")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            if !ck.is_empty() {
+                let _ = set_field(root, &ck, "splitFrom", json!(key));
+                child_keys.push(ck);
+            }
+        }
+    }
+    if child_keys.is_empty() {
+        return Err("no child issues filed".into());
+    }
+    // 親の更新: splitInto 記録 → rejected へ（子群が実作業を担う）
+    let mut issues = store::load_issues(root);
+    let Some(i) = issues.iter_mut().find(|x| {
+        x.get("key").and_then(|v| v.as_str()) == Some(key)
+    }) else {
+        return Err("issue not found".into());
+    };
+    {
+        let o = i.as_object_mut().unwrap();
+        o.insert("splitInto".into(), json!(child_keys));
+        o.insert("splitAt".into(), json!(now_iso()));
+    }
+    transition(i, ST_REJECTED);
+    let out = i.clone();
+    store::save_issues(root, &issues);
+    sync_queue(root, &issues);
+    Ok(out)
+}
+
 /// work-queue.json を issues の status=queued と同期（queued は追加・それ以外は除去）。
 fn sync_queue(root: &Path, issues: &[Value]) {
     let mut q = store::load_queue(root);
@@ -249,9 +347,84 @@ fn rule_priority(issue: &Value) -> u64 {
     }
 }
 
+/// 大規模課題の検出（manual-0577d650・issue-lifecycle.mmd）: 本文が
+/// splitMaxBytes（既定4000・0=無効）超、またはトップレベル項目
+/// （`## ` 見出し・行頭箇条書き）が splitMaxItems（既定8・0=無効）超なら
+/// 分割提案を返す。Bugbot の PR サイズ上限スキップに倣い、大きすぎる
+/// 課題はそのまま自律実行せず人の分割判断を待つ。
+/// 戻り値は splitProposal {reason, items:[{title,body}]}（items 空も可）
+fn oversized(cfg: &Value, issue: &Value) -> Option<Value> {
+    let body = issue
+        .get("body")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let max_bytes = cfg_f64(cfg, "splitMaxBytes", 4000.0) as usize;
+    let max_items = cfg_f64(cfg, "splitMaxItems", 8.0) as usize;
+    let items = split_items(body);
+    let over_bytes = max_bytes > 0 && body.len() > max_bytes;
+    let over_items = max_items > 0 && items.len() > max_items;
+    if !over_bytes && !over_items {
+        return None;
+    }
+    let reason = match (over_bytes, over_items) {
+        (true, true) => format!("{}B・{}項目", body.len(), items.len()),
+        (true, false) => format!("{}B", body.len()),
+        _ => format!("{}項目", items.len()),
+    };
+    Some(json!({"reason": reason, "items": items}))
+}
+
+/// 本文から分割候補項目を抽出する。`## ` 系見出しがあれば見出し単位で
+/// 分割（title=見出し・body=節全体）、なければ行頭 `- `/`* `/`- [ ] の
+/// 箇条書きを1項目とする
+fn split_items(body: &str) -> Vec<Value> {
+    let mut items = Vec::new();
+    let mut cur_title = String::new();
+    let mut cur_body = String::new();
+    let flush = |t: &mut String, b: &mut String, out: &mut Vec<Value>| {
+        if !t.trim().is_empty() {
+            out.push(json!({"title": t.trim(), "body": b.trim()}));
+        }
+        t.clear();
+        b.clear();
+    };
+    let mut in_headings = false;
+    for line in body.lines() {
+        let tr = line.trim_start();
+        if tr.starts_with("## ") || tr.starts_with("# ") {
+            in_headings = true;
+            flush(&mut cur_title, &mut cur_body, &mut items);
+            cur_title = tr.trim_start_matches('#').trim().to_string();
+            cur_body = line.to_string();
+        } else if in_headings {
+            cur_body.push('\n');
+            cur_body.push_str(line);
+        }
+    }
+    flush(&mut cur_title, &mut cur_body, &mut items);
+    if !items.is_empty() {
+        return items;
+    }
+    for line in body.lines() {
+        let tr = line.trim();
+        let item = tr
+            .strip_prefix("- [ ] ")
+            .or_else(|| tr.strip_prefix("- [x] "))
+            .or_else(|| tr.strip_prefix("- "))
+            .or_else(|| tr.strip_prefix("* "));
+        if let Some(t) = item {
+            if !t.trim().is_empty() {
+                items.push(json!({"title": t.trim(), "body": line.trim()}));
+            }
+        }
+    }
+    items
+}
+
 /// assess: verifyLevel・受入条件・自律可否を決め、assessed → gated|queued へ遷移。
 /// external は評価にも進めない（候補一覧表示のみ。README §5.3）。
-fn assess(issues: &[Value], issue: &mut Value) {
+/// 閾値超の大規模課題は splitProposal 付きで gated へ（manual-0577d650）。
+fn assess(cfg: &Value, issues: &[Value], issue: &mut Value) {
     // assess 時の知見参照: related[] に類似事例（前回の fix / reject /
     // run 成否）を付記し、dispatch prompt の「類似過去事例」へ繋げる
     // （case-search.mmd・manual-a8c93d14）
@@ -297,6 +470,8 @@ fn assess(issues: &[Value], issue: &mut Value) {
     // 計画承認ゲート要否（manual-883d17ee）。planGate=true なら dispatch は
     // 実装の前に planning（計画生成+critic）→ plan_review（承認）を経由する
     let plan_gate = rule_plan_gate(issue, level, priority);
+    // 大規模課題の検出（manual-0577d650。o 借用前に判定する）
+    let split_prop = oversized(cfg, issue);
     let o = issue.as_object_mut().unwrap();
     o.insert("autonomous".into(), json!(autonomous));
     o.insert("priority".into(), json!(priority));
@@ -309,6 +484,14 @@ fn assess(issues: &[Value], issue: &mut Value) {
         "acceptance".into(),
         json!(format!("{} が期待どおり動作することを実機で確認する", title)),
     );
+    // 大規模課題の分割提案（manual-0577d650・issue-lifecycle.mmd）:
+    // 閾値超なら自律実行せず splitProposal 付きで人ゲートへ。人は
+    // 「分割起票」で子課題群へ分けるか、そのまま対応（dispatch）する
+    if let Some(prop) = split_prop {
+        o.insert("splitProposal".into(), prop);
+        transition(issue, ST_GATED);
+        return;
+    }
     transition(issue, ST_QUEUED);
 }
 
@@ -318,7 +501,8 @@ fn assess(issues: &[Value], issue: &mut Value) {
 /// 状態遷移・保存は行わない（複製への評価のみ）。
 pub fn assess_preview(issues: &[Value], issue: &Value) -> Value {
     let mut clone = issue.clone();
-    assess(issues, &mut clone);
+    // cfg 未指定のプレビューは既定閾値で評価する
+    assess(&json!({}), issues, &mut clone);
     json!({
         "verifyLevel": clone.get("verifyLevel").cloned().unwrap_or(Value::Null),
         "priority": clone.get("priority").cloned().unwrap_or(Value::Null),
@@ -834,7 +1018,7 @@ fn intake_inner(root: &Path, cand: &Value, force: bool) -> IntakeOutcome {
         o.insert("priority".into(), json!(prio));
         o.insert("verifyLevel".into(), json!(0));
     } else {
-        assess(&issues, &mut issue);
+        assess(&cfg, &issues, &mut issue);
         // config.planGate=false は計画ゲートの全体無効化
         // （candidate/課題の明示 planGate:true は残す）
         if !crate::config::cfg_bool_default_true(&cfg, "planGate")
@@ -1591,5 +1775,67 @@ mod tests {
             _ => panic!("expected forced filing to bypass observing"),
         }
         let _ = std::fs::remove_dir_all(&root);
+    }
+    fn oversized_issue_gates_with_split_proposal() {
+        let root = temp_root("split-gate");
+        // splitMaxItems 超の箇条書き = 分割提案付き gated
+        let body = (1..=10)
+            .map(|n| format!("- task {}", n))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let (i, created) = intake_v(&root, &cand("big multi-part work", &body));
+        assert!(created);
+        assert_eq!(i["status"], json!(ST_GATED));
+        let prop = &i["splitProposal"];
+        assert!(prop.is_object());
+        assert_eq!(prop["items"].as_array().unwrap().len(), 10);
+        // 小さな課題は従来どおり queued
+        let (i, _) = intake_v(&root, &cand("small work", "tiny"));
+        assert_eq!(i["status"], json!(ST_QUEUED));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn split_issue_files_children_and_rejects_parent() {
+        let root = temp_root("split-exec");
+        let body = "## part A\ndo a\n## part B\ndo b\n## part C\ndo c";
+        let (i, _) = intake_v(&root, &cand("huge", body));
+        // 3 見出し < splitMaxItems(8) ・本文 < splitMaxBytes(4000) なので
+        // 提案は無いが人判断で分割できる（queued も対象）
+        assert_eq!(i["status"], json!(ST_QUEUED));
+        let pk = i["key"].as_str().unwrap().to_string();
+        let items = vec![
+            json!({"title": "part A", "body": "do a"}),
+            json!({"title": "part B", "body": "do b"}),
+            json!({"title": "part C", "body": "do c"}),
+        ];
+        let parent = split_issue(&root, &pk, Some(&items)).unwrap();
+        assert_eq!(parent["status"], json!(ST_REJECTED));
+        let into = parent["splitInto"].as_array().unwrap();
+        assert_eq!(into.len(), 3);
+        let issues = store::load_issues(&root);
+        for ck in into.iter().filter_map(|v| v.as_str()) {
+            let ch = issues
+                .iter()
+                .find(|x| x["key"].as_str() == Some(ck))
+                .unwrap();
+            assert_eq!(ch["source"], json!("split"));
+            assert_eq!(ch["splitFrom"], json!(pk));
+            assert_eq!(ch["status"], json!(ST_QUEUED));
+        }
+        // rejected の親は再分割できない
+        assert!(split_issue(&root, &pk, Some(&items)).is_err());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn split_items_extracts_headings_and_bullets() {
+        let items = split_items("## a\nbody a\n## b\nbody b");
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0]["title"], json!("a"));
+        let items = split_items("- one\n- two\nplain line\n- three");
+        assert_eq!(items.len(), 3);
+        assert_eq!(items[2]["title"], json!("three"));
+        assert!(split_items("no structure").is_empty());
     }
 }

@@ -366,5 +366,14 @@
   "sil.remove": "remover",
   "sil.note": "candidatos que correspondam aos matchers (source/repo/kind, vazio = qualquer) não viram tarefas durante o período; expira automaticamente",
   "cand.df.inhibited": "inibido",
-  "iss.backoff": "backoff"
+  "iss.backoff": "backoff",
+  "src.split": "divisão",
+  "iss.split": "dividir",
+  "iss.splitProp": "proposta de divisão",
+  "iss.splitPrompt": "Edite os títulos dos sub-issues separados por \" | \" (2 ou mais)",
+  "iss.splitConfirm": "Criar {count} sub-issues e rejeitar o pai",
+  "iss.splitNeed2": "São necessários pelo menos 2 sub-issues",
+  "iss.splitFrom": "sub-issue dividido",
+  "iss.splitInto": "dividido em {count}",
+  "aud.act.split": "dividir"
 }

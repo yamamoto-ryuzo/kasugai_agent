@@ -366,5 +366,14 @@
   "sil.remove": "remove",
   "sil.note": "candidates matching the matchers (source/repo/kind, blank = any) are not filed for the duration; expires automatically",
   "cand.df.inhibited": "inhibited",
-  "iss.backoff": "backoff"
+  "iss.backoff": "backoff",
+  "src.split": "split",
+  "iss.split": "file split",
+  "iss.splitProp": "split proposal",
+  "iss.splitPrompt": "Edit child issue titles separated by \" | \" (2 or more)",
+  "iss.splitConfirm": "File {count} child issues and reject the parent",
+  "iss.splitNeed2": "At least 2 child issues are required",
+  "iss.splitFrom": "split child",
+  "iss.splitInto": "split into {count}",
+  "aud.act.split": "split"
 }

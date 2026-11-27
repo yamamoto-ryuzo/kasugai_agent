@@ -31,10 +31,10 @@ stateDiagram-v2
     detected --&gt; deduped : 正規化・重複判定
     deduped --&gt; dropped : 既知/重複
     deduped --&gt; assessed : 新規
-    assessed --&gt; gated : 人ゲート待ち (external等)
+    assessed --&gt; gated : 人ゲート待ち (external・&lt;br/&gt;大規模=分割提案 等)
     assessed --&gt; queued : 自律対象（対応待ち）
     gated --&gt; queued : 人が承認
-    gated --&gt; rejected : 人が却下
+    gated --&gt; rejected : 人が却下 or 分割起票&lt;br/&gt;（splitInto に子 key 群）
     queued --&gt; running : 一覧の対応ボタンで dispatch&lt;br/&gt;（自動起動しない）
     queued --&gt; planning : dispatch（planGate 課題は&lt;br/&gt;先に計画生成）
     queued --&gt; rejected : 人が却下
@@ -58,6 +58,13 @@ stateDiagram-v2
         対応/却下ボタンで人が一括判断する。
         対応は起票/承認/再実行を兼ねた即時 dispatch
         （未起票は rate-limit を人判断で bypass）
+    end note
+    note right of rejected
+        分割起票（manual-0577d650）: assess が閾値超
+        （splitMaxBytes/splitMaxItems）の大規模課題を
+        splitProposal 付きで gated へ。人の「分割起票」で
+        子課題群（source=split・splitFrom=親key）を起票し、
+        親は rejected へ。子は通常 intake で queued へ進む
     end note
     done --&gt; [*]
     rejected --&gt; [*]

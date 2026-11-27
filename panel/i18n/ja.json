@@ -366,5 +366,14 @@
   "sil.remove": "解除",
   "sil.note": "matcher（source/repo/kind、空欄=任意）に合う候補を指定期間だけ課題化しません。期限切れで自動解除されます",
   "cand.df.inhibited": "抑制中",
-  "iss.backoff": "バックオフ"
+  "iss.backoff": "バックオフ",
+  "src.split": "分割",
+  "iss.split": "分割起票",
+  "iss.splitProp": "分割提案",
+  "iss.splitPrompt": "子課題のタイトルを「 | 」区切りで編集（2件以上）",
+  "iss.splitConfirm": "{count} 件の子課題を起票し、親課題は却下します",
+  "iss.splitNeed2": "子課題は2件以上必要です",
+  "iss.splitFrom": "分割子課題",
+  "iss.splitInto": "{count}件に分割済み",
+  "aud.act.split": "分割起票"
 }

@@ -87,5 +87,7 @@
     "panel": true,
     "docs": true,
     "prompts": false
-  }
+  },
+  "splitMaxBytes": 4000,
+  "splitMaxItems": 8
 }
