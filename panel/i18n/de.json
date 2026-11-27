@@ -375,5 +375,12 @@
   "iss.splitNeed2": "Mindestens 2 Unter-Issues erforderlich",
   "iss.splitFrom": "aufgeteiltes Issue",
   "iss.splitInto": "in {count} aufgeteilt",
-  "aud.act.split": "Aufteilen"
+  "aud.act.split": "Aufteilen",
+  "iss.followups": "Follow-up-Eingaben",
+  "iss.snapshot": "Intake-Snapshot",
+  "iss.fuNone": "(keine Follow-ups)",
+  "iss.fuConsumed": "injiziert",
+  "iss.fuPh": "Nachtrag zum Issue…",
+  "iss.fuAdd": "hinzufügen",
+  "aud.act.followup": "Follow-up"
 }

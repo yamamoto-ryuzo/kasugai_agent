@@ -140,6 +140,95 @@ pub fn set_field(root: &Path, key: &str, field: &str, v: Value) -> Result<Value,
     Ok(out)
 }
 
+/// 起票後の追記（followUp。intake-snapshot.mmd・manual-15667606）:
+/// 起票時に freeze した intakeSnapshot には混入せず followUps[] へ記録し、
+/// run 中の課題へは見せない（次回 run の prompt で「フォローアップ入力」
+/// として注入されるまで保持）。ref 指定時は同一 ref の重複追記を抑止する
+/// （detector が同じ事象を再 emit しても followUps が増殖しない）。
+/// 戻り値 Ok(true)=追記 / Ok(false)=重複抑止 / Err=課題なし
+pub fn add_followup(
+    root: &Path,
+    key: &str,
+    kind: &str,
+    text: &str,
+    ref_: Option<&str>,
+) -> Result<bool, String> {
+    let mut issues = store::load_issues(root);
+    let Some(i) = issues
+        .iter_mut()
+        .find(|x| x.get("key").and_then(|v| v.as_str()) == Some(key))
+    else {
+        return Err("not found".into());
+    };
+    let o = i.as_object_mut().unwrap();
+    let mut fus: Vec<Value> = o
+        .get("followUps")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    if let Some(r) = ref_ {
+        if !r.is_empty()
+            && fus
+                .iter()
+                .any(|f| f.get("ref").and_then(|v| v.as_str()) == Some(r))
+        {
+            return Ok(false);
+        }
+    }
+    let mut fu = json!({
+        "at": now_iso(),
+        "kind": kind,
+        "text": text,
+        "consumedAt": Value::Null,
+    });
+    if let Some(r) = ref_ {
+        if !r.is_empty() {
+            fu["ref"] = json!(r);
+        }
+    }
+    fus.push(fu);
+    o.insert("followUps".into(), json!(fus));
+    o.insert("updatedAt".into(), json!(now_iso()));
+    store::save_issues(root, &issues);
+    Ok(true)
+}
+
+/// 未消費の followUps を全て consumedAt 記録（run の spawn 成功時に呼ぶ。
+/// run 中の課題には後続追記を見せない凍結の対称処理）
+pub fn consume_followups(root: &Path, key: &str) {
+    let mut issues = store::load_issues(root);
+    let Some(i) = issues
+        .iter_mut()
+        .find(|x| x.get("key").and_then(|v| v.as_str()) == Some(key))
+    else {
+        return;
+    };
+    let now = now_iso();
+    let o = i.as_object_mut().unwrap();
+    let mut fus: Vec<Value> = o
+        .get("followUps")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let mut touched = false;
+    for f in fus.iter_mut() {
+        let consumed = f
+            .get("consumedAt")
+            .and_then(|v| v.as_str())
+            .is_some_and(|s| !s.is_empty());
+        if !consumed {
+            f.as_object_mut()
+                .unwrap()
+                .insert("consumedAt".into(), json!(now));
+            touched = true;
+        }
+    }
+    if touched {
+        o.insert("followUps".into(), json!(fus));
+        store::save_issues(root, &issues);
+    }
+}
+
 /// 分割起票（manual-0577d650・issue-lifecycle.mmd）: 人操作で親課題を
 /// 子課題群へ分ける。items 省略時は splitProposal.items を使う。
 /// 子は source="split"・splitFrom=親 key で通常 intake 起票される
@@ -991,6 +1080,16 @@ fn intake_inner(root: &Path, cand: &Value, force: bool) -> IntakeOutcome {
         "planGate": cand.get("planGate").cloned().unwrap_or(Value::Null),
         "symptomHash": sh,
         "status": ST_ASSESSED,
+        // intake スナップショット（intake-snapshot.mmd・manual-15667606）:
+        // 起票時点の課題コンテキストを freeze。dispatch prompt はこの
+        // スナップショットを使い、起票後の追記は followUps として
+        // 別途記録し run 中には見せない
+        "intakeSnapshot": {
+            "title": title,
+            "body": body,
+            "at": now,
+        },
+        "followUps": [],
         "autonomous": false,
         "retries": 0,
         "verifyBacks": 0,
@@ -1742,6 +1841,49 @@ mod tests {
             IntakeOutcome::Created(_) => {}
             _ => panic!("expected count promotion"),
         }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // ---- intake スナップショット + followUps ----
+
+    #[test]
+    fn intake_freezes_snapshot_and_followups_flow() {
+        let root = temp_root("snap");
+        let (issue, created) = intake_v(&root, &cand("original title", "original body"));
+        assert!(created);
+        let key = issue["key"].as_str().unwrap().to_string();
+        // 起票時に intakeSnapshot が freeze される
+        assert_eq!(issue["intakeSnapshot"]["title"], json!("original title"));
+        assert_eq!(issue["intakeSnapshot"]["body"], json!("original body"));
+        assert_eq!(issue["followUps"], json!([]));
+
+        // 起票後の追記は followUps へ（本文には混入しない）
+        assert!(add_followup(&root, &key, "manual", "first note", None).unwrap());
+        assert!(add_followup(&root, &key, "ci-failure", "ci note", Some("ci-1")).unwrap());
+        // 同一 ref は重複追記しない
+        assert!(!add_followup(&root, &key, "ci-failure", "ci note dup", Some("ci-1")).unwrap());
+        assert!(add_followup(&root, "no-such", "x", "y", None).is_err());
+
+        let it = store::load_issues(&root)
+            .into_iter()
+            .find(|i| i["key"] == json!(key))
+            .unwrap();
+        let fus = it["followUps"].as_array().unwrap();
+        assert_eq!(fus.len(), 2);
+        assert_eq!(fus[1]["ref"], json!("ci-1"));
+        assert!(fus.iter().all(|f| f["consumedAt"].is_null()));
+
+        // consume で未消費分が consumedAt 記録される
+        consume_followups(&root, &key);
+        let it = store::load_issues(&root)
+            .into_iter()
+            .find(|i| i["key"] == json!(key))
+            .unwrap();
+        assert!(it["followUps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|f| f["consumedAt"].as_str().is_some()));
         let _ = std::fs::remove_dir_all(&root);
     }
 

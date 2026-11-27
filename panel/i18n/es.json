@@ -375,5 +375,12 @@
   "iss.splitNeed2": "Se requieren al menos 2 sub-issues",
   "iss.splitFrom": "sub-issue dividido",
   "iss.splitInto": "dividido en {count}",
-  "aud.act.split": "dividir"
+  "aud.act.split": "dividir",
+  "iss.followups": "entradas de seguimiento",
+  "iss.snapshot": "instantánea de intake",
+  "iss.fuNone": "(sin seguimientos)",
+  "iss.fuConsumed": "inyectado",
+  "iss.fuPh": "nota de seguimiento…",
+  "iss.fuAdd": "añadir",
+  "aud.act.followup": "seguimiento"
 }

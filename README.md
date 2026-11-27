@@ -333,6 +333,33 @@ flowchart LR
     SK[.devin/skills/slug<br/>slug=source+repo+kind<br/>learn が育てる SKILL draft<br/>runbook の学習版に相当] -.->|kind の粒度は共通| RB1
 ```
 
+- **intake スナップショット**: 課題レコード作成時に `intakeSnapshot`
+  （`{title, body, at}`）を freeze する。dispatch prompt の課題本文は
+  起票時点のスナップショットを使い、起票後の追記（ci-failure 親課題
+  リンク・`POST /api/issues/:key/followup`）は `followUps[]` に記録して
+  run 中の課題には混入させない。未消費の followUps は次回 run の
+  prompt に「フォローアップ入力」として別節で注入し、spawn 成功時に
+  consumed 化する（Copilot coding agent の「assign 時点のコンテキストのみ
+  見える」モデルに相当）
+
+<!-- diagram: intake-snapshot -->
+```mermaid
+---
+title: intake コンテキストのスナップショット
+---
+flowchart TD
+    FILE[課題レコード作成<br/>detect-pipeline.mmd NEW] --> SNAP[intakeSnapshot を freeze<br/>{title, body, at}<br/>起票時点の課題コンテキスト]
+    SNAP --> QUEUE[queued → dispatch]
+    QUEUE --> PROMPT[dispatch prompt 組立<br/>runner.build_prompt]
+    PROMPT --> USE[課題本文は intakeSnapshot<br/>を使う（live 本文ではない）<br/>+ 未消費 followUps を<br/>「フォローアップ入力」として別節注入]
+    USE --> RUN[runner 非対話実行]
+    RUN --> CONSUME[spawn 成功時に<br/>followUps を consumed<br/>（run 中は新規追記を見せない）]
+
+    LATER[起票後の追記<br/>ci-failure 親課題リンク /<br/>POST /api/issues/:key/followup] --> FU[followUps[] へ追記<br/>{at, kind, text, ref, consumedAt}<br/>ref 同一は重複追記しない]
+    FU -.->|次回 run の prompt で<br/>未消費分だけ見せる| USE
+    FU -.->|run 中の課題には<br/>混入しない| PROMPT
+```
+
 ### 5.5 verify（L0〜L4）
 
 | 層 | 内容 | 例 |

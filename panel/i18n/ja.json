@@ -375,5 +375,12 @@
   "iss.splitNeed2": "子課題は2件以上必要です",
   "iss.splitFrom": "分割子課題",
   "iss.splitInto": "{count}件に分割済み",
-  "aud.act.split": "分割起票"
+  "aud.act.split": "分割起票",
+  "iss.followups": "フォローアップ入力",
+  "iss.snapshot": "起票時スナップショット",
+  "iss.fuNone": "（追記なし）",
+  "iss.fuConsumed": "注入済み",
+  "iss.fuPh": "課題への追記…",
+  "iss.fuAdd": "追記",
+  "aud.act.followup": "フォローアップ"
 }

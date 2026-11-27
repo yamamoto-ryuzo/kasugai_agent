@@ -375,5 +375,12 @@
   "iss.splitNeed2": "至少需要2个子议题",
   "iss.splitFrom": "拆分子议题",
   "iss.splitInto": "已拆分为{count}个",
-  "aud.act.split": "拆分"
+  "aud.act.split": "拆分",
+  "iss.followups": "后续输入",
+  "iss.snapshot": "接收快照",
+  "iss.fuNone": "（无后续）",
+  "iss.fuConsumed": "已注入",
+  "iss.fuPh": "对问题的追记…",
+  "iss.fuAdd": "追记",
+  "aud.act.followup": "跟进"
 }

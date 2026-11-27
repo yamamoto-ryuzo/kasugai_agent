@@ -375,5 +375,12 @@
   "iss.splitNeed2": "At least 2 child issues are required",
   "iss.splitFrom": "split child",
   "iss.splitInto": "split into {count}",
-  "aud.act.split": "split"
+  "aud.act.split": "split",
+  "iss.followups": "follow-up inputs",
+  "iss.snapshot": "intake snapshot",
+  "iss.fuNone": "(no follow-ups)",
+  "iss.fuConsumed": "injected",
+  "iss.fuPh": "follow-up note for the issue…",
+  "iss.fuAdd": "add",
+  "aud.act.followup": "follow-up"
 }

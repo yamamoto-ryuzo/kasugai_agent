@@ -375,5 +375,12 @@
   "iss.splitNeed2": "하위 이슈가 2개 이상 필요합니다",
   "iss.splitFrom": "분할된 하위 이슈",
   "iss.splitInto": "{count}건으로 분할됨",
-  "aud.act.split": "분할"
+  "aud.act.split": "분할",
+  "iss.followups": "후속 입력",
+  "iss.snapshot": "인테이크 스냅샷",
+  "iss.fuNone": "(후속 입력 없음)",
+  "iss.fuConsumed": "주입됨",
+  "iss.fuPh": "이슈에 후속 메모…",
+  "iss.fuAdd": "추가",
+  "aud.act.followup": "후속"
 }

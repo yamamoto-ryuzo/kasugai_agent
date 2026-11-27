@@ -3199,12 +3199,15 @@ async fn api_candidates_action(
     }
 }
 
-// POST /api/issues/{key}/{approve|reject|requeue|push-approve|dispatch|split}
+// POST /api/issues/{key}/{approve|reject|requeue|push-approve|dispatch|followup|split}
 // gated→queued(承認) / gated|queued|failed→rejected(却下) / failed→queued(再実行) /
 // verifying の課題へ pushApproved:true 付与（requirePushApproval repo の人ゲート） /
 // queued→running の即時 dispatch（runner の dispatch lock/can_dispatch 経由。
 // dispatch はこの人操作のみが行い、drain は queued を自動起動しない。
 // gated/failed からの dispatch は承認・再実行を兼ねる）。
+// followup は {text} を課題の followUps へ追記する（intake-snapshot.mmd。
+// 起票時 freeze の intakeSnapshot には混入せず、次回 run の prompt で
+// 「フォローアップ入力」として注入される）
 // split は {items:[{title,body}]}（省略時は splitProposal.items）で親課題を
 // 子課題群へ分割起票する（manual-0577d650。子=source:split・splitFrom=親key、
 // 親=splitInto 記録→rejected）
@@ -3214,6 +3217,31 @@ async fn api_issues_action(
     AxPath((key, action)): AxPath<(String, String)>,
     b: Bytes,
 ) -> Response {
+    // followup は body {text} を受ける追記操作（状態遷移ではない）
+    if action == "followup" {
+        let a = body_json(b).await;
+        let text = a
+            .get("text")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim();
+        if text.is_empty() {
+            return err(StatusCode::BAD_REQUEST, "text required");
+        }
+        return match crate::pipeline::add_followup(
+            &app.root,
+            &key,
+            "manual",
+            text,
+            None,
+        ) {
+            Ok(_) => {
+                app.sse("issues", &json!({}));
+                j(json!({"ok": true}))
+            }
+            Err(e) => err(StatusCode::NOT_FOUND, &e),
+        };
+    }
     // split は body {items:[{title,body}]} を受ける分割起票操作
     // （manual-0577d650。items 省略時は課題の splitProposal.items を使う）
     if action == "split" {

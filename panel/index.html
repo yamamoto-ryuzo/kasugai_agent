@@ -2475,6 +2475,16 @@ async function issueAct(key, action) {
   if (!r.ok) alert(r.error || 'error');
   loadMgmt();
 }
+// follow-up 追記: 起票時 freeze の課題本文（intakeSnapshot）には混入せず
+// followUps へ記録し、次回 run の prompt で「フォローアップ入力」として渡す
+async function issueFollowup(key) {
+  const el = document.getElementById('fu-text');
+  const text = (el?.value || '').trim();
+  if (!text) return;
+  const r = await J('POST', `/api/issues/${encodeURIComponent(key)}/followup`, { text });
+  if (!r.ok) alert(r.error || 'error');
+  loadMgmt();
+}
 // 分割起票（manual-0577d650）: splitProposal.items を初期値に、人が
 // | 区切りで子課題タイトル群を編集して分割する。提案 items に一致する
 // タイトルは提案の body を引き継ぐ
@@ -2716,8 +2726,22 @@ function renderIssue(i) {
         `<div class="muted">${esc(fmtTs(r.startedAt))}` +
         (r.sessionLog ? ` &middot; ${esc(r.sessionLog)}` : '') + '</div>').join('') +
       '</div>' : '';
+  // intake スナップショット + followUps（起票後の追記は本文に混入せず
+  // 次回 run のフォローアップ入力として渡す。intake-snapshot.mmd）
+  const fus = (i.followUps || []);
+  const fuCard = '<div class="rcard" style="max-width:none"><b>' + esc(t('iss.followups')) + '</b>' +
+    (i.intakeSnapshot && i.intakeSnapshot.at
+      ? `<div class="muted">${esc(t('iss.snapshot'))}: ${esc(fmtTs(i.intakeSnapshot.at))}</div>` : '') +
+    (fus.length
+      ? fus.map((f) =>
+          `<div class="muted">[${esc(f.kind || 'note')}] ${esc(f.text)} ` +
+          `<span class="muted">${esc(fmtTs(f.at))}` +
+          (f.consumedAt ? ` &middot; ${esc(t('iss.fuConsumed'))}` : '') + '</span></div>').join('')
+      : `<div class="muted">${esc(t('iss.fuNone'))}</div>`) +
+    `<div class="pbtns"><input id="fu-text" placeholder="${esc(t('iss.fuPh'))}" style="flex:1">` +
+    `<button onclick="issueFollowup('${esc(i.key)}')">${esc(t('iss.fuAdd'))}</button></div></div>`;
   const box = document.getElementById('box');
-  box.innerHTML = renderItemHead(i, true) + info + plan + drevCard + members + runs + renderItemBody(i.body);
+  box.innerHTML = renderItemHead(i, true) + info + plan + members + runs + fuCard + renderItemBody(i.body);
   Viewer.drawMermaid(box);
   box.scrollTop = 0;
 }

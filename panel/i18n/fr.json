@@ -375,5 +375,12 @@
   "iss.splitNeed2": "Au moins 2 sous-tickets requis",
   "iss.splitFrom": "sous-ticket issu d'une scission",
   "iss.splitInto": "scindé en {count}",
-  "aud.act.split": "diviser"
+  "aud.act.split": "diviser",
+  "iss.followups": "entrées de suivi",
+  "iss.snapshot": "instantané d'intake",
+  "iss.fuNone": "(aucun suivi)",
+  "iss.fuConsumed": "injecté",
+  "iss.fuPh": "note de suivi…",
+  "iss.fuAdd": "ajouter",
+  "aud.act.followup": "suivi"
 }

@@ -777,6 +777,9 @@ async fn run_and_verify(
             return;
         }
     };
+    // prompt に注入した followUps を consumed 化（spawn 成功後のみ。
+    // 起動失敗で消費すると追記を誰にも見せずに失う）
+    pipeline::consume_followups(root, key);
 
     // stdout/stderr → conlog + run.log バッファ
     let src = format!("run {}", key.rsplit(':').next().unwrap_or(key));
@@ -892,6 +895,17 @@ fn build_prompt_full(root: &Path, issue: &Value) -> (String, Value) {
             .unwrap_or("")
             .to_string()
     };
+    // intake スナップショット（intake-snapshot.mmd・manual-15667606）:
+    // 課題本文は起票時に freeze した intakeSnapshot を使う。起票後の追記は
+    // followUps へ入り run 中の課題には混入しない
+    let snap = issue.get("intakeSnapshot").cloned().unwrap_or(json!({}));
+    let snap_get = |k: &str| {
+        snap.get(k)
+            .and_then(|v| v.as_str())
+            .map(String::from)
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| get(k))
+    };
     let key = get("key");
     let level = issue
         .get("verifyLevel")
@@ -908,8 +922,8 @@ fn build_prompt_full(root: &Path, issue: &Value) -> (String, Value) {
         ("verifyLevel", level),
         ("priority", prio),
         ("acceptance", get("acceptance")),
-        ("title", get("title")),
-        ("body", get("body")),
+        ("title", snap_get("title")),
+        ("body", snap_get("body")),
     ];
     let subst = |s: String| -> String {
         let mut out = s;
@@ -952,6 +966,32 @@ fn build_prompt_full(root: &Path, issue: &Value) -> (String, Value) {
     if !lsec.is_empty() {
         p.push_str("\n\n## 失敗レッスン（同種の失敗を繰り返さない）\n\n");
         p.push_str(&lsec);
+    }
+    // 起票後の追記（followUps）: 課題スナップショットには混入せず、
+    // 未消費分のみ「フォローアップ入力」として別節で注入する
+    // （run 中の追記は次回 run まで見せない。intake-snapshot.mmd）
+    let fus: Vec<&Value> = issue
+        .get("followUps")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter(|f| {
+                    f.get("consumedAt")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.is_empty())
+                        .unwrap_or(true)
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    if !fus.is_empty() {
+        p.push_str("\n\n## フォローアップ入力（起票後の追記）\n\n");
+        for f in fus {
+            let kind = f.get("kind").and_then(|v| v.as_str()).unwrap_or("note");
+            let text = f.get("text").and_then(|v| v.as_str()).unwrap_or("");
+            let at = f.get("at").and_then(|v| v.as_str()).unwrap_or("");
+            p.push_str(&format!("- [{}] {} （{}）\n", kind, text, at));
+        }
     }
     // 計画承認ゲート（manual-883d17ee）: 承認済み計画を持つ課題は
     // 計画を prompt に注入し、計画どおりの実装を指示する
@@ -2014,6 +2054,37 @@ mod tests {
         assert_eq!(it["verifyBacks"], json!(1));
         assert_eq!(it["runs"].as_array().unwrap().len(), 1);
         assert!(it["verifyNote"].is_string());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn build_prompt_uses_intake_snapshot_and_followups() {
+        // intake-snapshot.mmd: prompt の課題本文は freeze した intakeSnapshot、
+        // 起票後の追記は未消費分のみ「フォローアップ入力」として別節注入
+        let root = temp_root("prompt");
+        let mut issue = queued_issue("manual:t/r:snap1", "t/r", 1);
+        issue["title"] = json!("live title");
+        issue["body"] = json!("live body");
+        issue["intakeSnapshot"] = json!({
+            "title": "frozen title", "body": "frozen body", "at": now_iso(),
+        });
+        issue["followUps"] = json!([
+            {"at": now_iso(), "kind": "ci-failure", "text": "ci broke",
+             "ref": "ci-1", "consumedAt": Value::Null},
+            {"at": now_iso(), "kind": "manual", "text": "old note",
+             "consumedAt": now_iso()},
+        ]);
+        let p = build_prompt_full(&root, &issue).0;
+        assert!(p.contains("frozen title"), "prompt: {}", p);
+        assert!(p.contains("frozen body"));
+        assert!(!p.contains("live title"));
+        assert!(p.contains("フォローアップ入力"));
+        assert!(p.contains("ci broke"));
+        assert!(!p.contains("old note"), "consumed は注入しない");
+        // スナップショット無しの課題は live 値を使う（後方互換）
+        let issue2 = queued_issue("manual:t/r:snap2", "t/r", 1);
+        let p2 = build_prompt_full(&root, &issue2).0;
+        assert!(p2.contains("テスト課題"));
         let _ = std::fs::remove_dir_all(&root);
     }
 
