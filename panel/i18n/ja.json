@@ -289,6 +289,8 @@
   "iss.stuck": "スタック",
   "iss.budgetHold": "予算保留",
   "iss.riskHold": "リスク確認",
+  "iss.lastBlocker": "ブロッカー",
+  "iss.partial": "部分保全",
   "iss.riskRejected": "リスク却下",
   "iss.pushApprove": "push 承認",
   "det.detected": "検出",

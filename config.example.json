@@ -76,6 +76,7 @@
   "stuckDetect": true,
   "riskConfirm": true,
   "riskHighPatterns": [],
+  "partialPreserve": true,
   "stormWindowMinutes": 10,
   "maxConcurrentRuns": 4,
   "retentionDays": 0,

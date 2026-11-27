@@ -289,6 +289,8 @@
   "iss.stuck": "festgefahren",
   "iss.budgetHold": "Budget-Stopp",
   "iss.riskHold": "Risiko-Prüfung",
+  "iss.lastBlocker": "Blocker",
+  "iss.partial": "teilweise gesichert",
   "iss.riskRejected": "Risiko abgelehnt",
   "iss.pushApprove": "Push genehmigen",
   "det.detected": "erkannt",

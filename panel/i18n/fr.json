@@ -289,6 +289,8 @@
   "iss.stuck": "bloqué",
   "iss.budgetHold": "budget en attente",
   "iss.riskHold": "risque en attente",
+  "iss.lastBlocker": "blocage",
+  "iss.partial": "partiel sauvegardé",
   "iss.riskRejected": "risque refusé",
   "iss.pushApprove": "approuver le push",
   "det.detected": "détecté",

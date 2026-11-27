@@ -1190,6 +1190,24 @@ async fn fail_run(
         // ACE カウンタ（manual-bcf981dd）: この run に注入したレッスンは
         // 成果に結びつかなかったので harmful++
         lessons::record_outcome(&app.root, &it, false, &app.cfg().await);
+    // 部分成果保全（manual-7df2ce2f）: 失敗 run の途中成果も
+    // kasugai/partial-* branch へ保全し、詰まり内容を記録する
+    if let Some(it) = find_issue(&app.root, key) {
+        let _ = pipeline::set_field(
+            &app.root,
+            key,
+            "lastBlocker",
+            json!({"kind": "failed", "reason": reason, "at": now_iso(), "run": run_idx}),
+        );
+        if let Some(repo) = App::git_repo(
+            &app.cfg().await,
+            it.get("repo").and_then(|v| v.as_str()).unwrap_or(""),
+        )
+        .cloned()
+        {
+            preserve_partial(app, key, &it, &repo, run_idx, reason).await;
+        }
+    }
     }
     if pipeline::request_transition(&app.root, key, pipeline::ST_FAILED).is_ok() {
         conlog("runner", "err", &format!("{}: run 失敗: {}", key, reason));
@@ -1263,6 +1281,150 @@ async fn halt_run(
         "at": now_iso(),
         "run": run_idx,
     }));
+    // 部分成果保全（manual-7df2ce2f）: 未コミット＋未push の作業を
+    // kasugai/partial-* branch へ保全 push する
+    preserve_partial(app, key, issue, repo, run_idx, &desc).await;
+    // run 記録に halt を残す
+    {
+        let mut extra = Map::new();
+        extra.insert("endedAt".into(), json!(now_iso()));
+        extra.insert("halted".into(), json!(true));
+        extra.insert("halt".into(), h);
+        update_run(root, key, run_idx, extra);
+    }
+    audit::record(
+        root,
+        key,
+        "system",
+        "run.halt",
+        Some(run_idx),
+        Map::from_iter([
+            ("kind".into(), json!(kind)),
+            ("reason".into(), json!(desc)),
+        ]),
+    );
+    // trajectory の終了理由: stuck / limit（予算）/ halt（cancel・risk）
+    let end_kind = match kind.as_str() {
+        "stuck" => "stuck",
+        "budget" => "limit",
+        _ => "halt",
+    };
+    tstep(&obs.traj, "state", "halted", json!({"kind": kind, "reason": desc}));
+    tfin(&obs.traj, end_kind, &desc);
+    if let Some(t) = &obs.trace {
+        t.event("run.halt", Map::from_iter([("kind".into(), json!(kind))]));
+        t.finish_root(false, &desc);
+    }
+    // running → queued（run 制御差し戻し。verifyBacks 不消費）
+    if pipeline::request_transition(root, key, pipeline::ST_QUEUED).is_ok() {
+        conlog(
+            "runner",
+            "warn",
+            &format!("{}: run halt（{}）→ queued", key, desc),
+        );
+    }
+    app.sse("issues", &json!({}));
+}
+
+/// 部分成果保全（manual-7df2ce2f・run-control.mmd）: halt・failed 時に
+/// 未コミット＋未push の作業を `git stash create` でコミット化
+/// （worktree は触らない）して `kasugai/partial-*` branch へ push する。
+/// 保全先は課題の `partial` フィールドに記録し、次回 dispatch の
+/// prompt で参照できるようにする（partialPreserve=off で無効化）
+async fn preserve_partial(
+    app: &Shared,
+    key: &str,
+    issue: &Value,
+    repo: &Value,
+    run_idx: usize,
+    reason: &str,
+) {
+    let cfg = app.cfg().await;
+    if !cfg_bool_default_true(&cfg, "partialPreserve") {
+        return;
+    }
+    let _ = issue;
+    let repo_path = PathBuf::from(
+        repo.get("path").and_then(|v| v.as_str()).unwrap_or(""),
+    );
+    if !repo_path.is_dir() {
+        return;
+    }
+    // 保全対象: 未コミットの WIP（stash create。親は HEAD なので未push
+    // コミットもツリーに含まれる）。WIP 無しなら未push HEAD を保全する
+    let (c, sha) = git(&repo_path, &["stash", "create"]).await;
+    let wip = sha.trim().to_string();
+    let target = if c == 0 && !wip.is_empty() {
+        wip
+    } else if unpushed_range(&repo_path).await.is_some() {
+        "HEAD".to_string()
+    } else {
+        conlog(
+            "runner",
+            "sys",
+            &format!("{}: 保全する部分成果なし（{}）", key, reason),
+        );
+        return;
+    };
+    let (_, rem) = git(&repo_path, &["remote"]).await;
+    let remote = rem
+        .lines()
+        .map(|l| l.trim())
+        .find(|l| *l == "origin")
+        .or_else(|| rem.lines().map(|l| l.trim()).find(|l| !l.is_empty()))
+        .map(String::from);
+    let Some(remote) = remote else {
+        return;
+    };
+    let branch = format!(
+        "kasugai/partial-{}-r{}",
+        knowledge::key_slug(key),
+        run_idx
+    );
+    let (pc, pout) = git(
+        &repo_path,
+        &[
+            "push",
+            &remote,
+            &format!("{}:refs/heads/{}", target, branch),
+        ],
+    )
+    .await;
+    if pc != 0 {
+        conlog(
+            "runner",
+            "err",
+            &format!("{}: 部分成果の保全 push 失敗: {}", key, pout),
+        );
+        return;
+    }
+    let _ = pipeline::set_field(
+        &app.root,
+        key,
+        "partial",
+        json!({
+            "branch": branch,
+            "remote": remote,
+            "at": now_iso(),
+            "run": run_idx,
+            "reason": crate::redact::scrub(reason),
+        }),
+    );
+    audit::record(
+        &app.root,
+        key,
+        "system",
+        "partial.preserved",
+        Some(run_idx),
+        Map::from_iter([("branch".into(), json!(branch.clone()))]),
+    );
+    conlog(
+        "runner",
+        "sys",
+        &format!("{}: 部分成果を {} へ保全（{}）", key, branch, reason),
+    );
+}
+
 
 async fn run_and_verify(
     app: &Shared,
@@ -1821,6 +1983,11 @@ fn build_prompt_full(root: &Path, issue: &Value) -> (String, Value) {
             pat, det
         ));
     }
+    if let Some(b) = issue.get("lastBlocker").filter(|v| !v.is_null()) {
+        let reason = b.get("reason").and_then(|v| v.as_str()).unwrap_or("");
+        p.push_str("\n\n## 前回 run のブロック内容\n\n");
+        p.push_str(&format!("前回の run はこの点で詰まった: {}\n", reason));
+    }
     if let Some(r) = issue.get("riskRejected").filter(|v| !v.is_null()) {
         let reason = r.get("reason").and_then(|v| v.as_str()).unwrap_or("");
         let label = r
@@ -1833,6 +2000,14 @@ fn build_prompt_full(root: &Path, issue: &Value) -> (String, Value) {
             "前回 run の行動（{}）は人に却下された。理由: {}\n\
              同じ方針を取らず、リスクの低い別アプローチで対応すること\n",
             label, reason
+        ));
+    }
+    if let Some(pt) = issue.get("partial").filter(|v| !v.is_null()) {
+        let br = pt.get("branch").and_then(|v| v.as_str()).unwrap_or("");
+        p.push_str("\n\n## 前回 run の部分成果\n\n");
+        p.push_str(&format!(
+            "前回 run の途中成果は branch `{}` に保全済み。必要なら参照・取り込みできる\n",
+            br
         ));
     }
     }

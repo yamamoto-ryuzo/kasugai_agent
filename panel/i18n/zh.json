@@ -289,6 +289,8 @@
   "iss.stuck": "卡死",
   "iss.budgetHold": "预算保留",
   "iss.riskHold": "风险确认",
+  "iss.lastBlocker": "阻塞",
+  "iss.partial": "部分保全",
   "iss.riskRejected": "风险已拒绝",
   "iss.pushApprove": "批准推送",
   "det.detected": "检测",

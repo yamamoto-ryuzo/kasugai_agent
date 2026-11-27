@@ -289,6 +289,8 @@
   "iss.stuck": "스턱",
   "iss.budgetHold": "예산 보류",
   "iss.riskHold": "리스크 확인",
+  "iss.lastBlocker": "차단 요인",
+  "iss.partial": "부분 보존",
   "iss.riskRejected": "리스크 거부됨",
   "iss.pushApprove": "push 승인",
   "det.detected": "감지",

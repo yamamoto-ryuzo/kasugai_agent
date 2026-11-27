@@ -367,6 +367,11 @@ flowchart TD
   「許可」は `riskAllowed` に記録して即 dispatch、「拒否 {reason}」は
   `riskRejected` に記録して queued で待機し、次回 prompt に却下理由を
   注入して別アプローチを促す
+- **失敗 run の部分成果保全（manual-7df2ce2f）**: halt・failed 時に
+  未コミット＋未push の作業を `kasugai/partial-*` branch へ保全 push
+  （`git stash create` で worktree を触らずコミット化）し、詰まった点を
+  `lastBlocker` に記録する。次回 dispatch prompt へ注入される
+  （`partialPreserve=off` で無効化）
 - **Stuck Detector（manual-1a459b0c）**: 実行体の出力行から非生産
   パターンを検出（stuck.rs。同一行4回・同一 error 行3回・同一行3連続の
   独白相当・2パターン交互6行・context window error 連続）して run を
