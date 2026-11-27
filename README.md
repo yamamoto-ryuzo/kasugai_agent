@@ -348,6 +348,14 @@ flowchart TD
   `RunCtl.cancel` を立てて旧 run を中断（child kill）し `queued` へ戻してから
   起動する。人の「中断」ボタンも同じ経路で `queued` へ戻す
   （verifyBacks は消費しない）
+- **課題単位の実行予算（manual-94172864）**: assess が `issue.budget`
+  `{maxSteps, maxWallMinutes, maxCostUsd}` を設定する
+  （config 既定: `budgetMaxSteps`/`budgetMaxWallMinutes`/
+  `budgetMaxCostUsd`。0=その上限は無効）。maxSteps は出力行数、
+  maxWallMinutes は run 単位の壁時計、maxCostUsd は課題の累積費用で判定。
+  上限到達は失敗ではなく run を halt して `budgetHold` を記録し
+  `queued` へ戻す（LimitsExceeded を trajectory 終了理由に記録）。
+  「上限延長」ボタン（POST extend）で `budgetExtend` を加算して再 dispatch
 - **Stuck Detector（manual-1a459b0c）**: 実行体の出力行から非生産
   パターンを検出（stuck.rs。同一行4回・同一 error 行3回・同一行3連続の
   独白相当・2パターン交互6行・context window error 連続）して run を
@@ -966,6 +974,9 @@ flowchart TD
   秘匿系は `denied` として返すが本文は返さない）
 - `POST /api/issues/:key/cancel` — 実行中 run の中断（running|verifying →
   queued。同一 key の再 dispatch も同じ経路で旧 run を止める。run-control.mmd）
+- `POST /api/issues/:key/extend` — `{cycles?,steps?,wallMinutes?,costUsd?}` で
+  runCycleCap・issue.budget の上限を延長して再 dispatch
+  （省略時は config の extend* 既定増分）
 - `POST /api/issues/:key/dispatch` / `POST /api/issues/:key/approve` / `reject`
 - `GET /api/proposals` / `POST /api/proposals/:id/accept|decline`
 - `GET /api/repos` — repos 一覧。`config.repos` 登録済みに加え、IDE ワークスペース

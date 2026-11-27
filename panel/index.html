@@ -2506,6 +2506,11 @@ async function loadMgmt() {
       btns.push(`<button onclick="event.stopPropagation();issueAct('${esc(i.key)}','reject')">${esc(t('iss.reject'))}</button>`);
     } else if (st === 'queued') {
       btns.push(`<button onclick="event.stopPropagation();issueAct('${esc(i.key)}','dispatch')">${esc(t('iss.dispatch'))}</button>`);
+      // 上限延長（manual-94172864/-175e7229）: 予算 halt 済み・
+      // 延長歴のある課題は上限を引き上げて再 dispatch する
+      if (i.budgetHold || i.cycleCapExtend != null) {
+        btns.push(`<button onclick="event.stopPropagation();issueExtend('${esc(i.key)}')">${esc(t('iss.extend'))}</button>`);
+      }
       btns.push(`<button onclick="event.stopPropagation();issueAct('${esc(i.key)}','reject')">${esc(t('iss.reject'))}</button>`);
     } else if (st === 'failed') {
       btns.push(`<button onclick="event.stopPropagation();issueAct('${esc(i.key)}','requeue')">${esc(t('iss.requeue'))}</button>`);
@@ -2523,6 +2528,7 @@ async function loadMgmt() {
       (indent ? ' style="margin-left:22px"' : '') +
       ` onclick="openIssue('${esc(i.key)}')" data-tip="${esc(tipText((i.title ? i.title + '\n\n' : '') + (i.body ? i.body + '\n\n' : '') + t('prop.open.tip')))}"><div>` +
       `<span class="pill ${issuePill[st] || ''}">${esc(tx('iss.st.' + st, st))}</span>` +
+      `${i.budgetHold ? `<span class="pill def">${esc(t('iss.budgetHold'))}</span>` : ''}` +
       `${i.lastStuck ? `<span class="pill def">${esc(t('iss.stuck'))}</span>` : ''}` +
       `${i.retryAfter && new Date(i.retryAfter) > new Date() ? `<span class="pill def">${esc(t('iss.backoff'))}</span>` : ''}` +
       `${(i.priority ?? 1) >= 2 ? `<span class="pill prio">P${i.priority}</span>` : ''}<b>${esc(i.title)}</b></div>` +
@@ -2604,6 +2610,12 @@ async function issueAct(key, action, body) {
 }
   if (!r.ok) alert(r.error || 'error');
   loadMgmt();
+// 上限延長（manual-94172864/-175e7229）: cycleCapExtend・budgetExtend を
+// 引き上げて即 dispatch する。延長幅は body で指定可（省略は server 既定）
+async function issueExtend(key) {
+  if (!confirm(t('iss.extendConfirm'))) return;
+  await issueAct(key, 'extend', {});
+}
 }
 // follow-up 追記: 起票時 freeze の課題本文（intakeSnapshot）には混入せず
 // followUps へ記録し、次回 run の prompt で「フォローアップ入力」として渡す
@@ -2786,6 +2798,7 @@ function renderItemHead(it, isIssue) {
     btns.push(`<button onclick="issueAct('${esc(it.key)}','reject')">${esc(t('iss.reject'))}</button>`);
   } else if (st === 'queued') {
     btns.push(`<button onclick="issueAct('${esc(it.key)}','dispatch')">${esc(t('iss.dispatch'))}</button>`);
+    btns.push(`<button onclick="issueExtend('${esc(it.key)}')">${esc(t('iss.extend'))}</button>`);
     btns.push(`<button onclick="issueAct('${esc(it.key)}','reject')">${esc(t('iss.reject'))}</button>`);
   } else if (st === 'failed') {
     btns.push(`<button onclick="issueAct('${esc(it.key)}','requeue')">${esc(t('iss.requeue'))}</button>`);
@@ -2820,6 +2833,7 @@ function renderItemHead(it, isIssue) {
     (!isIssue && !st ? `<span class="pill wait">${esc(t('cand.unfiled'))}</span>` : '') +
     (!isIssue ? dfPill(it) : '') +
     (isIssue && it.retryAfter && new Date(it.retryAfter) > new Date()
+    (isIssue && it.budgetHold ? `<span class="pill def">${esc(t('iss.budgetHold'))}</span>` : '') +
     (isIssue && it.lastStuck ? `<span class="pill def">${esc(t('iss.stuck'))}</span>` : '') +
       ? `<span class="pill def">${esc(t('iss.backoff'))}: ${esc(fmtTs(it.retryAfter))}</span>` : '') +
     `<span class="pill">${esc(tx('src.' + (it.source || ''), it.source || ''))}</span>` +
@@ -2860,6 +2874,7 @@ function renderIssue(i) {
       // run 制御の構造化記録（run-control.mmd）: halt 理由・詰まり・
       // 保全先・リスク採否を表示する
       (i.lastStuck ? `<div class="muted">${esc(t('iss.stuck'))}: ${esc(i.lastStuck.pattern || '')} ${esc(i.lastStuck.detail || '')}</div>` : '') +
+      (i.budgetHold ? `<div class="muted">${esc(t('iss.budgetHold'))}: ${esc(i.budgetHold.field || '')} ${i.budgetHold.limit ?? ''}</div>` : '') +
       (i.remediation ? `<div class="muted">${esc(t('iss.remediation'))}: ${esc(i.remediation)} (#${(i.remediationStage ?? 0) + 1})</div>` : '') +
       `<div class="muted">retries: ${i.retries ?? 0} &middot; verifyBacks: ${i.verifyBacks ?? 0}</div>` +
       '</div>' : '';

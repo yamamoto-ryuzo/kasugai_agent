@@ -3323,6 +3323,71 @@ async fn api_issues_action(
             Err(e) => err(StatusCode::CONFLICT, &e),
         };
     }
+    // extend は body {cycleCap?: 追加分, budget?: {maxSteps?,
+    // maxWallMinutes?, maxCostUsd?}} で上限を引き上げて再 dispatch
+    // （manual-94172864・manual-175e7229。cycleCapExtend / budgetExtend
+    // に加算される）
+    if action == "extend" {
+        let a = body_json(b).await;
+        let cfg = app.cfg().await;
+        let Some(it) = crate::store::load_issues(&app.root)
+            .into_iter()
+            .find(|i| i.get("key").and_then(|v| v.as_str()) == Some(key.as_str()))
+        else {
+            return err(StatusCode::NOT_FOUND, "issue not found");
+        };
+        let cur_cycle = it
+            .get("cycleCapExtend")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let add_cycle = a
+            .get("cycleCap")
+            .and_then(|v| v.as_u64())
+            .unwrap_or_else(|| crate::config::cfg_u64(&cfg, "runCycleCap", 3));
+        let _ = crate::pipeline::set_field(
+            &app.root,
+            &key,
+            "cycleCapExtend",
+            json!(cur_cycle + add_cycle),
+        );
+        if let Some(b) = a.get("budget").and_then(|v| v.as_object()) {
+            let mut ext = it
+                .get("budgetExtend")
+                .and_then(|v| v.as_object())
+                .cloned()
+                .unwrap_or_default();
+            for k in ["maxSteps", "maxWallMinutes", "maxCostUsd"] {
+                if let Some(add) = b.get(k).and_then(|v| v.as_f64()) {
+                    let cur = ext
+                        .get(k)
+                        .and_then(|v| v.as_f64())
+                        .unwrap_or(0.0);
+                    ext.insert(k.to_string(), json!(cur + add));
+                }
+            }
+            let _ = crate::pipeline::set_field(
+                &app.root,
+                &key,
+                "budgetExtend",
+                Value::Object(ext),
+            );
+        }
+        crate::audit::record(
+            &app.root,
+            &key,
+            "human",
+            "extend",
+            None,
+            Map::from_iter([("cycleCap".into(), json!(add_cycle))]),
+        );
+        return match crate::runner::dispatch_issue(&app, &key).await {
+            Ok(issue) => {
+                app.sse("issues", &json!({}));
+                j(json!({"ok": true, "issue": issue}))
+            }
+            Err(e) => err(StatusCode::CONFLICT, &e),
+        };
+    }
     }
     let (from, to) = match action.as_str() {
         "approve" => (crate::pipeline::ST_GATED, crate::pipeline::ST_QUEUED),

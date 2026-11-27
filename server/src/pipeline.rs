@@ -574,6 +574,17 @@ fn assess(cfg: &Value, issues: &[Value], issue: &mut Value) {
     o.insert("autonomous".into(), json!(autonomous));
     o.insert("priority".into(), json!(priority));
     o.insert("verifyLevel".into(), json!(level));
+    // 課題単位の実行予算（manual-94172864・run-control.mmd）: step（出力行）/
+    // wall-time/cost の上限。0=その上限は無効。上限到達は失敗ではなく
+    // budgetHold で人の延長判断を要求し、extend で budgetExtend を加算する
+    o.insert(
+        "budget".into(),
+        json!({
+            "maxSteps": cfg_u64(&cfg, "budgetMaxSteps", 2000),
+            "maxWallMinutes": cfg_f64(&cfg, "budgetMaxWallMinutes", 0.0),
+            "maxCostUsd": cfg_f64(&cfg, "budgetMaxCostUsd", 0.0),
+        }),
+    );
     o.insert("planGate".into(), json!(plan_gate));
     if !basis.is_null() {
         o.insert("verifyLevelBasis".into(), basis);
@@ -1247,6 +1258,54 @@ pub fn can_dispatch(cfg: &Value, issues: &[Value], key: &str) -> Result<(), Stri
         {
             return Err(format!("retry backoff until {}", ra));
         }
+    // 累積費用予算（manual-94172864）: budget.maxCostUsd + budgetExtend
+    // .maxCostUsd を runs[].usage.costUsd の累計が超えたら
+    // LimitsExceeded → 上限延長の人判断を要求（0=無制限）
+    {
+        let lim = issue
+            .get("budget")
+            .and_then(|b| b.get("maxCostUsd"))
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0)
+            + issue
+                .get("budgetExtend")
+                .and_then(|b| b.get("maxCostUsd"))
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.0);
+        if lim > 0.0 {
+            let spent: f64 = issue
+                .get("runs")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|r| {
+                            r.get("usage")
+                                .and_then(|u| u.get("costUsd"))
+                                .and_then(|v| v.as_f64())
+                        })
+                        .sum()
+                })
+                .unwrap_or(0.0);
+            if spent >= lim {
+                return Err(format!(
+                    "LimitsExceeded: costUsd {:.2} >= {:.2} (extend で上限延長)",
+                    spent, lim
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// config.maxConcurrentRuns（既定4・0=無制限）超の同時 running|verifying
+/// でも Err（ブラスト半径上限。manual-a7e8d412）。直接モード
+/// （runner パイプライン）の dispatch が使う完全ガード。
+pub fn can_dispatch(cfg: &Value, issues: &[Value], key: &str) -> Result<(), String> {
+    can_dispatch_base(cfg, issues, key)?;
+    let issue = issues
+        .iter()
+        .find(|x| x.get("key").and_then(|v| v.as_str()) == Some(key))
+        .unwrap();
     }
     // 同時実行上限（medik8s maxUnhealthy 相当のクォーラム）。
     // planning（計画生成中）は dispatch 枠を占有する（plan_review は
