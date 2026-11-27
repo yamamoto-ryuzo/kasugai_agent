@@ -275,6 +275,47 @@ flowchart TD
   （`source=split`・`splitFrom`=親 key）へ分けると親は
   `splitInto` を記録して rejected になる（§3・manual-0577d650）
 
+#### 5.2.1 事案（incident）集約
+
+dedupe は完全一致の重複排除だが、複数 detector の症状が時間的・因果的に
+隣接する場合は **事案（incident）** として1グループに集約する
+（manual-343b5d37）。事案は `incidents.json` に記録され、課題は
+`incident` フィールドで所属先を指す。
+
+- **自動集約** — 起票された課題が既存 open 課題と関連する場合に
+  グルーピングする。明示リンク（`splitFrom`）は常に同一事案へ。
+  類似判定は同一 repo + `incidentWindowMinutes`（既定60分）内 +
+  `cases::score` が SIMILAR_MIN 以上。相手が未所属なら新規事案を作る
+- **手動 merge/unmerge** — 課題詳細の「事案へ結合」「事案から外す」
+  （`POST /api/incidents/merge` / `unmerge`）。空の事案は自動削除
+- **事案単位の参照・dispatch** — ISSUES 一覧は事案→課題群の2階層表示。
+  事案ヘッダの dispatch は事案の queued メンバーを一括起動し、
+  dispatch prompt には事案メンバー一覧が注入される
+
+<!-- diagram: incidents -->
+```mermaid
+---
+title: 事案（incident）集約
+---
+flowchart TD
+    NEW[新規課題の起票<br/>（intake 完了）] --> REL{関連する<br/>open 課題あり?}
+    REL -->|splitFrom リンク<br/>（分割子課題）| JOIN[相手の事案へ追加<br/>issue.incident=id]
+    REL -->|同一 repo + 時間窓<br/>incidentWindowMinutes 内 +<br/>類似 score&gt;=SIMILAR_MIN| MATCH{相手は事案所属?}
+    MATCH -->|yes| JOIN
+    MATCH -->|no| CREATE[新規事案を作成し<br/>両課題を所属化]
+    REL -->|なし| SOLO[単独課題<br/>（事案なし）]
+    JOIN --> LIST[ISSUES 一覧は<br/>事案→課題群の<br/>2階層表示]
+    CREATE --> LIST
+    SOLO --> LIST
+    subgraph OPS[人操作]
+        MERGE[merge: 選択課題群を<br/>1事案へ結合<br/>（POST /api/incidents/merge）]
+        UNMERGE[unmerge: 課題を事案から外す<br/>空の事案は削除<br/>（POST /api/incidents/unmerge）]
+    end
+    MERGE --> LIST
+    UNMERGE --> LIST
+    LIST --> DISP[事案 dispatch:<br/>queued メンバーを<br/>一括 dispatch]
+    DISP --> RUN[課題ごとの dispatch<br/>（issue-lifecycle.mmd）]
+```
 
 ### 5.3 gate（人ゲート）
 
@@ -620,6 +661,7 @@ flowchart TD
 | `issues.json` | 課題レコード（status・verifyLevel・retry 回数） | 対象外 |
 | `candidates.json` | 未評価の候補一覧 | 対象外 |
 | `silences.json` | 起票ミュート（matcher+期限の silence 一覧） | 対象外 |
+| `incidents.json` | 事案（incident）レコード（members=課題 key 群） | 対象外 |
 | `work-queue.json` | 実行待ちキュー | 対象外 |
 | `knowledge/` | 課題単位の知見 | 対象外 |
 | `proposals/` | 人ゲート待ちの提案 | 対象外 |

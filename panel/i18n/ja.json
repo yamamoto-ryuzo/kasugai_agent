@@ -383,5 +383,11 @@
   "iss.fuConsumed": "注入済み",
   "iss.fuPh": "課題への追記…",
   "iss.fuAdd": "追記",
-  "aud.act.followup": "フォローアップ"
+  "aud.act.followup": "フォローアップ",
+  "iss.incident": "事案",
+  "iss.incMembers": "{count} 課題",
+  "iss.incDispatch": "事案 dispatch",
+  "iss.incMerge": "事案へ結合",
+  "iss.incUnmerge": "事案から外す",
+  "iss.incMergePrompt": "結合相手の課題 key または事案 id（inc-…）を入力"
 }

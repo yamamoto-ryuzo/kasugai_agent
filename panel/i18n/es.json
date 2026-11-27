@@ -383,5 +383,11 @@
   "iss.fuConsumed": "inyectado",
   "iss.fuPh": "nota de seguimiento…",
   "iss.fuAdd": "añadir",
-  "aud.act.followup": "seguimiento"
+  "aud.act.followup": "seguimiento",
+  "iss.incident": "incidente",
+  "iss.incMembers": "{count} issues",
+  "iss.incDispatch": "despachar incidente",
+  "iss.incMerge": "fusionar en incidente",
+  "iss.incUnmerge": "quitar del incidente",
+  "iss.incMergePrompt": "Ingrese la clave del issue o id del incidente (inc-…) a fusionar"
 }

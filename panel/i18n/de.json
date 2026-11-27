@@ -383,5 +383,11 @@
   "iss.fuConsumed": "injiziert",
   "iss.fuPh": "Nachtrag zum Issue…",
   "iss.fuAdd": "hinzufügen",
-  "aud.act.followup": "Follow-up"
+  "aud.act.followup": "Follow-up",
+  "iss.incident": "Vorfall",
+  "iss.incMembers": "{count} Issues",
+  "iss.incDispatch": "Vorfall dispatchen",
+  "iss.incMerge": "in Vorfall zusammenführen",
+  "iss.incUnmerge": "aus Vorfall entfernen",
+  "iss.incMergePrompt": "Issue-Schlüssel oder Vorfall-ID (inc-…) zum Zusammenführen eingeben"
 }

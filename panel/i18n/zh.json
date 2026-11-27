@@ -383,5 +383,11 @@
   "iss.fuConsumed": "已注入",
   "iss.fuPh": "对问题的追记…",
   "iss.fuAdd": "追记",
-  "aud.act.followup": "跟进"
+  "aud.act.followup": "跟进",
+  "iss.incident": "事件",
+  "iss.incMembers": "{count} 个议题",
+  "iss.incDispatch": "事件调度",
+  "iss.incMerge": "合并到事件",
+  "iss.incUnmerge": "从事件移除",
+  "iss.incMergePrompt": "输入要合并的议题 key 或事件 id（inc-…）"
 }

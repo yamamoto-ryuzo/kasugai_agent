@@ -1191,6 +1191,22 @@ fn intake_inner(root: &Path, cand: &Value, force: bool) -> IntakeOutcome {
     issues.push(issue.clone());
     store::save_issues(root, &issues);
     sync_queue(root, &issues);
+    // 事案集約（incidents.mmd・manual-343b5d37）: 関連する open 課題が
+    // あれば同一事案へ所属化し issue.incident を記録する。
+    // GitHub closed 取込は過去履歴のため集約対象外
+    if !gh_closed
+        && crate::incidents::auto_assign(root, &issue).is_some()
+    {
+        let k = issue
+            .get("key")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        issue = store::load_issues(root)
+            .into_iter()
+            .find(|i| i.get("key").and_then(|v| v.as_str()) == Some(k.as_str()))
+            .unwrap_or(issue);
+    }
     IntakeOutcome::Created(issue)
 }
 

@@ -383,5 +383,11 @@
   "iss.fuConsumed": "주입됨",
   "iss.fuPh": "이슈에 후속 메모…",
   "iss.fuAdd": "추가",
-  "aud.act.followup": "후속"
+  "aud.act.followup": "후속",
+  "iss.incident": "사안",
+  "iss.incMembers": "이슈 {count}건",
+  "iss.incDispatch": "사안 디스패치",
+  "iss.incMerge": "사안에 병합",
+  "iss.incUnmerge": "사안에서 제외",
+  "iss.incMergePrompt": "병합할 이슈 key 또는 사안 id(inc-…)를 입력"
 }

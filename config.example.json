@@ -95,5 +95,6 @@
     "prompts": false
   },
   "splitMaxBytes": 4000,
-  "splitMaxItems": 8
+  "splitMaxItems": 8,
+  "incidentWindowMinutes": 60
 }

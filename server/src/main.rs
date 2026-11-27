@@ -32,6 +32,7 @@ mod evals;
 mod github;
 mod heartbeat;
 mod housekeep;
+mod incidents;
 mod knowledge;
 mod launch;
 mod lessons;

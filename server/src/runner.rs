@@ -993,6 +993,33 @@ fn build_prompt_full(root: &Path, issue: &Value) -> (String, Value) {
             p.push_str(&format!("- [{}] {} （{}）\n", kind, text, at));
         }
     }
+    // 事案（incidents.mmd・manual-343b5d37）: 所属事案のメンバー課題を
+    // コンテキストとして注入し、関連症状を一体の事案として扱わせる
+    if let Some(inc_id) = issue.get("incident").and_then(|v| v.as_str()) {
+        let me = issue.get("key").and_then(|v| v.as_str()).unwrap_or("");
+        let members: Vec<Value> = crate::incidents::load_incidents(root)
+            .into_iter()
+            .find(|i| i.get("id").and_then(|v| v.as_str()) == Some(inc_id))
+            .and_then(|i| i.get("members").and_then(|m| m.as_array()).cloned())
+            .unwrap_or_default();
+        if !members.is_empty() {
+            let issues = store::load_issues(root);
+            p.push_str("\n\n## 同一事案の関連課題（detector 横断の症状群）\n\n");
+            for mk in members.iter().filter_map(|k| k.as_str()) {
+                if mk == me {
+                    continue;
+                }
+                if let Some(m) = issues.iter().find(|i| {
+                    i.get("key").and_then(|v| v.as_str()) == Some(mk)
+                }) {
+                    let t = m.get("title").and_then(|v| v.as_str()).unwrap_or("");
+                    let s = m.get("status").and_then(|v| v.as_str()).unwrap_or("");
+                    let src = m.get("source").and_then(|v| v.as_str()).unwrap_or("");
+                    p.push_str(&format!("- {} [{} / {}] {}\n", mk, src, s, t));
+                }
+            }
+        }
+    }
     // 計画承認ゲート（manual-883d17ee）: 承認済み計画を持つ課題は
     // 計画を prompt に注入し、計画どおりの実装を指示する
     if let Some(plan) = issue

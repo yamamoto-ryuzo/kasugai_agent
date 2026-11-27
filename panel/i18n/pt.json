@@ -383,5 +383,11 @@
   "iss.fuConsumed": "injetado",
   "iss.fuPh": "nota de follow-up…",
   "iss.fuAdd": "adicionar",
-  "aud.act.followup": "follow-up"
+  "aud.act.followup": "follow-up",
+  "iss.incident": "incidente",
+  "iss.incMembers": "{count} issues",
+  "iss.incDispatch": "despachar incidente",
+  "iss.incMerge": "mesclar no incidente",
+  "iss.incUnmerge": "remover do incidente",
+  "iss.incMergePrompt": "Informe a chave do issue ou id do incidente (inc-…) a mesclar"
 }

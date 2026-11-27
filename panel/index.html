@@ -2335,10 +2335,11 @@ function kpiRows(issues) {
 }
 
 async function loadMgmt() {
-  const [st, sess, cand, iss, prop] = await Promise.all([
+  const [st, sess, cand, iss, prop, inc] = await Promise.all([
     J('GET', '/api/state'), J('GET', '/api/chat/sessions'),
     J('GET', '/api/candidates'), J('GET', '/api/issues'),
-    J('GET', '/api/proposals')]);
+    J('GET', '/api/proposals'), J('GET', '/api/incidents')]);
+  incList = inc.incidents || [];
   const sessions = (sess.sessions || []).filter((s) => matchRepo(s.repo));
   // candidates は人の判断待ちのみ表示（未起票・gated・queued・failed。
   // 起票は自動が既定で、実行中・終端の課題行は出さない。detect-pipeline.mmd）
@@ -2395,7 +2396,11 @@ async function loadMgmt() {
       `<div class="muted">${esc(tx('src.' + (c.source || 'manual'), c.source || 'manual'))} · ${esc(fmtTs(c.detectedAt))}</div>` +
       (btns.length ? `<div class="pbtns">${btns.join('')}</div>` : '') + `</div>`;
   }).join('') : `<div class="empty">${esc(t('cand.none'))}</div>`;
-  document.getElementById('missues').innerHTML = issues.length ? issues.map((i) => {
+  // ISSUES 一覧は事案（incident）→課題群の2階層（incidents.mmd）。
+  // 所属課題は事案ヘッダ行の下にインデント表示し、未所属は従来どおり
+  const incById = {};
+  for (const x of incList) incById[x.id] = x;
+  const issueRow = (i, indent) => {
     const st = i.status || '';
     const lvl = i.verifyLevel != null ? ` · L${i.verifyLevel}` : '';
     const btns = [];
@@ -2416,13 +2421,33 @@ async function loadMgmt() {
       btns.push(`<button onclick="event.stopPropagation();issueAct('${esc(i.key)}','push-approve')">${esc(t('iss.pushApprove'))}</button>`);
     }
     return `<div class="item${i.key === curItemKey && centerMode === 'issue' ? ' sel' : ''}"` +
+      (indent ? ' style="margin-left:22px"' : '') +
       ` onclick="openIssue('${esc(i.key)}')" data-tip="${esc(tipText((i.title ? i.title + '\n\n' : '') + (i.body ? i.body + '\n\n' : '') + t('prop.open.tip')))}"><div>` +
       `<span class="pill ${issuePill[st] || ''}">${esc(tx('iss.st.' + st, st))}</span>` +
       `${i.retryAfter && new Date(i.retryAfter) > new Date() ? `<span class="pill def">${esc(t('iss.backoff'))}</span>` : ''}` +
       `${(i.priority ?? 1) >= 2 ? `<span class="pill prio">P${i.priority}</span>` : ''}<b>${esc(i.title)}</b></div>` +
       `<div class="muted">${esc(tx('src.' + (i.source || ''), i.source || ''))}${lvl} · ${esc(fmtTs(i.updatedAt))}</div>` +
       (btns.length ? `<div class="pbtns">${btns.join('')}</div>` : '') + `</div>`;
-  }).join('') : `<div class="empty">${esc(t('iss.none'))}</div>`;
+  };
+  const incEmitted = new Set();
+  let issueRows = '';
+  for (const i of issues) {
+    const inc = i.incident && incById[i.incident];
+    if (!inc) { issueRows += issueRow(i, false); continue; }
+    if (incEmitted.has(inc.id)) continue;
+    incEmitted.add(inc.id);
+    const members = issues.filter((x) => x.incident === inc.id);
+    const nQueued = members.filter((x) => x.status === 'queued').length;
+    // 事案ヘッダ行: タイトル・件数・一括 dispatch（queued メンバーがある時）
+    issueRows += `<div class="item" data-tip="${esc(tipText(members.map((m) => m.title).join('\n')))}">` +
+      `<div><span class="pill">${esc(t('iss.incident'))}</span><b>${esc(inc.title || inc.id)}</b>` +
+      ` <span class="muted">${esc(t('iss.incMembers', { count: members.length }))}</span></div>` +
+      (nQueued ? `<div class="pbtns"><button onclick="event.stopPropagation();incDispatch('${esc(inc.id)}')">${esc(t('iss.incDispatch'))}</button></div>` : '') +
+      `</div>`;
+    for (const m of members) issueRows += issueRow(m, true);
+  }
+  document.getElementById('missues').innerHTML =
+    issueRows || `<div class="empty">${esc(t('iss.none'))}</div>`;
   propList = (prop.proposals || []).slice().reverse();
   document.getElementById('mprops').innerHTML = propList.length ? propList.map((pp) => {
     const fails = ((pp.vet && pp.vet.checks) || []).filter((x) => !x.ok).map((x) => x.name + ' ' + (x.path || ''));
@@ -2502,6 +2527,31 @@ async function issueSplit(key) {
   if (!confirm(t('iss.splitConfirm', { count: items.length }))) return;
   const r = await J('POST', `/api/issues/${encodeURIComponent(key)}/split`, { items });
   if (!r.ok) alert(r.error || 'error');
+  loadMgmt();
+}
+
+// ---------- incidents（事案 merge/unmerge/dispatch。incidents.mmd） ----------
+// merge は結合相手の課題 key または事案 id（inc-…）を prompt で受け取る
+async function issueMerge(key) {
+  const other = (prompt(t('iss.incMergePrompt')) || '').trim();
+  if (!other) return;
+  const body = other.startsWith('inc-')
+    ? { keys: [key], into: other }
+    : { keys: [key, other] };
+  const r = await J('POST', '/api/incidents/merge', body);
+  if (!r.ok) alert(r.error || 'error');
+  loadMgmt();
+}
+async function issueUnmerge(key) {
+  const r = await J('POST', '/api/incidents/unmerge', { key });
+  if (!r.ok) alert(r.error || 'error');
+  loadMgmt();
+}
+async function incDispatch(id) {
+  const r = await J('POST', `/api/incidents/${encodeURIComponent(id)}/dispatch`);
+  if (!r.ok) alert(r.error || 'error');
+  else if ((r.errors || []).length)
+    alert(r.errors.map((e) => `${e.key}: ${e.error}`).join('\n'));
   loadMgmt();
 }
 
@@ -2588,6 +2638,7 @@ function renderProposal(p) {
 // ---------- candidates / issues の詳細（中央ペイン表示） ----------
 let candList = [];      // loadMgmt が保持する candidates 一覧（カレント repo 絞込済み）
 let issueList = [];     // 同 issues 一覧
+let incList = [];       // 同事案（incident）一覧（incidents.mmd）
 let curItemKey = null;  // 中央ペインに詳細表示中の candidate/issue key
 // 管理セクションの行クリック → 中央ペインに詳細表示。
 // 行内の操作ボタンは一覧と同じくここからも操作できる
@@ -2647,6 +2698,14 @@ function renderItemHead(it, isIssue) {
   if (isIssue && it.splitProposal && (st === 'gated' || st === 'queued')) {
     btns.push(`<button onclick="issueSplit('${esc(it.key)}')">${esc(t('iss.split'))}</button>`);
   }
+  // 事案操作（incidents.mmd・manual-343b5d37）: merge は結合相手の課題 key
+  // または事案 id を prompt 指定、unmerge は所属事案から外す
+  if (isIssue) {
+    btns.push(`<button onclick="issueMerge('${esc(it.key)}')">${esc(t('iss.incMerge'))}</button>`);
+    if (it.incident) {
+      btns.push(`<button onclick="issueUnmerge('${esc(it.key)}')">${esc(t('iss.incUnmerge'))}</button>`);
+    }
+  }
   const labels = (it.labels || [])
     .map((l) => `<span class="pill">${esc(l)}</span>`).join('');
   return '<div class="rcard" style="max-width:none"><div><b>' + esc(it.title) + '</b> ' +
@@ -2662,6 +2721,7 @@ function renderItemHead(it, isIssue) {
       ? `<span class="pill def">${esc(t('iss.splitProp'))}${it.splitProposal.reason ? ': ' + esc(it.splitProposal.reason) : ''}</span>` : '') +
     (isIssue && it.splitFrom ? `<span class="pill">${esc(t('iss.splitFrom'))}</span>` : '') +
     (isIssue && it.splitInto ? `<span class="pill">${esc(t('iss.splitInto', { count: it.splitInto.length }))}</span>` : '') +
+    (isIssue && it.incident ? `<span class="pill">${esc(t('iss.incident'))}</span>` : '') +
     labels + '</div>' +
     `<div class="muted">${esc(it.key || '')}</div>` +
     `<div class="muted">${esc(t('det.detected'))}: ${esc(fmtTs(it.detectedAt))}` +
@@ -2721,6 +2781,14 @@ function renderIssue(i) {
       i.stormMembers.map((m) =>
         `<div class="muted">${esc(m.title)} <span class="muted">${esc(m.key)}</span></div>`)
         .join('') + '</div>' : '';
+  // 所属事案のメンバー一覧（incidents.mmd。detector 横断の関連課題群）
+  const inc = i.incident && incList.find((x) => x.id === i.incident);
+  const incCard = inc
+    ? '<div class="rcard" style="max-width:none"><b>' + esc(t('iss.incident')) +
+      ': ' + esc(inc.title || inc.id) + '</b>' +
+      ((inc.memberIssues || []).map((m) =>
+        `<div class="muted">${esc(m.title || m.key)} <span class="muted">${esc(m.status || '')}</span></div>`)
+        .join('')) + '</div>' : '';
   const runs = (i.runs || []).length
     ? '<div class="rcard" style="max-width:none"><b>' + esc(t('iss.runs')) + '</b>' +
       (i.runs || []).map((r) =>
@@ -2742,7 +2810,7 @@ function renderIssue(i) {
     `<div class="pbtns"><input id="fu-text" placeholder="${esc(t('iss.fuPh'))}" style="flex:1">` +
     `<button onclick="issueFollowup('${esc(i.key)}')">${esc(t('iss.fuAdd'))}</button></div></div>`;
   const box = document.getElementById('box');
-  box.innerHTML = renderItemHead(i, true) + info + plan + members + runs + fuCard + renderItemBody(i.body);
+  box.innerHTML = renderItemHead(i, true) + info + plan + members + incCard + runs + fuCard + renderItemBody(i.body);
   Viewer.drawMermaid(box);
   box.scrollTop = 0;
 }

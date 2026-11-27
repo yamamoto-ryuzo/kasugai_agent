@@ -3312,6 +3312,82 @@ async fn api_issues_action(
     }
 }
 
+// ---------- incidents（事案集約。incidents.mmd・manual-343b5d37） ----------
+// 事案は detector 横断の関連課題グループ（incidents.json）。課題は
+// incident フィールドで所属先 id を指す。merge/unmerge は人操作、
+// dispatch は事案の queued メンバーを一括起動する
+
+// GET /api/incidents — 事案一覧（memberIssues に課題の最小情報を解決済み）
+async fn api_incidents_get(State(app): State<Shared>) -> Response {
+    j(json!({"ok": true, "incidents": crate::incidents::list(&app.root)}))
+}
+
+// POST /api/incidents/merge — {keys:[issueKey,...], into?:<incidentId>}
+// keys の課題群を1事案へ結合（into 省略時は既存所属 or 新規事案）
+async fn api_incidents_merge(State(app): State<Shared>, b: Bytes) -> Response {
+    let a = body_json(b).await;
+    let keys: Vec<String> = a
+        .get("keys")
+        .and_then(|v| v.as_array())
+        .map(|ks| {
+            ks.iter()
+                .filter_map(|k| k.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    let into = a.get("into").and_then(|v| v.as_str());
+    match crate::incidents::merge(&app.root, &keys, into) {
+        Ok(inc) => {
+            app.sse("issues", &json!({}));
+            j(json!({"ok": true, "incident": inc}))
+        }
+        Err(e) => err(StatusCode::CONFLICT, &e),
+    }
+}
+
+// POST /api/incidents/unmerge — {key} 課題を事案から外す（空の事案は削除）
+async fn api_incidents_unmerge(State(app): State<Shared>, b: Bytes) -> Response {
+    let a = body_json(b).await;
+    let key = a.get("key").and_then(|v| v.as_str()).unwrap_or("");
+    if key.is_empty() {
+        return err(StatusCode::BAD_REQUEST, "key required");
+    }
+    match crate::incidents::unmerge(&app.root, key) {
+        Ok(v) => {
+            app.sse("issues", &json!({}));
+            j(v)
+        }
+        Err(e) => err(StatusCode::CONFLICT, &e),
+    }
+}
+
+// POST /api/incidents/{id}/dispatch — 事案の queued メンバーを一括 dispatch。
+// 各課題の起動は既存 dispatch 経路（can_dispatch・runner）に委譲し、
+// 起動できなかったメンバーは errors に集めて返す
+async fn api_incidents_action(
+    State(app): State<Shared>,
+    AxPath((id, action)): AxPath<(String, String)>,
+) -> Response {
+    if action != "dispatch" {
+        return err(StatusCode::NOT_FOUND, "unknown action");
+    }
+    match crate::incidents::dispatchable(&app.root, &id) {
+        Err(e) => err(StatusCode::NOT_FOUND, &e),
+        Ok(keys) => {
+            let mut dispatched = Vec::new();
+            let mut errors = Vec::new();
+            for k in keys {
+                match issue_gate_action(&app, &k, "dispatch").await {
+                    Ok(_) => dispatched.push(k),
+                    Err(e) => errors.push(json!({"key": k, "error": e})),
+                }
+            }
+            app.sse("issues", &json!({}));
+            j(json!({"ok": true, "dispatched": dispatched, "errors": errors}))
+        }
+    }
+}
+
 // ---------- silences（起票ミュート。matcher+期限・期限切れ自動解除） ----------
 // silences.json の 1レコード:
 //   {id, comment, createdBy, createdAt, startsAt?, endsAt,
@@ -3700,6 +3776,10 @@ pub fn router(app: Shared) -> Router {
         .route("/api/candidates/{key}/{action}", post(api_candidates_action))
         .route("/api/issues", get(api_issues_get))
         .route("/api/issues/{key}/{action}", post(api_issues_action))
+        .route("/api/incidents", get(api_incidents_get))
+        .route("/api/incidents/merge", post(api_incidents_merge))
+        .route("/api/incidents/unmerge", post(api_incidents_unmerge))
+        .route("/api/incidents/{id}/{action}", post(api_incidents_action))
         .route("/api/silences", get(api_silences_get).post(api_silences_post))
         .route("/api/silences/remove", post(api_silences_remove))
         .route("/api/proposals", get(api_proposals_get).post(api_proposals_post))

@@ -1,0 +1,21 @@
+---
+title: 事案（incident）集約
+---
+flowchart TD
+    NEW[新規課題の起票<br/>（intake 完了）] --> REL{関連する<br/>open 課題あり?}
+    REL -->|splitFrom リンク<br/>（分割子課題）| JOIN[相手の事案へ追加<br/>issue.incident=id]
+    REL -->|同一 repo + 時間窓<br/>incidentWindowMinutes 内 +<br/>類似 score&gt;=SIMILAR_MIN| MATCH{相手は事案所属?}
+    MATCH -->|yes| JOIN
+    MATCH -->|no| CREATE[新規事案を作成し<br/>両課題を所属化]
+    REL -->|なし| SOLO[単独課題<br/>（事案なし）]
+    JOIN --> LIST[ISSUES 一覧は<br/>事案→課題群の<br/>2階層表示]
+    CREATE --> LIST
+    SOLO --> LIST
+    subgraph OPS[人操作]
+        MERGE[merge: 選択課題群を<br/>1事案へ結合<br/>（POST /api/incidents/merge）]
+        UNMERGE[unmerge: 課題を事案から外す<br/>空の事案は削除<br/>（POST /api/incidents/unmerge）]
+    end
+    MERGE --> LIST
+    UNMERGE --> LIST
+    LIST --> DISP[事案 dispatch:<br/>queued メンバーを<br/>一括 dispatch]
+    DISP --> RUN[課題ごとの dispatch<br/>（issue-lifecycle.mmd）]
