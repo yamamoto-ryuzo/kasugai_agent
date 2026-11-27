@@ -157,3 +157,92 @@ pub fn build_back_prompt(v: &Verdict) -> String {
     lines.push("完了したら内容を簡潔に報告してください（実機検証は別途自動で行われます）。".to_string());
     lines.join("\n")
 }
+
+// ---------- 独立批評パス（planning critic / diff review 共通） ----------
+//
+// 実装の生成系とは別コンテキストの呼び出しが ```kasugai-review ブロックで
+// 批評結果を返す（manual-883d17ee 計画 critic・manual-475831d2 diff レビュー）。
+// finding は severity（severe / non-severe）+ confidence（0.0〜1.0）を持ち、
+// severe かつ confidence が閾値以上のものだけがゲートを止める。
+
+#[derive(Debug, Clone, Serialize)]
+pub struct Finding {
+    pub severity: String, // "severe" | "non-severe"（自由テキストも許容）
+    pub confidence: f64,
+    pub note: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct Review {
+    pub findings: Vec<Finding>,
+}
+
+fn review_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r"```kasugai-review[^\S\r\n]*\r?\n([\s\S]*?)```").unwrap()
+    })
+}
+
+/// テキスト中の ```kasugai-review ブロックから批評結果を抽出する。
+/// 複数ある場合は最後の有効ブロックを採用。
+pub fn extract_review(text: &str) -> Option<Review> {
+    let mut v = None;
+    for m in review_re().captures_iter(text) {
+        let o: serde_json::Value = match serde_json::from_str(&m[1]) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        if !o.is_object() {
+            continue;
+        }
+        let findings = o
+            .get("findings")
+            .and_then(|a| a.as_array())
+            .cloned()
+            .unwrap_or_default()
+            .iter()
+            .map(|e| {
+                let sev = e
+                    .get("severity")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .trim()
+                    .to_lowercase();
+                Finding {
+                    severity: if sev.is_empty() {
+                        "non-severe".into()
+                    } else {
+                        sev
+                    },
+                    confidence: e
+                        .get("confidence")
+                        .and_then(|v| v.as_f64())
+                        .unwrap_or(0.5)
+                        .clamp(0.0, 1.0),
+                    note: take_chars(
+                        e.get("note")
+                            .or_else(|| e.get("detail"))
+                            .or_else(|| e.get("problem"))
+                            .and_then(|v| v.as_str())
+                            .or_else(|| e.as_str())
+                            .unwrap_or("")
+                            .trim(),
+                        400,
+                    ),
+                }
+            })
+            .filter(|f: &Finding| !f.note.is_empty())
+            .collect::<Vec<_>>();
+        v = Some(Review { findings });
+    }
+    v
+}
+
+/// severe かつ confidence >= min の finding 一覧（ゲートを止める重大指摘）。
+pub fn severe_findings(r: &Review, min_confidence: f64) -> Vec<&Finding> {
+    r.findings
+        .iter()
+        .filter(|f| f.severity == "severe" && f.confidence >= min_confidence)
+        .collect()
+}

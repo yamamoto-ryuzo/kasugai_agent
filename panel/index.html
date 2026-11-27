@@ -2343,10 +2343,11 @@ async function loadMgmt() {
   // candidates は人の判断待ちのみ表示（未起票・gated・queued・failed。
   // 起票は自動が既定で、実行中・終端の課題行は出さない。detect-pipeline.mmd）
   const candidates = (cand.candidates || []).filter((c) => matchRepo(c.repo) &&
-    !['running', 'verifying', 'done', 'rejected', 'dropped'].includes(c.issueStatus || ''));
+    !['running', 'planning', 'plan_review', 'verifying', 'done', 'rejected', 'dropped'].includes(c.issueStatus || ''));
   candList = candidates;
-  const stRank = { verifying: 0, running: 1, retry: 2, queued: 3, gated: 4,
-                   assessed: 5, failed: 6, done: 7, rejected: 8, dropped: 9 };
+  const stRank = { verifying: 0, running: 1, planning: 2, plan_review: 3,
+                   retry: 4, queued: 5, gated: 6,
+                   assessed: 7, failed: 8, done: 9, rejected: 10, dropped: 11 };
   const issues = (iss.issues || []).filter(matchIssue).sort((a, b) =>
     (stRank[a.status] ?? 10) - (stRank[b.status] ?? 10) ||
     (b.priority ?? 1) - (a.priority ?? 1) ||
@@ -2375,7 +2376,8 @@ async function loadMgmt() {
     `<div class="kv"><span>${esc(t('st.detectors'))}</span><b>${detCell || '-'}</b></div>` +
     kpiRows(issues);
   const issuePill = { gated: 'wait', queued: 'wait', retry: 'wait',
-                      running: 'run', verifying: 'ver', done: 'live' };
+                      plan_review: 'wait',
+                      running: 'run', planning: 'run', verifying: 'ver', done: 'live' };
   // candidate 行は起票済み課題の status を併記（起票は自動が既定。
   // detect-pipeline.mmd）。全行 対応/却下ボタンで人が一括判断する
   document.getElementById('mcands').innerHTML = candidates.length ? candidates.map((c) => {
@@ -2405,6 +2407,10 @@ async function loadMgmt() {
       btns.push(`<button onclick="event.stopPropagation();issueAct('${esc(i.key)}','reject')">${esc(t('iss.reject'))}</button>`);
     } else if (st === 'failed') {
       btns.push(`<button onclick="event.stopPropagation();issueAct('${esc(i.key)}','requeue')">${esc(t('iss.requeue'))}</button>`);
+    } else if (st === 'plan_review') {
+      btns.push(`<button onclick="event.stopPropagation();issueAct('${esc(i.key)}','plan-approve')">${esc(t('iss.planApprove'))}</button>`);
+      btns.push(`<button onclick="event.stopPropagation();issueAct('${esc(i.key)}','plan-reject')">${esc(t('iss.planReject'))}</button>`);
+      btns.push(`<button onclick="event.stopPropagation();issueAct('${esc(i.key)}','reject')">${esc(t('iss.reject'))}</button>`);
     } else if (st === 'verifying' && !i.pushApproved &&
                repoOfIssue(i)?.requirePushApproval) {
       btns.push(`<button onclick="event.stopPropagation();issueAct('${esc(i.key)}','push-approve')">${esc(t('iss.pushApprove'))}</button>`);
@@ -2580,8 +2586,8 @@ const openIssue = (key) => openItem('issue', key);
 // URL・ラベル・人ゲート操作ボタン（issue は verifyLevel と push 承認も）
 function renderItemHead(it, isIssue) {
   const st = isIssue ? (it.status || '') : (it.issueStatus || '');
-  const pillCls = { gated: 'wait', queued: 'wait', retry: 'wait',
-                    running: 'run', verifying: 'ver', done: 'live' }[st] || '';
+  const pillCls = { gated: 'wait', queued: 'wait', retry: 'wait', plan_review: 'wait',
+                    running: 'run', planning: 'run', verifying: 'ver', done: 'live' }[st] || '';
   const btns = [];
   if (!isIssue) {
     // candidate: 判断待ち（未起票・gated・queued・failed）は 対応/却下
@@ -2598,6 +2604,10 @@ function renderItemHead(it, isIssue) {
     btns.push(`<button onclick="issueAct('${esc(it.key)}','reject')">${esc(t('iss.reject'))}</button>`);
   } else if (st === 'failed') {
     btns.push(`<button onclick="issueAct('${esc(it.key)}','requeue')">${esc(t('iss.requeue'))}</button>`);
+  } else if (st === 'plan_review') {
+    btns.push(`<button onclick="issueAct('${esc(it.key)}','plan-approve')">${esc(t('iss.planApprove'))}</button>`);
+    btns.push(`<button onclick="issueAct('${esc(it.key)}','plan-reject')">${esc(t('iss.planReject'))}</button>`);
+    btns.push(`<button onclick="issueAct('${esc(it.key)}','reject')">${esc(t('iss.reject'))}</button>`);
   }
   if (isIssue && st === 'verifying' && !it.pushApproved &&
       repoOfIssue(it)?.requirePushApproval) {
@@ -2639,7 +2649,21 @@ function renderIssue(i) {
     ? '<div class="rcard" style="max-width:none">' +
       (i.acceptance ? `<div class="muted">${esc(t('iss.acceptance'))}: ${esc(i.acceptance)}</div>` : '') +
       (i.verifyNote ? `<div class="muted">${esc(t('iss.verifyNote'))}: ${esc(i.verifyNote)}</div>` : '') +
+      (i.planNote ? `<div class="muted">${esc(t('iss.planNote'))}: ${esc(i.planNote)}</div>` : '') +
       `<div class="muted">retries: ${i.retries ?? 0} &middot; verifyBacks: ${i.verifyBacks ?? 0}</div>` +
+      '</div>' : '';
+  // 計画承認ゲート（manual-883d17ee）: 生成済み計画と critic 結果を表示
+  const criticFindings = ((i.planCritic || {}).findings) || [];
+  const plan = (i.plan || i.planNote || criticFindings.length)
+    ? '<div class="rcard" style="max-width:none"><b>' + esc(t('iss.plan')) + '</b>' +
+      (i.planAt ? `<div class="muted">${esc(fmtTs(i.planAt))}` +
+        (i.planApproved ? ` &middot; ${esc(t('iss.planApproved'))}` : '') + '</div>' : '') +
+      (i.plan ? `<div class="msg md" style="max-width:none">${Viewer.md(String(i.plan))}</div>` : '') +
+      (criticFindings.length
+        ? '<div class="muted">' + esc(t('iss.planCritic')) + ':</div>' +
+          criticFindings.map((f) =>
+            `<div class="muted">[${esc(f.severity || '')} ${Math.round((f.confidence ?? 0) * 100)}%] ${esc(f.note || '')}</div>`).join('')
+        : '') +
       '</div>' : '';
   const members = (i.stormMembers || []).length
     ? '<div class="rcard" style="max-width:none"><b>' +
@@ -2654,7 +2678,7 @@ function renderIssue(i) {
         (r.sessionLog ? ` &middot; ${esc(r.sessionLog)}` : '') + '</div>').join('') +
       '</div>' : '';
   const box = document.getElementById('box');
-  box.innerHTML = renderItemHead(i, true) + info + members + runs + renderItemBody(i.body);
+  box.innerHTML = renderItemHead(i, true) + info + plan + members + runs + renderItemBody(i.body);
   Viewer.drawMermaid(box);
   box.scrollTop = 0;
 }

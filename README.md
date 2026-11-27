@@ -60,7 +60,14 @@ stateDiagram-v2
     gated --> queued : 人が承認
     gated --> rejected : 人が却下
     queued --> running : 一覧の対応ボタンで dispatch<br/>（自動起動しない）
+    queued --> planning : dispatch（planGate 課題は<br/>先に計画生成）
     queued --> rejected : 人が却下
+    planning --> plan_review : 計画+critic 合格<br/>（autoApprovePlan=off）
+    planning --> running : 計画+critic 合格<br/>（autoApprovePlan=on）
+    planning --> queued : 計画生成失敗・<br/>critic で Severe 検出<br/>（計画差し戻し）
+    plan_review --> running : 人が計画承認<br/>or タイムアウト自動承認
+    plan_review --> queued : 計画差し戻し
+    plan_review --> rejected : 人が却下
     running --> verifying : 実装完了
     verifying --> done : 検証合格
     verifying --> retry : NG (差し戻し)
@@ -245,6 +252,8 @@ flowchart TD
 
 - **verifyLevel**（L0〜L4）— 全課題一律に L3/L4 を要求しない
 - **受入条件** — verify の合格基準として課題に紐付ける
+- **planGate** — 計画承認ゲート要否。L2 以上・爆破半径の大きい課題は
+  dispatch の前に実装計画の生成・批評・承認を挟む（§5.4）
 - **自律可否** — `external` ラベル・爆破半径・対象リポジトリの設定で判定
 - **priority**（0〜3）— 対応順の目安。urgent/critical/security 系=3、
   ci-failure・local-health 由来や bug 系=2、既定=1、
@@ -256,6 +265,7 @@ flowchart TD
 | ゲート | 条件 | 通過方法 |
 |---|---|---|
 | external 起票 | `external` ラベル付き Issue | パネルで人が承認 |
+| 計画承認 | assess が `planGate=true` とした課題 | パネルで計画を承認（`autoApprovePlan`・`planAutoApproveMinutes` で自動承認も可） |
 | proposal 採否 | 知見還流の提案全般 | パネルで人が採否 |
 | push 最終判断 | 対象リポジトリの `requirePushApproval` | パネルで承認（既定は verify 合格で自動） |
 
@@ -272,6 +282,15 @@ flowchart TD
   駆動する非対話セッション（`chat/acp.rs`）
 - **起動可否は論理競合ベース**（同時起動数の上限は設けない）:
   同一リポジトリの未完了 run、排他ロック中の実機リソースがある課題は待機
+- **計画承認ゲート（planGate）**: `planGate=true` の課題は dispatch で
+  実装に入らず、先ず `planning` で実装計画のみを生成する（コード変更・
+  コミットは行わない）。続けて独立コンテキストの Planning Critic が
+  計画を批評し、severity+confidence 付き findings を返す。Severe かつ
+  `planCriticMinConfidence`（既定0.7）以上の指摘があれば queued へ
+  差し戻す。critic 合格は `plan_review` で人の承認を待ち、承認で
+  `running` へ（`autoApprovePlan` かつ critic 合格なら即 running、
+  `planAutoApproveMinutes` で承認待ちのタイムアウト自動承認）。
+  `config.planGate=false` で機能全体を無効化できる
 - セッションには課題・受入条件・知見をプロンプトとして注入
 - **runbook（kind 別対処手順）**: `prompts/runbook/` に
   `<source>-<kind>.md` → `<kind>.md` → `<source>.md` の順で手順テンプレを

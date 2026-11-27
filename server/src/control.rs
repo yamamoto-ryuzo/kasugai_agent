@@ -3156,11 +3156,14 @@ async fn issue_gate_action(app: &Shared, key: &str, action: &str) -> Result<Valu
         "reject" => match cur.as_str() {
             crate::pipeline::ST_GATED
             | crate::pipeline::ST_QUEUED
+            | crate::pipeline::ST_PLAN_REVIEW
             | crate::pipeline::ST_FAILED => {
                 crate::pipeline::request_transition(&app.root, key, crate::pipeline::ST_REJECTED)
             }
-            s => Err(format!("issue is {} (gated|queued|failed required)", s)),
+            s => Err(format!("issue is {} (gated|queued|plan_review|failed required)", s)),
         },
+        "plan-approve" => crate::runner::plan_approve(app, key).await,
+        "plan-reject" => crate::runner::plan_reject(app, key).await,
         _ => Err("unknown action".into()),
     }
 }
@@ -3213,6 +3216,7 @@ async fn api_issues_action(
         "requeue" => (crate::pipeline::ST_FAILED, crate::pipeline::ST_QUEUED),
         "push-approve" => (crate::pipeline::ST_VERIFYING, ""),
         "dispatch" => ("", ""),
+        "plan-approve" | "plan-reject" => ("", ""),
         _ => return err(StatusCode::NOT_FOUND, "unknown action"),
     };
     let Some(cur) = issue_status(&app.root, &key) else {
@@ -3224,13 +3228,18 @@ async fn api_issues_action(
     let ok_from = match action.as_str() {
         "reject" | "dispatch" => matches!(
             cur.as_str(),
-            crate::pipeline::ST_GATED | crate::pipeline::ST_QUEUED | crate::pipeline::ST_FAILED
+            crate::pipeline::ST_GATED
+                | crate::pipeline::ST_QUEUED
+                | crate::pipeline::ST_PLAN_REVIEW
+                | crate::pipeline::ST_FAILED
         ),
+        "plan-approve" | "plan-reject" => cur == crate::pipeline::ST_PLAN_REVIEW,
         _ => cur == from,
     };
     if !ok_from {
         let want = match action.as_str() {
-            "reject" | "dispatch" => "gated|queued|failed",
+            "reject" | "dispatch" => "gated|queued|plan_review|failed",
+            "plan-approve" | "plan-reject" => "plan_review",
             _ => from,
         };
         return err(
@@ -3242,6 +3251,10 @@ async fn api_issues_action(
         crate::pipeline::set_field(&app.root, &key, "pushApproved", json!(true))
     } else if action == "dispatch" || action == "reject" {
         issue_gate_action(&app, &key, &action).await
+    } else if action == "plan-approve" {
+        crate::runner::plan_approve(&app, &key).await
+    } else if action == "plan-reject" {
+        crate::runner::plan_reject(&app, &key).await
     } else {
         crate::pipeline::request_transition(&app.root, &key, to)
     };

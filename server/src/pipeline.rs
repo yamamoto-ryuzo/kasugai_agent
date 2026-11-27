@@ -21,6 +21,8 @@ use crate::util::now_iso;
 pub const ST_ASSESSED: &str = "assessed";
 pub const ST_GATED: &str = "gated";
 pub const ST_QUEUED: &str = "queued";
+pub const ST_PLANNING: &str = "planning";
+pub const ST_PLAN_REVIEW: &str = "plan_review";
 pub const ST_RUNNING: &str = "running";
 pub const ST_VERIFYING: &str = "verifying";
 pub const ST_RETRY: &str = "retry";
@@ -33,6 +35,8 @@ pub const STATUSES: &[&str] = &[
     ST_ASSESSED,
     ST_GATED,
     ST_QUEUED,
+    ST_PLANNING,
+    ST_PLAN_REVIEW,
     ST_RUNNING,
     ST_VERIFYING,
     ST_RETRY,
@@ -41,6 +45,9 @@ pub const STATUSES: &[&str] = &[
     ST_REJECTED,
     ST_DROPPED,
 ];
+
+/// planning/plan_review は計画承認ゲート（manual-883d17ee）: planGate 課題は
+/// dispatch で実装前の計画生成 → critic 批評 → 人 or 自動承認後に running へ。
 
 /// 許可される遷移（detected/deduped は intake 内部で畳み込む）
 fn allowed(from: &str, to: &str) -> bool {
@@ -52,6 +59,15 @@ fn allowed(from: &str, to: &str) -> bool {
             | (ST_GATED, ST_REJECTED)
             | (ST_QUEUED, ST_REJECTED)
             | (ST_QUEUED, ST_RUNNING)
+            | (ST_QUEUED, ST_PLANNING)
+            | (ST_PLANNING, ST_PLAN_REVIEW)
+            | (ST_PLANNING, ST_RUNNING)
+            | (ST_PLANNING, ST_QUEUED)
+            | (ST_PLANNING, ST_FAILED)
+            | (ST_PLAN_REVIEW, ST_RUNNING)
+            | (ST_PLAN_REVIEW, ST_QUEUED)
+            | (ST_PLAN_REVIEW, ST_REJECTED)
+            | (ST_PLAN_REVIEW, ST_FAILED)
             | (ST_RUNNING, ST_VERIFYING)
             | (ST_RUNNING, ST_FAILED)
             | (ST_VERIFYING, ST_DONE)
@@ -188,6 +204,17 @@ fn blast_radius(issue: &Value) -> bool {
     t.contains("secrets.json") || t.contains("force-push") || t.contains("rm -rf")
 }
 
+/// 計画承認ゲート要否（manual-883d17ee）のルール判定。verifyLevel と同様に
+/// 一律には要求しない: 検証深度・優先度の高い課題（L2+ または P2+）のみ
+/// 実装前の計画レビューを経由させる。
+pub fn rule_plan_gate(issue: &Value, level: u64, priority: u64) -> bool {
+    // 明示指定（起票時の planGate フィールド）があればそれに従う
+    if let Some(v) = issue.get("planGate").and_then(|v| v.as_bool()) {
+        return v;
+    }
+    level >= 2 || priority >= 2
+}
+
 /// 単語単位の含有判定（"debug" が "bug" に誤爆しないように）
 fn has_word(t: &str, words: &[&str]) -> bool {
     t.split(|c: char| !c.is_alphanumeric())
@@ -267,10 +294,14 @@ fn assess(issues: &[Value], issue: &mut Value) {
         }
         None => rule_verify_level(issue),
     };
+    // 計画承認ゲート要否（manual-883d17ee）。planGate=true なら dispatch は
+    // 実装の前に planning（計画生成+critic）→ plan_review（承認）を経由する
+    let plan_gate = rule_plan_gate(issue, level, priority);
     let o = issue.as_object_mut().unwrap();
     o.insert("autonomous".into(), json!(autonomous));
     o.insert("priority".into(), json!(priority));
     o.insert("verifyLevel".into(), json!(level));
+    o.insert("planGate".into(), json!(plan_gate));
     if !basis.is_null() {
         o.insert("verifyLevelBasis".into(), basis);
     }
@@ -773,6 +804,7 @@ fn intake_inner(root: &Path, cand: &Value, force: bool) -> IntakeOutcome {
         "labels": cand.get("labels").cloned().unwrap_or(json!([])),
         "ghState": cand.get("ghState").cloned().unwrap_or(Value::Null),
         "ghStateReason": cand.get("ghStateReason").cloned().unwrap_or(Value::Null),
+        "planGate": cand.get("planGate").cloned().unwrap_or(Value::Null),
         "symptomHash": sh,
         "status": ST_ASSESSED,
         "autonomous": false,
@@ -803,6 +835,16 @@ fn intake_inner(root: &Path, cand: &Value, force: bool) -> IntakeOutcome {
         o.insert("verifyLevel".into(), json!(0));
     } else {
         assess(&issues, &mut issue);
+        // config.planGate=false は計画ゲートの全体無効化
+        // （candidate/課題の明示 planGate:true は残す）
+        if !crate::config::cfg_bool_default_true(&cfg, "planGate")
+            && cand.get("planGate").and_then(|v| v.as_bool()) != Some(true)
+        {
+            issue
+                .as_object_mut()
+                .unwrap()
+                .insert("planGate".into(), json!(false));
+        }
     }
     issues.push(issue.clone());
     store::save_issues(root, &issues);
@@ -839,7 +881,9 @@ pub fn can_dispatch(cfg: &Value, issues: &[Value], key: &str) -> Result<(), Stri
             return Err(format!("retry backoff until {}", ra));
         }
     }
-    // 同時実行上限（medik8s maxUnhealthy 相当のクォーラム）
+    // 同時実行上限（medik8s maxUnhealthy 相当のクォーラム）。
+    // planning（計画生成中）は dispatch 枠を占有する（plan_review は
+    // 実行リソースを使わない待機のため数えない）
     let max_runs = cfg_f64(cfg, "maxConcurrentRuns", 4.0) as i64;
     if max_runs > 0 {
         let active = issues
@@ -847,7 +891,7 @@ pub fn can_dispatch(cfg: &Value, issues: &[Value], key: &str) -> Result<(), Stri
             .filter(|x| {
                 matches!(
                     x.get("status").and_then(|v| v.as_str()),
-                    Some(ST_RUNNING) | Some(ST_VERIFYING)
+                    Some(ST_RUNNING) | Some(ST_VERIFYING) | Some(ST_PLANNING)
                 )
             })
             .count();
@@ -861,7 +905,7 @@ pub fn can_dispatch(cfg: &Value, issues: &[Value], key: &str) -> Result<(), Stri
             && x.get("repo").and_then(|v| v.as_str()) == Some(repo)
             && matches!(
                 x.get("status").and_then(|v| v.as_str()),
-                Some(ST_RUNNING) | Some(ST_VERIFYING)
+                Some(ST_RUNNING) | Some(ST_VERIFYING) | Some(ST_PLANNING)
             )
     }) {
         return Err(format!(

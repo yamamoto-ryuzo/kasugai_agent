@@ -108,12 +108,71 @@ async fn drain_inner(app: &Shared) {
     }
     // (a) 中断・承認待ちの再処理。run/verify は in-flight タスク側で完結するが、
     //     control 再起動や pushApproved 付与で残った分をここで拾う
+    let drain_cfg = app.cfg().await;
     for it in store::load_issues(&root) {
         let key = key_of(&it);
         if key.is_empty() || flight_has(&key) {
             continue;
         }
         match it.get("status").and_then(|v| v.as_str()) {
+            Some(pipeline::ST_PLANNING) => {
+                // 計画生成の追跡を喪失（control 再起動）→ queued へ戻す。
+                // 再 dispatch で計画からやり直す（計画フェーズは読み取り
+                // 専用なので安全にやり直せる）
+                let _ = pipeline::set_field(
+                    &root,
+                    &key,
+                    "planNote",
+                    json!("control 再起動で計画生成を中断"),
+                );
+                if pipeline::request_transition(&root, &key, pipeline::ST_QUEUED).is_ok() {
+                    conlog(
+                        "runner",
+                        "sys",
+                        &format!("{}: 中断した計画生成を queued へ差し戻し", key),
+                    );
+                    app.sse("issues", &json!({}));
+                }
+            }
+            Some(pipeline::ST_PLAN_REVIEW) => {
+                // タイムアウト自動承認（planAutoApproveMinutes > 0 のみ。
+                // 0=人の承認を無期限に待つ）。planAt から経過を見る
+                let mins = cfg_f64(&drain_cfg, "planAutoApproveMinutes", 0.0);
+                if mins <= 0.0 {
+                    continue;
+                }
+                let waited = it
+                    .get("planAt")
+                    .or_else(|| it.get("updatedAt"))
+                    .and_then(|v| v.as_str())
+                    .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                    .map(|t| {
+                        (chrono::Utc::now() - t.with_timezone(&chrono::Utc))
+                            .num_seconds() as f64
+                            / 60.0
+                    })
+                    .unwrap_or(0.0);
+                if waited < mins || !flight_add(&key) {
+                    continue;
+                }
+                let app2 = app.clone();
+                let key2 = key.clone();
+                tokio::spawn(async move {
+                    conlog(
+                        "runner",
+                        "sys",
+                        &format!("{}: 計画承認タイムアウト → 自動承認", key2),
+                    );
+                    if let Err(e) = plan_approve(&app2, &key2).await {
+                        conlog(
+                            "runner",
+                            "err",
+                            &format!("{}: 計画自動承認失敗: {}", key2, e),
+                        );
+                    }
+                    flight_del(&key2);
+                });
+            }
             Some(pipeline::ST_VERIFYING) => {
                 if !flight_add(&key) {
                     continue;
@@ -177,7 +236,16 @@ pub async fn dispatch_issue(app: &Shared, key: &str) -> Result<Value, String> {
         .into_iter()
         .find(|i| key_of(i) == key)
         .ok_or_else(|| "issue not found".to_string())?;
-    start_run(app, issue).await?;
+    // 計画承認ゲート（manual-883d17ee）: planGate 課題は実装着手前に
+    // planning（計画生成 + planning critic）を経由する。承認済み
+    // （planApproved）は通常通り running へ
+    if issue.get("planGate").and_then(|v| v.as_bool()) == Some(true)
+        && issue.get("planApproved").and_then(|v| v.as_bool()) != Some(true)
+    {
+        start_plan(app, issue).await?;
+    } else {
+        start_run(app, issue).await?;
+    }
     find_issue(&app.root, key).ok_or_else(|| "issue not found".to_string())
 }
 
@@ -258,6 +326,318 @@ async fn start_run(app: &Shared, issue: Value) -> Result<(), String> {
         flight_del(&key);
     });
     Ok(())
+}
+
+// ---------- 計画承認ゲート + Planning Critic（manual-883d17ee） ----------
+// dispatch 後・実装着手前に、実行体へ「実装計画のみ」を生成させ
+// （queued → planning）、第2呼び出しの planning critic が計画を批評する。
+// critic 合格後は autoApprovePlan=on なら即 running、off なら plan_review で
+// 人の承認（plan-approve API）or planAutoApproveMinutes の自動承認を待つ。
+
+/// 計画生成 prompt（prompts/plan.md で差替可）
+const DEFAULT_PLAN: &str = r#"以下の課題の「実装計画」を作成してください。まだコードは変更しないでください。
+
+- key: `{{key}}`
+- repo: `{{repo}}`
+- verifyLevel: L{{verifyLevel}}
+- 受入条件: {{acceptance}}
+
+## 課題
+
+{{title}}
+
+{{body}}
+
+## 出力ルール
+
+1. 対象リポジトリを読み取り専用で調査し、変更対象ファイル・実装手順・
+   確認方法・リスクを箇条書きした実装計画を日本語で出力する
+2. ファイルの変更・git commit は一切行わない（計画のみ）
+3. 最後に計画全文を ```kasugai-plan ブロックで出力する
+4. この実行は非対話（-p）モード。確認を求めず計画を出力して終了する"#;
+
+/// planning critic prompt（prompts/critic.md で差替可）
+const DEFAULT_CRITIC: &str = r#"以下は課題の実装計画です。計画を批評してください（実装はしない）。
+
+## 課題
+
+{{title}}
+
+{{body}}
+
+- verifyLevel: L{{verifyLevel}}
+- 受入条件: {{acceptance}}
+
+## 実装計画
+
+{{plan}}
+
+## 出力ルール
+
+1. 計画の抜け漏れ・誤った前提・受入条件を満たさない点・爆破半径を指摘する
+2. 指摘には severity（severe=このまま実装すべきでない /
+   non-severe=改善提案）と confidence（0.0〜1.0）を必ず付ける
+3. 問題がなければ findings は空配列にする
+4. 最後に必ず次の形式の結果ブロックを1つだけ出力する:
+
+```kasugai-review
+{"findings":[{"severity":"severe","confidence":0.9,"note":"指摘"}]}
+```
+
+5. この実行は非対話（-p）モード。確認を求めず批評を出力して終了する"#;
+
+/// ```kasugai-<tag> ブロックの内容を抽出（最後の1つ）
+fn extract_tag_block(text: &str, tag: &str) -> Option<String> {
+    let open = format!("```{}", tag);
+    let mut out = None;
+    let mut rest = text;
+    while let Some(i) = rest.find(&open) {
+        let after = &rest[i + open.len()..];
+        let body = after.trim_start_matches([' ', '\t', '\r', '\n']);
+        if let Some(j) = body.find("```") {
+            out = Some(body[..j].trim().to_string());
+        }
+        rest = after;
+    }
+    out
+}
+
+/// 実行体を -p 非対話で1回呼び出し、stdout+stderr を結合して返す
+/// （計画生成・critic・diff review の単発批評パス用）
+async fn spawn_capture(
+    exe: &str,
+    args: &[String],
+    cwd: &Path,
+    prompt: &str,
+    timeout: Duration,
+) -> Result<String, String> {
+    let mut cmd = tokio::process::Command::new(exe);
+    cmd.args(args)
+        .arg(prompt)
+        .current_dir(cwd)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    hide_console_tokio(&mut cmd);
+    let mut child = cmd.spawn().map_err(|e| format!("実行体の起動失敗: {}", e))?;
+    let buf = Arc::new(Mutex::new(String::new()));
+    let mut readers = Vec::new();
+    let pipes: Vec<Option<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> = vec![
+        child.stdout.take().map(|p| Box::new(p) as _),
+        child.stderr.take().map(|p| Box::new(p) as _),
+    ];
+    for pipe in pipes.into_iter().flatten() {
+        let buf = buf.clone();
+        readers.push(tokio::spawn(async move {
+            use tokio::io::AsyncBufReadExt;
+            let mut lines = tokio::io::BufReader::new(pipe).lines();
+            while let Ok(Some(l)) = lines.next_line().await {
+                let mut b = buf.lock().unwrap();
+                b.push_str(&l);
+                b.push('\n');
+            }
+        }));
+    }
+    let res = tokio::time::timeout(timeout, child.wait()).await;
+    let timed_out = res.is_err();
+    if timed_out {
+        let _ = child.kill().await;
+    }
+    for r in readers {
+        let _ = r.await;
+    }
+    let out = buf.lock().unwrap().clone();
+    if timed_out {
+        return Err("実行体がタイムアウト".into());
+    }
+    match res {
+        Ok(Ok(st)) if st.success() => Ok(out),
+        Ok(Ok(st)) => Err(format!("実行体が異常終了（code={:?}）", st.code())),
+        Ok(Err(e)) => Err(format!("実行失敗: {}", e)),
+        Err(_) => Err("実行体がタイムアウト".into()),
+    }
+}
+
+/// prompt テンプレの {{name}} 置換（課題フィールド + 追加フィールド）
+fn subst_fields(tpl: &str, issue: &Value, extra: &[(&str, String)]) -> String {
+    let mut out = tpl.to_string();
+    for k in [
+        "key", "repo", "title", "body", "acceptance", "source", "kind",
+    ] {
+        let v = issue.get(k).and_then(|v| v.as_str()).unwrap_or("");
+        out = out.replace(&format!("{{{{{}}}}}", k), v);
+    }
+    let lvl = issue.get("verifyLevel").map(|v| v.to_string()).unwrap_or("1".into());
+    out = out.replace("{{verifyLevel}}", &lvl);
+    let prio = issue.get("priority").map(|v| v.to_string()).unwrap_or("1".into());
+    out = out.replace("{{priority}}", &prio);
+    for (k, v) in extra {
+        out = out.replace(&format!("{{{{{}}}}}", k), v);
+    }
+    out
+}
+
+fn plan_prompt(root: &Path, issue: &Value) -> String {
+    let tpl = knowledge::load_prompt(root, "plan").unwrap_or_else(|| DEFAULT_PLAN.into());
+    subst_fields(&tpl, issue, &[])
+}
+
+fn critic_prompt(root: &Path, issue: &Value, plan: &str) -> String {
+    let tpl =
+        knowledge::load_prompt(root, "critic").unwrap_or_else(|| DEFAULT_CRITIC.into());
+    subst_fields(&tpl, issue, &[("plan", plan.to_string())])
+}
+
+/// 計画フェーズ起動: queued → planning で計画生成タスクを spawn
+async fn start_plan(app: &Shared, issue: Value) -> Result<(), String> {
+    let root = app.root.clone();
+    let key = key_of(&issue);
+    if let Err(e) = pipeline::request_transition(&root, &key, pipeline::ST_PLANNING) {
+        let msg = format!("{}: planning 遷移失敗: {}", key, e);
+        conlog("runner", "err", &msg);
+        return Err(msg);
+    }
+    app.sse("issues", &json!({}));
+    flight_add(&key);
+    let app2 = app.clone();
+    tokio::spawn(async move {
+        run_plan_phase(&app2, &key, &issue).await;
+        flight_del(&key);
+    });
+    Ok(())
+}
+
+/// planning の実行: 計画生成 → planning critic → 承認判定。
+/// critic で Severe（confidence>=planCriticMinConfidence）があれば
+/// planning → queued へ差し戻し（次回 dispatch で計画をやり直す）。
+/// critic 合格は autoApprovePlan で即 running、off で plan_review。
+async fn run_plan_phase(app: &Shared, key: &str, issue: &Value) {
+    let root = &app.root;
+    let cfg = app.cfg().await;
+    let back = |note: &str| {
+        let _ = pipeline::set_field(root, key, "planNote", json!(note));
+        let _ = pipeline::request_transition(root, key, pipeline::ST_QUEUED);
+        conlog("runner", "err", &format!("{}: 計画差し戻し: {}", key, note));
+    };
+    let Some((exe, args)) = resolve_agent(&cfg) else {
+        back("chatAgents に実行可能な exe がありません");
+        return;
+    };
+    let Some(repo_v) = App::git_repo(
+        &cfg,
+        issue.get("repo").and_then(|v| v.as_str()).unwrap_or(""),
+    )
+    .cloned() else {
+        back("課題の repo が config.repos に未登録");
+        return;
+    };
+    let repo_path = PathBuf::from(
+        repo_v.get("path").and_then(|v| v.as_str()).unwrap_or(""),
+    );
+    if !repo_path.is_dir() {
+        back("repo path が存在しない");
+        return;
+    }
+
+    // 1. 計画生成（読み取り専用・実装しない）
+    let ptimeout = Duration::from_secs_f64(cfg_f64(&cfg, "planTimeoutMinutes", 30.0) * 60.0);
+    let out = match spawn_capture(&exe, &args, &repo_path, &plan_prompt(root, issue), ptimeout).await {
+        Ok(o) => {            o
+        }
+        Err(e) => {            back(&format!("計画生成に失敗: {}", e));
+            app.sse("issues", &json!({}));
+            return;
+        }
+    };
+    let plan = extract_tag_block(&out, "kasugai-plan").unwrap_or_else(|| {
+        // ブロックが無ければ末尾 6000 文字を計画として採用
+        out.chars().rev().take(6000).collect::<String>().chars().rev().collect()
+    });
+    if plan.trim().is_empty() {        back("計画の出力が空");
+        app.sse("issues", &json!({}));
+        return;
+    }
+    let _ = pipeline::set_field(root, key, "plan", json!(plan));
+    let _ = pipeline::set_field(root, key, "planAt", json!(now_iso()));    conlog("runner", "sys", &format!("{}: 計画生成完了（{} 文字）", key, plan.len()));
+
+    // 2. Planning Critic（別呼出しの独立コンテキストで計画を批評）
+    let ctimeout = Duration::from_secs_f64(cfg_f64(&cfg, "criticTimeoutMinutes", 15.0) * 60.0);
+    let min_conf = cfg_f64(&cfg, "planCriticMinConfidence", 0.7);
+    let mut critic_ok = false;
+    let critic_res = spawn_capture(&exe, &args, &repo_path, &critic_prompt(root, issue, &plan), ctimeout).await;
+    match critic_res {
+        Ok(cout) => match crate::verify::extract_review(&cout) {
+            Some(review) => {
+                let severe = crate::verify::severe_findings(&review, min_conf);
+                let _ = pipeline::set_field(
+                    root,
+                    key,
+                    "planCritic",
+                    json!({"at": now_iso(), "findings": review.findings}),
+                );
+                if !severe.is_empty() {
+                    let notes: Vec<String> = severe.iter().map(|f| f.note.clone()).collect();                    back(&format!("計画 critic で Severe 検出: {}", notes.join(" / ")));
+                    app.sse("issues", &json!({}));
+                    return;
+                }
+                critic_ok = true;
+            }
+            None => {
+                let _ = pipeline::set_field(
+                    root, key, "planNote",
+                    json!("計画 critic の結果ブロックを取得できず"),
+                );
+            }
+        },
+        Err(e) => {
+            let _ = pipeline::set_field(
+                root, key, "planNote", json!(format!("計画 critic 実行失敗: {}", e)),
+            );
+        }
+    }
+    // 3. 承認判定: autoApprovePlan=on は critic 合格（要必須）で即承認、
+    //    それ以外（critic 未取得/失敗を含む）は plan_review で人を待つ
+    if cfg_bool_default_false(&cfg, "autoApprovePlan") && critic_ok {
+        let _ = pipeline::set_field(root, key, "planApproved", json!(true));        conlog("runner", "sys", &format!("{}: 計画を自動承認 → running", key));
+        if let Some(cur) = find_issue(root, key) {
+            let _ = start_run(app, cur).await;
+        }
+    } else if pipeline::request_transition(root, key, pipeline::ST_PLAN_REVIEW).is_ok() {        conlog(
+            "runner",
+            "sys",
+            &format!("{}: 計画を plan_review で承認待ち", key),
+        );
+        app.sse("issues", &json!({}));
+    }
+}
+
+/// plan_review の計画を承認して実装 run を起動する
+/// （POST /api/issues/:key/plan-approve。planAutoApproveMinutes の
+/// タイムアウト自動承認も同じ経路）
+pub async fn plan_approve(app: &Shared, key: &str) -> Result<Value, String> {
+    let _dispatch_guard = dispatching().lock().await;
+    if flight_has(key) {
+        return Err("already running".into());
+    }
+    let issue = find_issue(&app.root, key).ok_or_else(|| "issue not found".to_string())?;
+    if issue.get("status").and_then(|v| v.as_str()) != Some(pipeline::ST_PLAN_REVIEW) {
+        return Err("issue is not plan_review".into());
+    }
+    let _ = pipeline::set_field(&app.root, key, "planApproved", json!(true));
+    start_run(app, issue).await?;
+    find_issue(&app.root, key).ok_or_else(|| "issue not found".to_string())
+}
+
+/// plan_review の計画を差し戻し（plan_review → queued。再 dispatch で計画から
+/// やり直す。POST /api/issues/:key/plan-reject）
+pub async fn plan_reject(app: &Shared, key: &str) -> Result<Value, String> {
+    let issue = find_issue(&app.root, key).ok_or_else(|| "issue not found".to_string())?;
+    if issue.get("status").and_then(|v| v.as_str()) != Some(pipeline::ST_PLAN_REVIEW) {
+        return Err("issue is not plan_review".into());
+    }
+    let _ = pipeline::set_field(
+        &app.root, key, "planNote", json!("人が計画を差し戻し"),
+    );
+    pipeline::request_transition(&app.root, key, pipeline::ST_QUEUED)
 }
 
 /// run レコード（runs[idx]）へフィールド追記
@@ -532,6 +912,16 @@ fn build_prompt_full(root: &Path, issue: &Value) -> (String, Value) {
     if !lsec.is_empty() {
         p.push_str("\n\n## 失敗レッスン（同種の失敗を繰り返さない）\n\n");
         p.push_str(&lsec);
+    }
+    // 計画承認ゲート（manual-883d17ee）: 承認済み計画を持つ課題は
+    // 計画を prompt に注入し、計画どおりの実装を指示する
+    if let Some(plan) = issue
+        .get("plan")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.trim().is_empty())
+    {
+        p.push_str("\n\n## 承認済み実装計画（この計画に従って実装する）\n\n");
+        p.push_str(plan);
     }
     // 参照した知見を run の記録に残す（どの知見を使ったか追跡可能に）
     let refs = json!({

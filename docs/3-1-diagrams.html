@@ -36,7 +36,14 @@ stateDiagram-v2
     gated --&gt; queued : 人が承認
     gated --&gt; rejected : 人が却下
     queued --&gt; running : 一覧の対応ボタンで dispatch&lt;br/&gt;（自動起動しない）
+    queued --&gt; planning : dispatch（planGate 課題は&lt;br/&gt;先に計画生成）
     queued --&gt; rejected : 人が却下
+    planning --&gt; plan_review : 計画+critic 合格&lt;br/&gt;（autoApprovePlan=off）
+    planning --&gt; running : 計画+critic 合格&lt;br/&gt;（autoApprovePlan=on）
+    planning --&gt; queued : 計画生成失敗・&lt;br/&gt;critic で Severe 検出&lt;br/&gt;（計画差し戻し）
+    plan_review --&gt; running : 人が計画承認&lt;br/&gt;or タイムアウト自動承認
+    plan_review --&gt; queued : 計画差し戻し
+    plan_review --&gt; rejected : 人が却下
     running --&gt; verifying : 実装完了
     verifying --&gt; done : 検証合格
     verifying --&gt; retry : NG (差し戻し)
