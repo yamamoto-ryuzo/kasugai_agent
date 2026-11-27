@@ -32,6 +32,7 @@ use crate::config::*;
 use crate::control::{App, Shared};
 use crate::github;
 use crate::knowledge;
+use crate::lessons;
 use crate::locks;
 use crate::pipeline;
 use crate::repomatch::repo_slug;
@@ -282,6 +283,11 @@ async fn fail_run(app: &Shared, key: &str, run_idx: usize, reason: &str) {
     extra.insert("error".into(), json!(reason));
     update_run(&app.root, key, run_idx, extra);
     let _ = pipeline::set_field(&app.root, key, "verifyNote", json!(reason));
+    // 失敗レッスン（lesson-loop.mmd・manual-29799d3e）: 何が・なぜ失敗したか
+    // を lessons.json へ保存し、次回 run の prompt へ注入する
+    if let Some(it) = find_issue(&app.root, key) {
+        lessons::record_failure(&app.root, &it, run_idx, reason);
+    }
     if pipeline::request_transition(&app.root, key, pipeline::ST_FAILED).is_ok() {
         conlog("runner", "err", &format!("{}: run 失敗: {}", key, reason));
         if let Some(it) = find_issue(&app.root, key) {
@@ -517,11 +523,19 @@ fn build_prompt_full(root: &Path, issue: &Value) -> (String, Value) {
         p.push_str("\n\n## 類似過去事例（knowledge/ 参照）\n\n");
         p.push_str(&sec);
     }
+    // 失敗レッスン（lesson-loop.mmd・manual-29799d3e）: 同一課題の直近
+    // レッスンと類似課題のレッスンを注入し、同種の失敗を繰り返さない
+    let (lsec, lesson_ids) = lessons::inject_section(root, issue, &load_config(root));
+    if !lsec.is_empty() {
+        p.push_str("\n\n## 失敗レッスン（同種の失敗を繰り返さない）\n\n");
+        p.push_str(&lsec);
+    }
     // 参照した知見を run の記録に残す（どの知見を使ったか追跡可能に）
     let refs = json!({
         "knowledge": if injected_knowledge { json!(kslug) } else { Value::Null },
         "runbook": injected_runbook.map(Value::String).unwrap_or(Value::Null),
         "cases": case_keys,
+        "lessons": lesson_ids,
     });
     (p, refs)
 }
@@ -581,6 +595,17 @@ async fn send_back(app: &Shared, key: &str, reason: &str) {
         return;
     }
     let it = find_issue(root, key).unwrap_or_default();
+    // 失敗レッスン（lesson-loop.mmd・manual-29799d3e）: verify NG の
+    // レッスンを lessons.json へ保存し、差し戻し後の再 run へ注入する
+    {
+        let run_idx = it
+            .get("runs")
+            .and_then(|v| v.as_array())
+            .map(|a| a.len())
+            .unwrap_or(0)
+            .saturating_sub(1);
+        lessons::record_failure(root, &it, run_idx, reason);
+    }
     let backs = it
         .get("verifyBacks")
         .and_then(|v| v.as_u64())

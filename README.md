@@ -426,6 +426,39 @@ flowchart TD
   （`verifyLevelBasis` に出典を記録）、採用アプローチは run prompt の
   few-shot に転用する
 
+<!-- diagram: lesson-loop -->
+```mermaid
+---
+title: 失敗レッスンループ（Reflexion 型リトライ + ACE カウンタ）
+---
+flowchart TD
+    NG[verify NG / run failed] --> GEN[レッスン生成<br/>lessons.rs・決定的<br/>何が・なぜ失敗したか<br/>出典 run idx + 根拠<br/>verifyNote/error + 確度メタ]
+    GEN --> PB[(knowledge/lessons.json<br/>ACE 型 playbook<br/>id + helpful/harmful +<br/>text + basis + confidence)]
+    DISP[dispatch 時<br/>runner.build_prompt] --> SEL[注入選定・決定的非LLM<br/>同一課題の直近 1-3 件 +<br/>類似課題のレッスン上位 N 件<br/>harmful>=lessonHarmLimit は除外]
+    PB --> SEL
+    SEL --> PR[## 失敗レッスン<br/>「id helpful=X harmful=Y :: text」]
+    PR --> RUN[run 実行<br/>接続AI -p]
+    RUN --> REF[runs[].knowledgeRefs.lessons<br/>注入したレッスン id を記録]
+    RUN --> OUT{run 結果}
+    OUT -->|done| HELP[注入レッスンへ<br/>helpful 加算]
+    OUT -->|verify NG / failed| HARM[注入レッスンへ<br/>harmful 加算]
+    HELP --> PB
+    HARM --> PB
+    HARM --> LIM{harmful >=<br/>lessonHarmLimit?}
+    LIM -->|no| PB
+    LIM -->|yes| EXC[excluded=true<br/>注入対象から自動除外<br/>誤教訓による汚染を防ぐ]
+    EXC --> PROP[削除 proposal 起票<br/>lessons.json から当該<br/>レッスンを除く版]
+    PROP --> HG{人の採否}
+    HG -->|採用| DEL[レッスン削除]
+    HG -->|却下| KEEP[除外状態のまま保持]
+```
+
+- **失敗レッスン（Reflexion 型リトライ）**（`server/src/lessons.rs`）:
+  verify NG / run failed のたびに「何が・なぜ失敗したか」の短いレッスンを
+  決定的に生成し、出典（run idx・根拠・証跡 dir・確度メタ）を付けて
+  `knowledge/lessons.json` へ蓄積。dispatch prompt には同一課題の直近
+  1-3 件 + 類似課題の上位 N 件を注入し、注入分は
+  `runs[].knowledgeRefs.lessons` に記録する
 ## 6. 状態とファイル
 
 | ファイル | 内容 | Git 管理 |

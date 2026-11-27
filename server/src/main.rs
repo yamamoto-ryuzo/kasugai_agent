@@ -32,6 +32,7 @@ mod heartbeat;
 mod housekeep;
 mod knowledge;
 mod launch;
+mod lessons;
 mod locks;
 mod pipeline;
 mod proposals;
