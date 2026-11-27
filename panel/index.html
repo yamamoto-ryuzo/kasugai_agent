@@ -100,6 +100,15 @@
   .wfdetail { margin-top: 6px; padding: 6px 8px; background: #f9fafb; border-radius: 4px;
               font-size: 11px; white-space: pre-wrap; word-break: break-all;
               max-height: 220px; overflow: auto; }
+  /* ---- 監査タイムライン（audit-timeline.mmd） ---- */
+  .aur { display: flex; gap: 8px; padding: 3px 0; border-bottom: 1px solid #f3f4f6;
+         font-size: 11px; }
+  .aur:last-child { border-bottom: 0; }
+  .aut { flex: 0 0 118px; color: #9ca3af; }
+  .aup { display: inline-block; min-width: 40px; padding: 0 5px; border-radius: 3px;
+         font-size: 10px; text-align: center; }
+  .aup.human { background: #dbeafe; color: #1e40af; }
+  .aup.system { background: #f3f4f6; color: #4b5563; }
   /* ---- 処理状況カンバン（中央ペイン: 状態別の横並び列） ---- */
   #board { display: flex; gap: 10px; align-items: flex-start; }
   .bcol { flex: 1 1 0; min-width: 170px; background: #f8fafc;
@@ -2855,7 +2864,10 @@ function renderIssue(i) {
 // 実行中の run もリアルタイムに伸長する
 let wfSpans = [];           // waterfall 詳細表示用の取得済み span
 async function loadIssueObs(key) {
-  const tr = await J('GET', `/api/issues/${encodeURIComponent(key)}/trace`);
+  const [au, tr] = await Promise.all([
+    J('GET', `/api/issues/${encodeURIComponent(key)}/audit`),
+    J('GET', `/api/issues/${encodeURIComponent(key)}/trace`),
+  ]);
   if (centerMode !== 'issue' || curItemKey !== key) return;
   const el = document.getElementById('iobs');
   if (!el) return;
@@ -2866,7 +2878,9 @@ async function loadIssueObs(key) {
     (wfSpans.length
       ? `<div class="wf">${wfRows(wfSpans)}</div>` +
         `<div id="wfd" class="wfdetail" style="display:none"></div>`
-      : `<div class="empty">${esc(t('iss.traceNone'))}</div>`) + '</div>';
+      : `<div class="empty">${esc(t('iss.traceNone'))}</div>`) + '</div>' +
+    `<div class="rcard" style="max-width:none"><b>${esc(t('iss.audit'))}</b>` +
+    auditRows(au.events || []) + '</div>';
 }
 // waterfall の1行群: 左=span 名（depth インデント）、中央=時系列バー、
 // 右=経過時間。行クリックで属性の詳細表示
@@ -2920,6 +2934,20 @@ function wfSel(i) {
   d.style.display = 'block';
 }
 // 監査タイムライン: 時刻・actor(human/system)・action・run・detail 概要
+
+function auditRows(events) {
+  if (!events.length) return `<div class="empty">${esc(t('iss.auditNone'))}</div>`;
+  const det = (e) => Object.entries(e.detail || {})
+    .map(([k, v]) => `${k}=${typeof v === 'object' ? JSON.stringify(v) : v}`)
+    .join(' ');
+  return events.map((e) =>
+    `<div class="aur"><span class="aut">${esc(fmtTs(e.at))}</span>` +
+    `<span><span class="aup ${e.actor === 'human' ? 'human' : 'system'}">` +
+    `${esc(tx('aud.' + e.actor, e.actor))}</span></span>` +
+    `<span><b>${esc(tx('aud.act.' + e.action, e.action))}</b>` +
+    (e.run != null ? ` <span class="muted">run-${e.run}</span>` : '') +
+    ` <span class="muted">${esc(tipText(det(e), 200))}</span></span></div>`).join('');
+}
 
 // ---------- 省略ラベルの全文ポップアップ ----------
 // [data-tip] へホバーで即時表示（ネイティブ title より速く改行も出せる）。

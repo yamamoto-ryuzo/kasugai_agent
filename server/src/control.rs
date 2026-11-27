@@ -3130,6 +3130,15 @@ async fn api_issues_get(
     j(json!({"ok": true, "issues": issues, "counts": counts}))
 }
 
+// GET /api/issues/{key}/audit — 課題単位の監査タイムライン
+// （audit-timeline.mmd・README §5.10。evidence/<slug>/audit.jsonl を返す）
+async fn api_issue_audit(State(app): State<Shared>, AxPath(key): AxPath<String>) -> Response {
+    if issue_status(&app.root, &key).is_none() {
+        return err(StatusCode::NOT_FOUND, "issue not found");
+    }
+    j(json!({"ok": true, "events": crate::audit::read(&app.root, &key)}))
+}
+
 // GET /api/issues/{key}/trace?run=N — run の OTel GenAI 風 span 一覧
 // （trace-waterfall.mmd・README §5.9。run 省略時は最新 run）
 async fn api_issue_trace(
@@ -3158,6 +3167,15 @@ async fn api_issue_trace(
 /// 状態遷移は pipeline・起動は runner に委譲し、ここでは状態を直接触らない
 async fn issue_gate_action(app: &Shared, key: &str, action: &str) -> Result<Value, String> {
     let cur = issue_status(&app.root, key).ok_or_else(|| "issue not found".to_string())?;
+    // 監査（audit-timeline.mmd）: 人の dispatch/reject 判断を記録
+    crate::audit::record(
+        &app.root,
+        key,
+        "human",
+        action,
+        None,
+        Map::from_iter([("from".into(), json!(cur))]),
+    );
     match action {
         "dispatch" => {
             match cur.as_str() {
@@ -3327,6 +3345,18 @@ async fn api_issues_action(
     };
     match res {
         Ok(issue) => {
+            // 監査: dispatch/reject は issue_gate_action 側で記録済みのため
+            // ここでは approve/requeue/push-approve/plan-* を記録する
+            if !matches!(action.as_str(), "dispatch" | "reject") {
+                crate::audit::record(
+                    &app.root,
+                    &key,
+                    "human",
+                    &action,
+                    None,
+                    Map::from_iter([("from".into(), json!(cur))]),
+                );
+            }
             app.sse("issues", &json!({}));
             j(json!({"ok": true, "issue": issue}))
         }
@@ -3798,6 +3828,7 @@ pub fn router(app: Shared) -> Router {
         .route("/api/candidates/{key}/{action}", post(api_candidates_action))
         .route("/api/issues", get(api_issues_get))
         .route("/api/issues/{key}/{action}", post(api_issues_action))
+        .route("/api/issues/{key}/audit", get(api_issue_audit))
         .route("/api/issues/{key}/trace", get(api_issue_trace))
         .route("/api/incidents", get(api_incidents_get))
         .route("/api/incidents/merge", post(api_incidents_merge))

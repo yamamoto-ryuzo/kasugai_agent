@@ -1,0 +1,16 @@
+---
+title: run 単位の構造化監査タイムライン
+---
+flowchart TD
+    H[人の操作<br/>control.rs API] -->|dispatch / reject /<br/>approve / push-approve /<br/>plan-approve / followup| EV[audit.rs<br/>record 追記]
+    S[システム動作<br/>runner.rs] -->|run.start / exec / verify /<br/>send_back / push / done / failed| EV
+    EV --> AJ[(evidence/slug/audit.jsonl<br/>課題単位・1行1イベント<br/>at/actor=human|system/action/<br/>run/result/detail)]
+    AJ --> API[GET /api/issues/key/audit]
+    API --> TL[パネル ISSUES 詳細<br/>監査タイムライン<br/>誰が・何を・根拠・<br/>verify 結果・push 有無]
+    SSE[SSE issues push] -->|再取得| TL
+    subgraph DETAIL[detail の例]
+        D1[ dispatch: actor=human<br/>起票兼承認の即時起動]
+        D2[ exec: exe + args<br/>何を実行したか]
+        D3[ verify: level + ok + note<br/>根拠]
+        D4[ push: ok/fail・pushedAt]
+    end

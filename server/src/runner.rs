@@ -26,6 +26,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
+use crate::audit;
 use crate::cases;
 use crate::conlog::conlog;
 use crate::config::*;
@@ -265,6 +266,17 @@ async fn drain_inner(app: &Shared) {
                 );
                 // 孤児 run の trajectory に終了理由 aborted を補記する
                 trajectory::abort_orphan(&root, &key);
+                // 監査にも中断を残し、開いたままの trace root span を閉じる
+                audit::record_run(
+                    &root,
+                    &key,
+                    "system",
+                    "aborted",
+                    Map::from_iter([(
+                        "note".into(),
+                        json!("control 再起動で run の追跡を喪失"),
+                    )]),
+                );
                 if let Some(idx) = trajectory::latest_run_idx(&it) {
                     let dir = trajectory::run_dir(
                         &root.join("evidence").join(knowledge::key_slug(&key)),
@@ -692,6 +704,13 @@ async fn run_plan_phase(app: &Shared, key: &str, issue: &Value) {
             plan_trace.end(&pspan, false, &e.to_string(), Map::new());
             plan_trace.event("plan.back", Map::new());
             back(&format!("計画生成に失敗: {}", e));
+            audit::record_run(
+                root,
+                key,
+                "system",
+                "plan.back",
+                Map::from_iter([("reason".into(), json!(format!("計画生成に失敗: {}", e)))]),
+            );
             app.sse("issues", &json!({}));
             return;
         }
@@ -707,7 +726,15 @@ async fn run_plan_phase(app: &Shared, key: &str, issue: &Value) {
         return;
     }
     let _ = pipeline::set_field(root, key, "plan", json!(plan));
-    let _ = pipeline::set_field(root, key, "planAt", json!(now_iso()));    conlog("runner", "sys", &format!("{}: 計画生成完了（{} 文字）", key, plan.len()));
+    let _ = pipeline::set_field(root, key, "planAt", json!(now_iso()));
+    audit::record_run(
+        root,
+        key,
+        "system",
+        "plan",
+        Map::from_iter([("planChars".into(), json!(plan.len()))]),
+    );
+    conlog("runner", "sys", &format!("{}: 計画生成完了（{} 文字）", key, plan.len()));
 
     // 2. Planning Critic（別呼出しの独立コンテキストで計画を批評）
     let ctimeout = Duration::from_secs_f64(cfg_f64(&cfg, "criticTimeoutMinutes", 15.0) * 60.0);
@@ -730,6 +757,16 @@ async fn run_plan_phase(app: &Shared, key: &str, issue: &Value) {
                     plan_trace.end(&cspan, false, &notes.join(" / "), Map::new());
                     plan_trace.event("plan.back", Map::new());
                     back(&format!("計画 critic で Severe 検出: {}", notes.join(" / ")));
+                    audit::record_run(
+                        root,
+                        key,
+                        "system",
+                        "plan.back",
+                        Map::from_iter([
+                            ("reason".into(), json!("計画 critic で Severe 検出")),
+                            ("findings".into(), json!(notes)),
+                        ]),
+                    );
                     app.sse("issues", &json!({}));
                     return;
                 }
@@ -757,6 +794,7 @@ async fn run_plan_phase(app: &Shared, key: &str, issue: &Value) {
     if cfg_bool_default_false(&cfg, "autoApprovePlan") && critic_ok {
         let _ = pipeline::set_field(root, key, "planApproved", json!(true));
         plan_trace.event("plan.approved", Map::from_iter([("actor".into(), json!("system"))]));
+        audit::record_run(root, key, "system", "plan.approved", Map::new());
         conlog("runner", "sys", &format!("{}: 計画を自動承認 → running", key));
         if let Some(cur) = find_issue(root, key) {
             let _ = start_run(app, cur).await;
@@ -830,6 +868,14 @@ async fn fail_run(
     extra.insert("endedAt".into(), json!(now_iso()));
     extra.insert("error".into(), json!(reason));
     update_run(&app.root, key, run_idx, extra);
+    audit::record(
+        &app.root,
+        key,
+        "system",
+        "failed",
+        Some(run_idx),
+        Map::from_iter([("reason".into(), json!(reason))]),
+    );
     if let Some(tr) = &obs.trace {
         tr.event("failed", Map::from_iter([("reason".into(), json!(reason))]));
         tr.finish_root(false, reason);
@@ -932,6 +978,18 @@ async fn run_and_verify(
         "action",
         "dispatch",
         json!({"exe": exe, "args": prompt_args, "promptChars": prompt.len()}),
+    );
+    audit::record(
+        root,
+        key,
+        "system",
+        "run.start",
+        Some(run_idx),
+        Map::from_iter([
+            ("exe".into(), json!(exe)),
+            ("args".into(), json!(prompt_args)),
+            ("promptChars".into(), json!(prompt.len())),
+        ]),
     );
     let log_path = ev_dir.join("run.log");
     let mut cmd = tokio::process::Command::new(&exe);
@@ -1069,6 +1127,18 @@ async fn run_and_verify(
         attrs.insert("exit_code".into(), code.map(|c| json!(c)).unwrap_or(Value::Null));
         t.end(s, code == Some(0) && !timed_out, &format!("{:?}", code), attrs);
     }
+    audit::record(
+        root,
+        key,
+        "system",
+        "exec",
+        Some(run_idx),
+        Map::from_iter([
+            ("exitCode".into(), code.map(|c| json!(c)).unwrap_or(Value::Null)),
+            ("timedOut".into(), json!(timed_out)),
+            ("elapsedMs".into(), usage["elapsedMs"].clone()),
+        ]),
+    );
     tstep(
         &traj,
         "action",
@@ -1428,6 +1498,18 @@ async fn resume_verify(app: &Shared, key: &str, obs: Obs) {
                 Map::from_iter([("gen_ai.eval.ok".into(), json!(ok))]),
             );
         }
+        audit::record(
+            root,
+            key,
+            "system",
+            "verify",
+            run_idx,
+            Map::from_iter([
+                ("level".into(), json!(level)),
+                ("ok".into(), json!(ok)),
+                ("note".into(), json!(note)),
+            ]),
+        );
         tstep(
             traj,
             "action",
@@ -1475,6 +1557,18 @@ async fn send_back(app: &Shared, key: &str, reason: &str, obs: Obs) {
         .and_then(|v| v.as_u64())
         .unwrap_or(0);
     let limit = cfg_u64(&app.cfg().await, "verifyBackLimit", 3);
+    audit::record(
+        root,
+        key,
+        "system",
+        "send_back",
+        trajectory::latest_run_idx(&it),
+        Map::from_iter([
+            ("reason".into(), json!(reason)),
+            ("verifyBacks".into(), json!(backs)),
+            ("limit".into(), json!(limit)),
+        ]),
+    );
     if let Some(t) = &obs.trace {
         t.event(
             "send_back",
@@ -1751,6 +1845,14 @@ async fn finalize(
         if let Some(t) = &obs.trace {
             t.event("push_pending", Map::new());
         }
+        audit::record(
+            root,
+            key,
+            "system",
+            "push_pending",
+            trajectory::latest_run_idx(issue),
+            Map::from_iter([("reason".into(), json!("requirePushApproval"))]),
+        );
         return; // drain が pushApproved を拾って再開する
     }
     let pspan = obs
@@ -1763,6 +1865,14 @@ async fn finalize(
                 t.end(s, true, "", Map::new());
             }
             tstep(traj, "action", "push", json!({"ok": true}));
+            audit::record(
+                root,
+                key,
+                "system",
+                "push",
+                trajectory::latest_run_idx(issue),
+                Map::from_iter([("ok".into(), json!(true))]),
+            );
             let _ = pipeline::set_field(root, key, "pushedAt", json!(now_iso()));
             if pipeline::request_transition(root, key, pipeline::ST_DONE).is_ok() {
                 tstep(traj, "state", "done", json!({}));
@@ -1771,6 +1881,14 @@ async fn finalize(
                     t.event("done", Map::new());
                     t.finish_root(true, "verify 合格・push 済み");
                 }
+                audit::record(
+                    root,
+                    key,
+                    "system",
+                    "done",
+                    trajectory::latest_run_idx(issue),
+                    Map::new(),
+                );
                 conlog(
                     "runner",
                     "sys",
@@ -1794,6 +1912,17 @@ async fn finalize(
                 "action",
                 "push",
                 json!({"ok": false, "error": e}),
+            );
+            audit::record(
+                root,
+                key,
+                "system",
+                "push",
+                trajectory::latest_run_idx(issue),
+                Map::from_iter([
+                    ("ok".into(), json!(false)),
+                    ("error".into(), json!(e)),
+                ]),
             );
             let _ = pipeline::set_field(
                 root,

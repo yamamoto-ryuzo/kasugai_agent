@@ -739,6 +739,41 @@ flowchart TD
 - API は `GET /api/issues/{key}/trace?run=N`。SSE の `issues` push で
   パネルが再取得し、実行中のウォーターフォールがリアルタイムに伸長する
 
+### 5.10 監査タイムライン（誰が・何を・根拠）
+
+証跡 `evidence/` の成果物ログとは別に、**行動の記録**を課題単位の時系列
+タイムラインとして保持する（Azure SRE Agent の action log /
+PagerDuty incident timeline 参考）。人の操作（dispatch・reject・approve・
+push-approve・plan-approve・followup）とシステム動作（run 開始・exec・
+verify・差し戻し・push・done/failed）を同じ系列に記録する。
+
+<!-- diagram: audit-timeline -->
+```mermaid
+---
+title: run 単位の構造化監査タイムライン
+---
+flowchart TD
+    H[人の操作<br/>control.rs API] -->|dispatch / reject /<br/>approve / push-approve /<br/>plan-approve / followup| EV[audit.rs<br/>record 追記]
+    S[システム動作<br/>runner.rs] -->|run.start / exec / verify /<br/>send_back / push / done / failed| EV
+    EV --> AJ[(evidence/slug/audit.jsonl<br/>課題単位・1行1イベント<br/>at/actor=human|system/action/<br/>run/result/detail)]
+    AJ --> API[GET /api/issues/key/audit]
+    API --> TL[パネル ISSUES 詳細<br/>監査タイムライン<br/>誰が・何を・根拠・<br/>verify 結果・push 有無]
+    SSE[SSE issues push] -->|再取得| TL
+    subgraph DETAIL[detail の例]
+        D1[ dispatch: actor=human<br/>起票兼承認の即時起動]
+        D2[ exec: exe + args<br/>何を実行したか]
+        D3[ verify: level + ok + note<br/>根拠]
+        D4[ push: ok/fail・pushedAt]
+    end
+```
+
+- 記録先は `evidence/<slug>/audit.jsonl`（課題単位・1行1イベント）。
+  イベントは `{at, actor(human|system), action, run, result, detail}`。
+  `detail` には実行内容（exe+args）・根拠（verifyNote・critic 結果）・
+  verify 結果・push 有無を構造化して持たせる
+- API は `GET /api/issues/{key}/audit`。ISSUES 詳細に時系列で表示し、
+  SSE push で即時更新される
+
 ### 5.11 run コスト可視化（トークン/費用/経過時間）
 
 Devin Session Insights 参考に、run ごとのトークン量・費用・経過時間を
