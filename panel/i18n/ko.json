@@ -278,6 +278,7 @@
   "iss.requeue": "재실행",
   "iss.dispatch": "처리",
   "iss.cancel": "중단",
+  "iss.stuck": "스턱",
   "iss.pushApprove": "push 승인",
   "det.detected": "감지",
   "det.updated": "갱신",

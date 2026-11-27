@@ -348,6 +348,11 @@ flowchart TD
   `RunCtl.cancel` を立てて旧 run を中断（child kill）し `queued` へ戻してから
   起動する。人の「中断」ボタンも同じ経路で `queued` へ戻す
   （verifyBacks は消費しない）
+- **Stuck Detector（manual-1a459b0c）**: 実行体の出力行から非生産
+  パターンを検出（stuck.rs。同一行4回・同一 error 行3回・同一行3連続の
+  独白相当・2パターン交互6行・context window error 連続）して run を
+  halt し `lastStuck` に構造化記録する。queued 差し戻し後の再 dispatch で
+  前回のスタック情報を prompt へ注入する（`stuckDetect=off` で無効化）
   同一リポジトリの未完了 run、排他ロック中の実機リソースがある課題は待機
 - **計画承認ゲート（planGate）**: `planGate=true` の課題は dispatch で
   実装に入らず、先ず `planning` で実装計画のみを生成する（コード変更・

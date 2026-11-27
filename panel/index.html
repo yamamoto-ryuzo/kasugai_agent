@@ -2523,6 +2523,7 @@ async function loadMgmt() {
       (indent ? ' style="margin-left:22px"' : '') +
       ` onclick="openIssue('${esc(i.key)}')" data-tip="${esc(tipText((i.title ? i.title + '\n\n' : '') + (i.body ? i.body + '\n\n' : '') + t('prop.open.tip')))}"><div>` +
       `<span class="pill ${issuePill[st] || ''}">${esc(tx('iss.st.' + st, st))}</span>` +
+      `${i.lastStuck ? `<span class="pill def">${esc(t('iss.stuck'))}</span>` : ''}` +
       `${i.retryAfter && new Date(i.retryAfter) > new Date() ? `<span class="pill def">${esc(t('iss.backoff'))}</span>` : ''}` +
       `${(i.priority ?? 1) >= 2 ? `<span class="pill prio">P${i.priority}</span>` : ''}<b>${esc(i.title)}</b></div>` +
       `<div class="muted">${esc(tx('src.' + (i.source || ''), i.source || ''))}${lvl} · ${esc(fmtTs(i.updatedAt))}${runCostHtml(i)}</div>` +
@@ -2819,6 +2820,7 @@ function renderItemHead(it, isIssue) {
     (!isIssue && !st ? `<span class="pill wait">${esc(t('cand.unfiled'))}</span>` : '') +
     (!isIssue ? dfPill(it) : '') +
     (isIssue && it.retryAfter && new Date(it.retryAfter) > new Date()
+    (isIssue && it.lastStuck ? `<span class="pill def">${esc(t('iss.stuck'))}</span>` : '') +
       ? `<span class="pill def">${esc(t('iss.backoff'))}: ${esc(fmtTs(it.retryAfter))}</span>` : '') +
     `<span class="pill">${esc(tx('src.' + (it.source || ''), it.source || ''))}</span>` +
     (isIssue && it.verifyLevel != null ? `<span class="pill">L${it.verifyLevel}</span>` : '') +
@@ -2849,11 +2851,15 @@ function renderCand(c) {
 }
 // issue は検証情報（合格条件・検証メモ・retry 回数）と実行履歴を追加表示
 function renderIssue(i) {
-  const info = (i.acceptance || i.verifyNote || i.retries || i.verifyBacks || i.remediation)
+  const info = (i.acceptance || i.verifyNote || i.retries || i.verifyBacks || i.remediation
+    || i.lastStuck || i.lastBlocker || i.budgetHold || i.riskHold || i.riskRejected || i.partial)
     ? '<div class="rcard" style="max-width:none">' +
       (i.acceptance ? `<div class="muted">${esc(t('iss.acceptance'))}: ${esc(i.acceptance)}</div>` : '') +
       (i.verifyNote ? `<div class="muted">${esc(t('iss.verifyNote'))}: ${esc(i.verifyNote)}</div>` : '') +
       (i.planNote ? `<div class="muted">${esc(t('iss.planNote'))}: ${esc(i.planNote)}</div>` : '') +
+      // run 制御の構造化記録（run-control.mmd）: halt 理由・詰まり・
+      // 保全先・リスク採否を表示する
+      (i.lastStuck ? `<div class="muted">${esc(t('iss.stuck'))}: ${esc(i.lastStuck.pattern || '')} ${esc(i.lastStuck.detail || '')}</div>` : '') +
       (i.remediation ? `<div class="muted">${esc(t('iss.remediation'))}: ${esc(i.remediation)} (#${(i.remediationStage ?? 0) + 1})</div>` : '') +
       `<div class="muted">retries: ${i.retries ?? 0} &middot; verifyBacks: ${i.verifyBacks ?? 0}</div>` +
       '</div>' : '';

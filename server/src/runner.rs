@@ -37,6 +37,7 @@ use crate::knowledge;
 use crate::lessons;
 use crate::locks;
 use crate::pipeline;
+use crate::stuck;
 use crate::repomatch::repo_slug;
 use crate::store;
 use crate::trace::{self, Trace};
@@ -203,6 +204,87 @@ pub async fn cancel_issue(app: &Shared, key: &str) -> Result<Value, String> {
         }
     }
     Err("cancel did not complete".into())
+}
+
+/// 出力監視（run-control.mmd）: reader タスクが実行体の出力行を供給し、
+/// stuck 検出・action リスク分類・step 予算（出力行数）を判定する。
+/// 発火時は halt に構造化理由を入れ、呼出側が child kill → halt 経路へ
+struct Monitor {
+    det: Option<stuck::Detector>,
+    scan: Option<risk::Scanner>,
+    steps: u64,
+    max_steps: u64,
+    halt: Option<Value>,
+}
+
+impl Monitor {
+    fn new(cfg: &Value, issue: &Value) -> Self {
+        // 実行予算（manual-94172864）: issue.budget + budgetExtend の
+        // 加算値を有効上限とする（0=無効）
+        let eff = |k: &str| -> u64 {
+            let base = issue
+                .get("budget")
+                .and_then(|b| b.get(k))
+                .and_then(|v| v.as_u64().or_else(|| v.as_f64().map(|f| f as u64)))
+                .unwrap_or(0);
+            let ext = issue
+                .get("budgetExtend")
+                .and_then(|b| b.get(k))
+                .and_then(|v| v.as_u64().or_else(|| v.as_f64().map(|f| f as u64)))
+                .unwrap_or(0);
+            base + ext
+        };
+        Self {
+            det: cfg_bool_default_true(cfg, "stuckDetect").then(stuck::Detector::new),
+            scan: cfg_bool_default_true(cfg, "riskConfirm").then(|| risk::Scanner::new(cfg)),
+            steps: 0,
+            max_steps: eff("maxSteps"),
+            halt: None,
+        }
+    }
+
+    /// 1行を供給する。発火（stuck/step 上限/HIGH リスク）は halt へ構造化記録
+    fn feed(&mut self, stream: &str, line: &str) {
+        self.steps += 1;
+        if self.halt.is_none() && self.max_steps > 0 && self.steps > self.max_steps {
+            self.halt = Some(json!({
+                "kind": "budget",
+                "field": "maxSteps",
+                "limit": self.max_steps,
+            }));
+        }
+        if let Some(d) = &mut self.det {
+            if let Some(h) = d.feed(stream, line) {
+                if self.halt.is_none() {
+                    self.halt = Some(json!({
+                        "kind": "stuck",
+                        "pattern": h.pattern,
+                        "detail": h.detail,
+                    }));
+                }
+            }
+        }
+        if let Some(s) = &self.scan {
+            if let Some(r) = s.classify(line) {
+                if r.level == "HIGH" {
+                    if self.halt.is_none() {
+                        self.halt = Some(json!({
+                            "kind": "risk",
+                            "label": r.label,
+                            "line": r.line,
+                        }));
+                    }
+                } else {
+                    // MEDIUM は確認を挟まず記録のみ（run-control.mmd）
+                    conlog(
+                        "runner",
+                        "warn",
+                        &format!("risk MEDIUM（{}）: {}", r.label, r.line),
+                    );
+                }
+            }
+        }
+    }
 }
 
 
@@ -1282,23 +1364,29 @@ async fn run_and_verify(
     }
     let mut cancel_rx = ctl_pair.map(|(c, _)| c.subscribe());
 
+    // 出力監視（stuck・risk・step 予算。reader タスクと共有）
+    let cfg = app.cfg().await;
+    let mon = Arc::new(Mutex::new(Monitor::new(&cfg, issue)));
+
+    // stdout/stderr → conlog + run.log バッファ + 出力監視
     let src = format!("run {}", key.rsplit(':').next().unwrap_or(key));
     let buf = Arc::new(Mutex::new(String::new()));
     let mut readers = Vec::new();
-    let pipes: Vec<(&str, Option<Box<dyn tokio::io::AsyncRead + Unpin + Send>>)> = vec![
+    let pipes: Vec<(&'static str, Option<Box<dyn tokio::io::AsyncRead + Unpin + Send>>)> = vec![
         ("out", child.stdout.take().map(|p| Box::new(p) as _)),
         ("err", child.stderr.take().map(|p| Box::new(p) as _)),
     ];
-    for (stream, pipe) in pipes {
+    for (stream_s, pipe) in pipes {
         let Some(pipe) = pipe else { continue };
         let src = src.clone();
         let buf = buf.clone();
+        let mon = mon.clone();
         let traj = traj.clone();
         readers.push(tokio::spawn(async move {
             use tokio::io::AsyncBufReadExt;
             let mut lines = tokio::io::BufReader::new(pipe).lines();
             while let Ok(Some(l)) = lines.next_line().await {
-                conlog(&src, stream, &l);
+                conlog(&src, stream_s, &l);
                 if let Some(t) = &traj {
                     // observation: 実行体出力を1行1ステップで逐次追記
                     // （中断しても過程が残る。長行は打ち切る）
@@ -1307,6 +1395,9 @@ async fn run_and_verify(
                         stream,
                         json!({"line": l.chars().take(4000).collect::<String>()}),
                     );
+                // 出力監視: stuck・risk・step 予算の発火を記録する。
+                // halt は wait ループ側が行単位の判定結果を見て行う
+                mon.lock().unwrap().feed(stream_s, &l);
                 }
                 let mut b = buf.lock().unwrap();
                 b.push_str(&l);
@@ -1314,7 +1405,6 @@ async fn run_and_verify(
             }
         }));
     }
-    let cfg = app.cfg().await;
     let timeout =
         Duration::from_secs_f64(cfg_f64(&cfg, "runTimeoutMinutes", 120.0) * 60.0);
     // 実行予算の壁時計上限（manual-94172864）: budget.maxWallMinutes +
@@ -1677,6 +1767,19 @@ fn build_prompt_full(root: &Path, issue: &Value) -> (String, Value) {
             let at = f.get("at").and_then(|v| v.as_str()).unwrap_or("");
             p.push_str(&format!("- [{}] {} （{}）\n", kind, text, at));
         }
+    // run 制御差し戻しの注入（run-control.mmd）: 前回 run の halt・
+    // スタック・詰まり・却下の構造化情報を prompt へ入れ、同じ失敗や
+    // 拒否された方針を繰り返さない
+    if let Some(s) = issue.get("lastStuck").filter(|v| !v.is_null()) {
+        let pat = s.get("pattern").and_then(|v| v.as_str()).unwrap_or("");
+        let det = s.get("detail").and_then(|v| v.as_str()).unwrap_or("");
+        p.push_str("\n\n## 前回 run のスタック検出（同じ失敗を繰り返さない）\n\n");
+        p.push_str(&format!(
+            "前回の run は非生産パターン検出で中断された（pattern: {}）。\n検出行: {}\n\
+             同じ操作の繰り返し・同じエラーの再試行を避け、別の切り口で対応すること\n",
+            pat, det
+        ));
+    }
     }
     // 事案（incidents.mmd・manual-343b5d37）: 所属事案のメンバー課題を
     // コンテキストとして注入し、関連症状を一体の事案として扱わせる

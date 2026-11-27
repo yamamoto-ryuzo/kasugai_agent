@@ -278,6 +278,7 @@
   "iss.requeue": "re-run",
   "iss.dispatch": "handle",
   "iss.cancel": "cancel",
+  "iss.stuck": "stuck",
   "iss.pushApprove": "approve push",
   "det.detected": "detected",
   "det.updated": "updated",

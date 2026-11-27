@@ -70,6 +70,7 @@
   "consolidateIdleMinutes": 30,
   "consolidateMinCluster": 3,
   "stormBatchMin": 5,
+  "stuckDetect": true,
   "stormWindowMinutes": 10,
   "maxConcurrentRuns": 4,
   "retentionDays": 0,
