@@ -2516,6 +2516,8 @@ async function loadMgmt() {
     } else if (st === 'verifying' && !i.pushApproved &&
                repoOfIssue(i)?.requirePushApproval) {
       btns.push(`<button onclick="event.stopPropagation();issueAct('${esc(i.key)}','push-approve')">${esc(t('iss.pushApprove'))}</button>`);
+      btns.push(`<button onclick="event.stopPropagation();issueAct('${esc(i.key)}','cancel')">${esc(t('iss.cancel'))}</button>`);
+    }
     }
     return `<div class="item${i.key === curItemKey && centerMode === 'issue' ? ' sel' : ''}"` +
       (indent ? ' style="margin-left:22px"' : '') +
@@ -2594,8 +2596,11 @@ async function loadMgmt() {
 
 // ---------- issues（課題の人ゲート操作。状態遷移は server の pipeline のみ） ----------
 // key は ':'/'/' を含むため URI エンコードして {key} セグメントに載せる
-async function issueAct(key, action) {
-  const r = await J('POST', `/api/issues/${encodeURIComponent(key)}/${action}`);
+async function issueAct(key, action, body) {
+  const r = await J('POST', `/api/issues/${encodeURIComponent(key)}/${action}`, body);
+  if (!r.ok) alert(r.error || 'error');
+  loadMgmt();
+}
   if (!r.ok) alert(r.error || 'error');
   loadMgmt();
 }
@@ -2791,6 +2796,8 @@ function renderItemHead(it, isIssue) {
   if (isIssue && st === 'verifying' && !it.pushApproved &&
       repoOfIssue(it)?.requirePushApproval) {
     btns.push(`<button onclick="issueAct('${esc(it.key)}','push-approve')">${esc(t('iss.pushApprove'))}</button>`);
+    btns.push(`<button onclick="issueAct('${esc(it.key)}','cancel')">${esc(t('iss.cancel'))}</button>`);
+  }
   }
   // 分割提案（manual-0577d650）: 大規模課題は gated で splitProposal を持ち、
   // 人が「分割起票」で子課題群へ分ける（queued でも起票前なら可）

@@ -21,9 +21,10 @@
 //      （verifyBackLimit 超過で failed。再 dispatch は対応ボタン）
 // 状態遷移は pipeline::request_transition のみを経由する。
 use serde_json::{json, Map, Value};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
+use tokio::sync::watch;
 use std::time::{Duration, Instant};
 
 use crate::audit;
@@ -109,6 +110,101 @@ fn draining() -> &'static Mutex<HashSet<PathBuf>> {
 fn dispatching() -> &'static tokio::sync::Mutex<()> {
     DISPATCHING.get_or_init(|| tokio::sync::Mutex::new(()))
 }
+// ---------- run 制御（run-control.mmd） ----------
+// in-flight run への横入り操作を課題 key 単位で保持する。
+// cancel は run タスクが検出して child kill → queued 差し戻しを行い、
+// stdin は steering（manual-4929fc13）の方針注入を受け付ける
+
+/// run 制御ハンドル（manual-5dabae8b・manual-4929fc13）
+struct RunCtl {
+    cancel: watch::Sender<bool>,
+    stdin: Arc<tokio::sync::Mutex<Option<tokio::process::ChildStdin>>>,
+}
+
+static RUN_CTL: OnceLock<Mutex<HashMap<String, RunCtl>>> = OnceLock::new();
+
+fn run_ctls() -> &'static Mutex<HashMap<String, RunCtl>> {
+    RUN_CTL.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn ctl_register(key: &str, ctl: RunCtl) {
+    run_ctls().lock().unwrap().insert(key.to_string(), ctl);
+}
+
+fn ctl_get(
+    key: &str,
+) -> Option<(
+    watch::Sender<bool>,
+    Arc<tokio::sync::Mutex<Option<tokio::process::ChildStdin>>>,
+)> {
+    run_ctls()
+        .lock()
+        .unwrap()
+        .get(key)
+        .map(|c| (c.cancel.clone(), c.stdin.clone()))
+}
+
+fn ctl_del(key: &str) {
+    run_ctls().lock().unwrap().remove(key);
+}
+
+/// in-flight run へ cancel シグナルを送る（manual-5dabae8b）。
+/// run タスク側が検出して child kill → running|verifying → queued へ戻す
+/// （verifyBacks は消費しない）。送信できたら true
+fn cancel_run(key: &str) -> bool {
+    ctl_get(key)
+        .map(|(c, _)| c.send(true).is_ok())
+        .unwrap_or(false)
+}
+
+/// 実行中 run / verify の中断（POST /api/issues/:key/cancel。
+/// 人の「中断」ボタン）。RunCtl.cancel を立て、run タスクが queued へ
+/// 戻し終えるのを待ってから課題を返す
+pub async fn cancel_issue(app: &Shared, key: &str) -> Result<Value, String> {
+    let it = find_issue(&app.root, key).ok_or_else(|| "issue not found".to_string())?;
+    let st = it
+        .get("status")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    if !matches!(
+        st.as_str(),
+        pipeline::ST_RUNNING | pipeline::ST_VERIFYING
+    ) {
+        return Err(format!("issue is {} (running|verifying required)", st));
+    }
+    audit::record(
+        &app.root,
+        key,
+        "human",
+        "cancel",
+        None,
+        Map::from_iter([("from".into(), json!(st))]),
+    );
+    if !cancel_run(key) {
+        // in-flight run が無い running = 並列モードの chat 委譲課題:
+        // 委譲先 chat を停止して queued へ戻す
+        if let Some(cid) = it.get("chatId").and_then(|v| v.as_i64()) {
+            if cancel_issue_chat(app, key, cid).await {
+                return find_issue(&app.root, key)
+                    .ok_or_else(|| "issue not found".to_string());
+            }
+        }
+        return Err("in-flight run not found".into());
+    }
+    for _ in 0..200 {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        if let Some(cur) = find_issue(&app.root, key) {
+            if cur.get("status").and_then(|v| v.as_str()) == Some(pipeline::ST_QUEUED)
+            {
+                app.sse("issues", &json!({}));
+                return Ok(cur);
+            }
+        }
+    }
+    Err("cancel did not complete".into())
+}
+
 
 fn key_of(issue: &Value) -> String {
     issue
@@ -219,9 +315,19 @@ async fn drain_inner(app: &Shared) {
             Some(pipeline::ST_VERIFYING) => {
                 if !flight_add(&key) {
                     continue;
+                // drain 再開の verify も cancel 対象にする（manual-5dabae8b）
+                let (cancel_tx, _rx) = watch::channel(false);
+                ctl_register(
+                    &key,
+                    RunCtl {
+                        cancel: cancel_tx,
+                        stdin: Arc::new(tokio::sync::Mutex::new(None)),
+                    },
+                );
                 }
                 let app2 = app.clone();
                 tokio::spawn(async move {
+                    ctl_del(&key);
                     resume_verify(&app2, &key, Obs::default()).await;
                     flight_del(&key);
                 });
@@ -322,12 +428,69 @@ async fn drain_inner(app: &Shared) {
 /// can_dispatch の論理競合規則を使い、同一 repo の running|verifying や
 /// 同時の dispatch 要求と競合しないよう lock する。
 pub async fn dispatch_issue(app: &Shared, key: &str) -> Result<Value, String> {
+    let mut issues = store::load_issues(&app.root);
+    // 課題キー単位の並行制御（manual-5dabae8b・run-control.mmd）:
+    // running|verifying の同一 key への再 dispatch（再 trigger）は
+    // RunCtl.cancel で旧 run を中断し queued へ戻してから起動する。
+    // 課題 key の in-flight run は常に1つ
+    if let Some(cur) = issues.iter().find(|i| key_of(i) == key) {
+        let st = cur.get("status").and_then(|v| v.as_str()).unwrap_or("");
+        if matches!(st, pipeline::ST_RUNNING | pipeline::ST_VERIFYING) {
+            if let Some(cid) = cur.get("chatId").and_then(|v| v.as_i64()) {
+                // 並列モード（chat 委譲）の再 trigger: 委譲先 chat を停止し
+                // queued へ戻してから起動する
+                conlog(
+                    "runner",
+                    "sys",
+                    &format!("{}: 再 trigger で委譲 chat #{} を cancel", key, cid),
+                );
+                if !cancel_issue_chat(app, key, cid).await {
+                    return Err("委譲 chat の中断が完了しなかった".into());
+                }
+            } else {
+                if !cancel_run(key) {
+                    return Err("in-flight run not found".into());
+                }
+                conlog(
+                    "runner",
+                    "sys",
+                    &format!("{}: 再 trigger で旧 run を cancel", key),
+                );
+                let mut back = false;
+                for _ in 0..150 {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    let cur = find_issue(&app.root, key);
+                    let st = cur
+                        .as_ref()
+                        .and_then(|i| i.get("status"))
+                        .and_then(|v| v.as_str());
+                    if st == Some(pipeline::ST_QUEUED) && !flight_has(key) {
+                        back = true;
+                        break;
+                    }
+                }
+                if !back {
+                    return Err("旧 run の中断が完了しなかった".into());
+                }
+            }
+            issues = store::load_issues(&app.root);
+        }
+    }
     let _dispatch_guard = dispatching().lock().await;
     if flight_has(key) {
         return Err("already running".into());
     }
-    let issues = store::load_issues(&app.root);
-    pipeline::can_dispatch(&app.cfg().await, &issues, key)?;
+    let cfg = app.cfg().await;
+    // 課題の処理方法 issueExecMode（issue-lifecycle.mmd）:
+    // parallel（既定）= chat 起票で並列対応（通常のチャットと同じ流れ。
+    // 同時実行上限・同一 repo 直列は課さず can_dispatch_base のみ）、
+    // direct = runner パイプライン直接実行（can_dispatch 完全ガード）
+    let parallel = cfg_str(&cfg, "issueExecMode").unwrap_or("parallel") == "parallel";
+    if parallel {
+        pipeline::can_dispatch_base(&cfg, &issues, key)?;
+    } else {
+        pipeline::can_dispatch(&cfg, &issues, key)?;
+    }
     let issue = issues
         .into_iter()
         .find(|i| key_of(i) == key)
@@ -415,9 +578,20 @@ async fn start_run(app: &Shared, issue: Value) -> Result<(), String> {
     let run_idx = runs.len() - 1;
     let _ = pipeline::set_field(&root, &key, "runs", json!(runs));
     conlog("runner", "sys", &format!("run 開始: {} {}", key, title));
+    // run 制御ハンドル（run-control.mmd）: cancel・steer の横入りを受け付ける
+    let (cancel_tx, _rx) = watch::channel(false);
+    ctl_register(
+        &key,
+        RunCtl {
+            cancel: cancel_tx,
+            stdin: Arc::new(tokio::sync::Mutex::new(None)),
+        },
+    );
+
 
     let app2 = app.clone();
     tokio::spawn(async move {
+        ctl_del(&key);
         run_and_verify(&app2, &key, &issue, agent, repo, &ev_dir, run_idx).await;
         flight_del(&key);
     });
@@ -904,6 +1078,69 @@ async fn fail_run(
     }
     app.sse("issues", &json!({}));
 }
+/// run の halt・中断処理（run-control.mmd）: child kill 後に構造化理由を
+/// 課題フィールドへ記録（lastStuck/budgetHold/riskHold）し、部分成果を
+/// 保全して running → queued へ戻す。halt は verify NG ではないため
+/// verifyBacks を消費しない。再 dispatch は一覧の対応ボタン・extend・
+/// risk-ack の人操作で行う
+async fn halt_run(
+    app: &Shared,
+    key: &str,
+    run_idx: usize,
+    halt: Value,
+    issue: &Value,
+    repo: &Value,
+    obs: Obs,
+) {
+    let root = &app.root;
+    let kind = halt
+        .get("kind")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let mut h = halt.clone();
+    if let Some(o) = h.as_object_mut() {
+        o.insert("at".into(), json!(now_iso()));
+        o.insert("run".into(), json!(run_idx));
+    }
+    // 構造化理由を課題フィールドへ（再 dispatch prompt へ注入される）
+    let (field, desc) = match kind.as_str() {
+        "stuck" => (
+            "lastStuck",
+            format!(
+                "stuck 検出（{}）: {}",
+                h.get("pattern").and_then(|v| v.as_str()).unwrap_or(""),
+                h.get("detail").and_then(|v| v.as_str()).unwrap_or("")
+            ),
+        ),
+        "budget" => (
+            "budgetHold",
+            format!(
+                "実行予算 {} 上限到達（{}）",
+                h.get("field").and_then(|v| v.as_str()).unwrap_or(""),
+                h.get("limit").map(|v| v.to_string()).unwrap_or_default()
+            ),
+        ),
+        "risk" => (
+            "riskHold",
+            format!(
+                "HIGH リスク行動（{}）: {}",
+                h.get("label").and_then(|v| v.as_str()).unwrap_or(""),
+                h.get("line").and_then(|v| v.as_str()).unwrap_or("")
+            ),
+        ),
+        _ => ("haltNote", "run を中断".to_string()),
+    };
+    let _ = pipeline::set_field(root, key, field, h.clone());
+    if kind == "cancel" {
+        let _ = pipeline::set_field(root, key, "verifyNote", json!("人が run を中断"));
+    }
+    let _ = pipeline::set_field(root, key, "lastBlocker", json!({
+        "kind": kind,
+        "reason": crate::redact::scrub(&desc),
+        "at": now_iso(),
+        "run": run_idx,
+    }));
 
 async fn run_and_verify(
     app: &Shared,
@@ -1037,7 +1274,14 @@ async fn run_and_verify(
     // 起動失敗で消費すると追記を誰にも見せずに失う）
     pipeline::consume_followups(root, key);
 
-    // stdout/stderr → conlog + run.log バッファ
+    // run 制御（run-control.mmd）: stdin を steer 注入口として ctl へ
+    // 繋ぎ、cancel 受信用の watch receiver を用意する
+    let ctl_pair = ctl_get(key);
+    if let Some((_, stdin_slot)) = &ctl_pair {
+        *stdin_slot.lock().await = child.stdin.take();
+    }
+    let mut cancel_rx = ctl_pair.map(|(c, _)| c.subscribe());
+
     let src = format!("run {}", key.rsplit(':').next().unwrap_or(key));
     let buf = Arc::new(Mutex::new(String::new()));
     let mut readers = Vec::new();
@@ -1073,13 +1317,71 @@ async fn run_and_verify(
     let cfg = app.cfg().await;
     let timeout =
         Duration::from_secs_f64(cfg_f64(&cfg, "runTimeoutMinutes", 120.0) * 60.0);
-    let res = tokio::time::timeout(timeout, child.wait()).await;
-    let (code, timed_out, wait_err) = match res {
-        Ok(Ok(st)) => (st.code(), false, None),
-        Ok(Err(e)) => (None, false, Some(e.to_string())),
-        Err(_) => {
-            let _ = child.kill().await;
-            (None, true, None)
+    // 実行予算の壁時計上限（manual-94172864）: budget.maxWallMinutes +
+    // budgetExtend.maxWallMinutes。0=無効（runTimeoutMinutes が全体上限）
+    let wall_mins = issue
+        .get("budget")
+        .and_then(|b| b.get("maxWallMinutes"))
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.0)
+        + issue
+            .get("budgetExtend")
+            .and_then(|b| b.get("maxWallMinutes"))
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
+    let wall_fut = async move {
+        if wall_mins > 0.0 {
+            tokio::time::sleep(Duration::from_secs_f64(wall_mins * 60.0)).await;
+        } else {
+            std::future::pending::<()>().await;
+        }
+    };
+    tokio::pin!(wall_fut);
+
+    enum Stop {
+        Done,
+        Cancel,
+        Wall,
+        Timeout,
+        Mon,
+    }
+    // wait ループ: 子の終了・cancel・壁時計・run timeout・監視発火の
+    // いずれかで抜ける。監視発火は行単位判定を短周期でポーリングする
+    let (code, timed_out, wait_err, stop) = {
+        let poll = Duration::from_millis(250);
+        loop {
+            tokio::select! {
+                res = child.wait() => match res {
+                    Ok(st) => break (st.code(), false, None, Stop::Done),
+                    Err(e) => break (None, false, Some(e.to_string()), Stop::Done),
+                },
+                _ = async {
+                    match &mut cancel_rx {
+                        Some(rx) => { let _ = rx.changed().await; }
+                        None => std::future::pending::<()>().await,
+                    }
+                } => {
+                    if mon.lock().unwrap().halt.is_some() {
+                        continue; // 監視発火の cancel 通知は下の Mon で拾う
+                    }
+                    let _ = child.kill().await;
+                    break (None, false, None, Stop::Cancel);
+                },
+                _ = &mut wall_fut => {
+                    let _ = child.kill().await;
+                    break (None, false, None, Stop::Wall);
+                },
+                _ = tokio::time::sleep(timeout) => {
+                    let _ = child.kill().await;
+                    break (None, true, None, Stop::Timeout);
+                },
+                _ = tokio::time::sleep(poll) => {
+                    if mon.lock().unwrap().halt.is_some() {
+                        let _ = child.kill().await;
+                        break (None, false, None, Stop::Mon);
+                    }
+                },
+            }
         }
     };
     for r in readers {
@@ -1155,26 +1457,45 @@ async fn run_and_verify(
             if timed_out { " timeout" } else { "" },
             wait_err.map(|e| format!(" err={}", e)).unwrap_or_default()
         ),
+    // run halt・中断（run-control.mmd）: 監視発火（stuck・step 上限・
+    // HIGH リスク）・壁時計上限・cancel は検証へ進めず、構造化理由を
+    // 記録して部分成果を保全した上で queued へ戻す（verifyBacks 不消費）
+    let halt = mon.lock().unwrap().halt.clone();
+    let stop_kind = match stop {
+        Stop::Wall => Some(json!({
+            "kind": "budget",
+            "field": "maxWallMinutes",
+            "limit": wall_mins,
+        })),
+        Stop::Cancel => Some(json!({"kind": "cancel"})),
+        _ => halt.clone(),
+    };
+    if let Some(h) = halt.or(stop_kind) {
+        if !matches!(stop, Stop::Done | Stop::Timeout) {
+            halt_run(app, key, run_idx, h, issue, &repo_v, obs.clone()).await;
+            return;
+        }
+    }
     );
     // 終了コードに関わらず検証へ進める（コミット済み成果の評価は verify の責務）
     if let Err(e) = pipeline::request_transition(root, key, pipeline::ST_VERIFYING) {
-        conlog(
-            "runner",
-            "err",
-            &format!("{}: verifying 遷移失敗: {}", key, e),
-        );
         tstep(
             &traj,
             "thought",
             "transition.error",
             json!({"note": format!("verifying 遷移失敗: {}", e)}),
+        conlog(
+            "runner",
+            "err",
+            &format!("{}: verifying 遷移失敗: {}", key, e),
+        );
         );
         return;
     }
-    app.sse("issues", &json!({}));
     tstep(&traj, "state", "verifying", json!({}));
     if let Some(t) = &obs.trace {
         t.event("state.verifying", Map::new());
+    app.sse("issues", &json!({}));
     }
     resume_verify(app, key, obs).await;
 }
@@ -1434,7 +1755,54 @@ fn build_prompt(root: &Path, issue: &Value) -> String {
 
 /// verifying の再開: verifyOk 未記録なら検証を（再）実行、記録済みなら
 /// push 段階（帰属整理 → 承認判定 → push）へ進む。
+/// RunCtl が登録済みなら cancel を受け付け、中断は verifying → queued へ
+/// （manual-5dabae8b。verifyBacks 不消費）
 /// traj は run 側で開いた trajectory（drain 再開経路は None → 既存分を開く）
+    let mut cancel_rx = ctl_get(key).map(|(c, _)| c.subscribe());
+    tokio::select! {
+        _ = async {
+            match &mut cancel_rx {
+                Some(rx) => { let _ = rx.changed().await; }
+                None => std::future::pending::<()>().await,
+            }
+        } => {
+            // verify 中の cancel: run_cmd 中の子プロセスは drop で kill
+            // （tokio::process は kill_on_drop 既定 on）
+            let _ = pipeline::set_field(
+                &app.root,
+                key,
+                "verifyNote",
+                json!("人が verify を中断"),
+            );
+            let _ = pipeline::set_field(&app.root, key, "lastBlocker", json!({
+                "kind": "cancel",
+                "reason": "verify 中断",
+                "at": now_iso(),
+            }));
+            audit::record(
+                &app.root,
+                key,
+                "system",
+                "verify.cancel",
+                None,
+                Map::new(),
+            );
+            if pipeline::request_transition(&app.root, key, pipeline::ST_QUEUED)
+                .is_ok()
+            {
+                conlog(
+                    "runner",
+                    "warn",
+                    &format!("{}: verify を cancel → queued", key),
+                );
+            }
+            app.sse("issues", &json!({}));
+        }
+        _ = resume_verify_inner(app, key, obs) => {}
+    }
+}
+
+async fn resume_verify_inner(app: &Shared, key: &str, obs: Obs) {
 async fn resume_verify(app: &Shared, key: &str, obs: Obs) {
     let root = &app.root;
     let Some(issue) = find_issue(root, key) else {
@@ -2753,7 +3121,11 @@ mod tests {
 
         let started = dispatch_issue(&app, key).await.unwrap();
         assert_eq!(started["status"], json!(pipeline::ST_RUNNING));
-        assert!(dispatch_issue(&app, key).await.is_err());
+        // 課題キー単位の並行制御（manual-5dabae8b）: running 中の再
+        // trigger は旧 run を cancel して queued へ戻してから再 dispatch
+        // する（エラーにはしない）。run 完了の進行具合で queued へ戻る
+        // 時点が変わるため、再 dispatch 成否は状況次第でどちらもあり得る
+        let _ = dispatch_issue(&app, key).await;
         let s = wait_status(&root, key, pipeline::ST_DONE, 60).await;
         assert_eq!(s, pipeline::ST_DONE);
         let _ = std::fs::remove_dir_all(&root);

@@ -31,6 +31,9 @@ stateDiagram-v2
     plan_review --> running : 人が計画承認<br/>or タイムアウト自動承認
     plan_review --> queued : 計画差し戻し
     plan_review --> rejected : 人が却下
+    running --> done : 課題処理方法=並列（chat 起票）時、<br/>委譲先 chat の終了区分=done<br/>（chat 側の検証を内包するため<br/>verifying を経由しない）
+    running --> queued : cancel・run halt<br/>（stuck・予算・HIGHリスク。<br/>verifyBacks 不消費・run-control.mmd）<br/>並列モードの chat 終了区分<br/>unverified も queued 差し戻し
+    verifying --> queued : cancel（再 trigger で<br/>旧 run を中断し queued へ）
     running --> verifying : 実装完了
     verifying --> done : 検証合格
     verifying --> retry : NG (差し戻し)

@@ -68,6 +68,9 @@ stateDiagram-v2
     plan_review --> running : 人が計画承認<br/>or タイムアウト自動承認
     plan_review --> queued : 計画差し戻し
     plan_review --> rejected : 人が却下
+    running --> done : 課題処理方法=並列（chat 起票）時、<br/>委譲先 chat の終了区分=done<br/>（chat 側の検証を内包するため<br/>verifying を経由しない）
+    running --> queued : cancel・run halt<br/>（stuck・予算・HIGHリスク。<br/>verifyBacks 不消費・run-control.mmd）<br/>並列モードの chat 終了区分<br/>unverified も queued 差し戻し
+    verifying --> queued : cancel（再 trigger で<br/>旧 run を中断し queued へ）
     running --> verifying : 実装完了
     verifying --> done : 検証合格
     verifying --> retry : NG (差し戻し)
@@ -340,6 +343,11 @@ flowchart TD
 - runner は `chat/`（接続AI 実行体）が担う。既定実装は devin CLI を ACP で
   駆動する非対話セッション（`chat/acp.rs`）
 - **起動可否は論理競合ベース**（同時起動数の上限は設けない）:
+- **課題キー単位の並行制御（manual-5dabae8b）**: 同一課題の run は常に1つ。
+  running|verifying の課題への再 dispatch / `cancel` は in-flight run の
+  `RunCtl.cancel` を立てて旧 run を中断（child kill）し `queued` へ戻してから
+  起動する。人の「中断」ボタンも同じ経路で `queued` へ戻す
+  （verifyBacks は消費しない）
   同一リポジトリの未完了 run、排他ロック中の実機リソースがある課題は待機
 - **計画承認ゲート（planGate）**: `planGate=true` の課題は dispatch で
   実装に入らず、先ず `planning` で実装計画のみを生成する（コード変更・
@@ -405,6 +413,79 @@ flowchart TD
     FU -.->|次回 run の prompt で<br/>未消費分だけ見せる| USE
     FU -.->|run 中の課題には<br/>混入しない| PROMPT
 ```
+- **AST 単位の構造的コンテキスト（codemap・manual-38bbe09e）**:
+  dispatch prompt 組立時に `codemap::context_section` が課題本文の
+  トークンと repo の構造単位（関数・impl・class 等の行範囲）を照合し、
+  関連単位のスニペットを「関連コード構造（AST 単位）」として注入する。
+  外部パーサは持たず言語別の軽量パターンで単位を抽出する（依存ゼロ）。
+  `codeMap.enabled=false` で無効化、`codeMap.maxUnits`（既定12）・
+  `maxBytes`（既定9000）・`maxFiles`・`maxFileBytes` で注入量を制御する
+
+<!-- diagram: codemap -->
+```mermaid
+---
+title: AST 単位の構造的コンテキスト取得（codemap）
+---
+flowchart TD
+    RUN[dispatch prompt 組立<br/>runner.build_prompt_full] --> CM{codemap::context_section<br/>codeMap.enabled（既定 on）}
+    ISS[課題 title + body] --> TOK[トークン抽出<br/>識別子・パス片・3文字以上<br/>上限 40 個]
+    CM --> SCAN[repo 走査<br/>.git / target / node_modules /<br/>dist / build 等を除外<br/>maxFiles・maxFileBytes で打切り]
+    SCAN --> UN[構造単位の抽出<br/>言語別軽量パターン<br/>（外部パーサ無し・依存ゼロ）:<br/>rs = fn / impl / struct / enum / trait / mod<br/>py = def / class（インデント幅で終端）<br/>js・ts = function / class / const arrow<br/>ブレース深さで終端行を特定]
+    UN --> SC[関連スコア<br/>単位名一致 +3 /<br/>パス片一致 +2 /<br/>ファイル stem 一致 +1]
+    TOK --> SC
+    SC --> TOP[上位 maxUnits 件<br/>既定 12]
+    TOP --> SEC[## 関連コード構造（AST 単位）<br/>各単位: path:開始行-終了行 kind name<br/>+ 単位スニペット<br/>合計 maxBytes（既定 9000）で頭打ち]
+    SEC --> PRM[dispatch prompt へ注入<br/>run がファイル全体でなく<br/>構造単位の文脈を持つ]
+    CM -->|ヒット 0 件・無効化| SKIP[注入しない<br/>（従来どおりの prompt）]
+```
+
+#### 5.4.1 run 制御・安全（監視・予算・steering・リスク・cancel・保全・ループcap）
+
+run 実行中の監視・停止・人確認・保全の判断フロー。runner は child proc の
+stdout/stderr を行単位で監視し、stuck・実行予算・リスク分類のいずれかが
+発火したら `RunCtl.cancel` で run を halt して `queued` へ戻す。
+halt は verify NG ではないため `verifyBacks` を消費せず、再 dispatch は
+一覧の「対応」ボタンまたは上限延長（extend）で行う。
+
+<!-- diagram: run-control -->
+```mermaid
+---
+title: run 制御・安全（監視・予算・steering・リスク・cancel・保全・ループcap）
+---
+flowchart TD
+    RUN[run 実行中<br/>runner.rs が child proc の<br/>stdout/stderr を行単位で監視<br/>stdin は steering 用に開放] --> MON{出力行ごとに判定}
+    MON --> STK{stuck.rs<br/>同一行4回 / 同一 error 行3回 /<br/>同一行3連続（独白相当） /<br/>2パターン交互6行 /<br/>context window error 連続<br/>stuckDetect=off で無効}
+    MON --> BUD{実行予算 issue.budget<br/>maxSteps（出力行）/<br/>maxWallMinutes（壁時計）/<br/>maxCostUsd（累積費用）<br/>assess が課題ごとに設定}
+    MON --> RSK{risk.rs<br/>行 → action リスク分類<br/>（外部通信・削除・設定変更等<br/>HIGH のみ人確認）}
+    STK -->|検出| HALT
+    BUD -->|上限到達<br/>LimitsExceeded| HALT
+    RSK -->|HIGH 検出<br/>riskConfirm=on| HALT
+    HALT[run halt<br/>ctl.cancel → child kill<br/>構造化理由を lastStuck /<br/>budgetHold / riskHold に記録<br/>trajectory 終了理由=stuck/limit/<br/>halt] --> PSV[部分成果保全<br/>manual-7df2ce2f<br/>未コミット＋未push 作業を<br/>kasugai/partial-* branch へ push<br/>lastBlocker に詰まり内容を記録]
+    PSV --> BACK[running → queued<br/>run 制御差し戻し<br/>verifyBacks は消費しない]
+    BACK --> HMN{人の判断<br/>issues 一覧・詳細のボタン}
+    HMN -->|対応| DISP[再 dispatch<br/>stuck / lastBlocker /<br/>steer / riskRejected を<br/>prompt へ注入]
+    HMN -->|extend| EXT[POST extend<br/>cycleCapExtend・budgetExtend<br/>引上げ → 即 dispatch]
+    HMN -->|risk-ack allow| ACK[riskHold 解除<br/>riskAllowed 記録 → dispatch]
+    HMN -->|risk-ack deny| DENY[riskRejected 記録<br/>queued で待機・次回 prompt に<br/>却下理由を注入し別アプローチへ]
+    STR[POST steer text<br/>run 中の方針修正入力] -->|in-flight run| STDIN[child stdin へ注入<br/>best-effort]
+    STR -->|常時| SQ[followUps kind=steer 記録<br/>次回 dispatch prompt へ注入]
+    RTR{同一 issue key の<br/>再 trigger<br/>dispatch / cancel} -->|in-flight run あり| CXL[cancel_run<br/>RunCtl.cancel → child kill<br/>running・verifying → queued]
+    RTR -->|chatId 付き課題<br/>（並列モード）| CXLC[委譲 chat を cancel<br/>課題 → queued・双方向リンク解除]
+    CXL -->|課題 key の run は常に1つ| DISP
+    CXLC --> DISP
+    DISP --> CAP{runCycleCap<br/>既定3・0=無制限<br/>runs 累計で判定<br/>manual-175e7229}
+    CAP -->|超過| ESC[can_dispatch Err<br/>人へエスカレーション<br/>extend で上限引上げ]
+    CAP -->|以内| PAR{issueExecMode<br/>既定 parallel}
+    PAR -->|direct 直列:<br/>同一 repo の active 課題あり| W8[can_dispatch Err<br/>blocked by。<br/>一括対応では autoDispatch<br/>待機 → drain が repo 解放時に起動]
+    PAR -->|direct 直列:<br/>同一 repo 排他なし| GO[running へ<br/>runner run 起動]
+    PAR -->|parallel 並列:<br/>can_dispatch_base のみ| CHAT[chat セッション起票で委譲<br/>課題 chatId・chat issueKey<br/>chat 終了区分を課題へ写像<br/>done→done（GitHub 由来は理由コメント+<br/>issue クローズ）<br/>※ done 課題は drain sweep が<br/>case/eval 同期後にレコード削除<br/>（postPush 監視中は残存）<br/>unverified→queued<br/>ng・要人対応は running 継続]
+    W8 -.->|maxConcurrentRuns<br/>クォーラムは direct で有効| GO
+    EXT --> CAP
+    ACK --> CAP
+    LOOP[verify NG の review↔fix<br/>自動反復] -->|allowAutoLoop<br/>既定 OFF| DRN[drain が verify NG 差戻しの<br/>queued を自動 dispatch<br/>runCycleCap・retryAfter で上限]
+    DRN --> CAP
+```
+
 
 ### 5.5 verify（L0〜L4）
 
@@ -878,6 +959,8 @@ flowchart TD
 - `GET /api/refs?path=` — 収集済み doc が本文中で参照するファイル一覧
   （`path` は収集済み doc のみ。glob・ディレクトリ参照は実ファイルへ展開し、
   秘匿系は `denied` として返すが本文は返さない）
+- `POST /api/issues/:key/cancel` — 実行中 run の中断（running|verifying →
+  queued。同一 key の再 dispatch も同じ経路で旧 run を止める。run-control.mmd）
 - `POST /api/issues/:key/dispatch` / `POST /api/issues/:key/approve` / `reject`
 - `GET /api/proposals` / `POST /api/proposals/:id/accept|decline`
 - `GET /api/repos` — repos 一覧。`config.repos` 登録済みに加え、IDE ワークスペース

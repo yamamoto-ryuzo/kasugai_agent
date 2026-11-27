@@ -277,6 +277,7 @@
   "iss.reject": "ablehnen",
   "iss.requeue": "erneut ausführen",
   "iss.dispatch": "bearbeiten",
+  "iss.cancel": "abbrechen",
   "iss.pushApprove": "Push genehmigen",
   "det.detected": "erkannt",
   "det.updated": "aktualisiert",

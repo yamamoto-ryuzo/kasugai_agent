@@ -3196,9 +3196,17 @@ async fn issue_gate_action(app: &Shared, key: &str, action: &str) -> Result<Valu
                         crate::pipeline::ST_QUEUED,
                     )?;
                 }
-                crate::pipeline::ST_QUEUED => {}
+                // 課題キー単位の並行制御（manual-5dabae8b）: running|
+                // verifying への再 trigger は dispatch_issue 側が旧 run を
+                // cancel → queued へ戻してから起動する
+                crate::pipeline::ST_QUEUED
+                | crate::pipeline::ST_RUNNING
+                | crate::pipeline::ST_VERIFYING => {}
                 s => {
-                    return Err(format!("issue is {} (gated|queued|failed required)", s));
+                    return Err(format!(
+                        "issue is {} (gated|queued|failed|running|verifying required)",
+                        s
+                    ));
                 }
             }
             crate::runner::dispatch_issue(app, key).await
@@ -3304,6 +3312,17 @@ async fn api_issues_action(
             }
             Err(e) => err(StatusCode::CONFLICT, &e),
         };
+    // cancel は running|verifying の run 中断（manual-5dabae8b。
+    // RunCtl.cancel → child kill → queued 差し戻し。verifyBacks 不消費）
+    if action == "cancel" {
+        return match crate::runner::cancel_issue(&app, &key).await {
+            Ok(issue) => {
+                app.sse("issues", &json!({}));
+                j(json!({"ok": true, "issue": issue}))
+            }
+            Err(e) => err(StatusCode::CONFLICT, &e),
+        };
+    }
     }
     let (from, to) = match action.as_str() {
         "approve" => (crate::pipeline::ST_GATED, crate::pipeline::ST_QUEUED),
@@ -3321,7 +3340,7 @@ async fn api_issues_action(
     // のどれからでも可。dispatch は queued に加え gated（承認+即時 dispatch）・
     // failed（再実行+即時 dispatch）からも可
     let ok_from = match action.as_str() {
-        "reject" | "dispatch" => matches!(
+        "reject" => matches!(
             cur.as_str(),
             crate::pipeline::ST_GATED
                 | crate::pipeline::ST_QUEUED

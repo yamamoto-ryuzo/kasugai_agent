@@ -277,6 +277,7 @@
   "iss.reject": "驳回",
   "iss.requeue": "重新执行",
   "iss.dispatch": "处理",
+  "iss.cancel": "中断",
   "iss.pushApprove": "批准推送",
   "det.detected": "检测",
   "det.updated": "更新",

@@ -277,6 +277,7 @@
   "iss.reject": "却下",
   "iss.requeue": "再実行",
   "iss.dispatch": "対応",
+  "iss.cancel": "中断",
   "iss.pushApprove": "push 承認",
   "det.detected": "検出",
   "det.updated": "更新",

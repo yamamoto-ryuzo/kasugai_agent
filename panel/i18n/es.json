@@ -277,6 +277,7 @@
   "iss.reject": "rechazar",
   "iss.requeue": "reintentar",
   "iss.dispatch": "atender",
+  "iss.cancel": "cancelar",
   "iss.pushApprove": "aprobar push",
   "det.detected": "detectado",
   "det.updated": "actualizado",

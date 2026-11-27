@@ -71,6 +71,11 @@ fn allowed(from: &str, to: &str) -> bool {
             | (ST_PLAN_REVIEW, ST_REJECTED)
             | (ST_PLAN_REVIEW, ST_FAILED)
             | (ST_RUNNING, ST_VERIFYING)
+            // run 制御差し戻し（run-control.mmd・manual-5dabae8b）:
+            // cancel・run halt（stuck・予算・HIGHリスク）は verifyBacks を
+            // 消費せず queued へ戻る（verify NG の retry 経路ではない）
+            | (ST_RUNNING, ST_QUEUED)
+            | (ST_VERIFYING, ST_QUEUED)
             | (ST_RUNNING, ST_FAILED)
             | (ST_VERIFYING, ST_DONE)
             | (ST_VERIFYING, ST_RETRY)
