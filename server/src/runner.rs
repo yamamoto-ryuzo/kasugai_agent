@@ -1310,15 +1310,7 @@ struct Unpushed {
 }
 
 fn parse_issue_trailer(body: &str) -> Option<String> {
-    body.lines()
-        .filter_map(|l| {
-            let l = l.trim();
-            l.strip_prefix("Issue:")
-                .or_else(|| l.strip_prefix("issue:"))
-        })
-        .map(|v| v.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .last()
+    crate::util::issue_trailer(body)
 }
 
 /// 独立 diff レビュー（diffReview=on・manual-475831d2）: 未push範囲の差分を

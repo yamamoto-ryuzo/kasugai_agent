@@ -128,6 +128,14 @@ pub fn ingest(root: &Path, cand: &Value) -> (Value, bool, bool) {
             (i, true, false)
         }
         crate::pipeline::IntakeOutcome::Existing(i) => (i, false, false),
+        // 親課題リンク（manual-488ea7f9）: 帰属先を candidate の
+        // linkedIssue へ記録して一覧に表示。created=true は呼び出し側に
+        // issues/candidates 双方の SSE push を起こさせるため（親課題更新の即時反映）
+        crate::pipeline::IntakeOutcome::Linked(i) => {
+            let pk = i.get("key").and_then(|v| v.as_str()).unwrap_or("");
+            patch_candidate(root, &key, &[("linkedIssue", json!(pk))]);
+            (i, true, false)
+        }
         crate::pipeline::IntakeOutcome::Deferred(reason) => {
             mark_deferred(root, &key, &reason);
             (Value::Null, false, true)
@@ -149,6 +157,7 @@ pub fn ingest_forced(root: &Path, cand: &Value) -> (Value, bool, bool) {
             (i, true, false)
         }
         crate::pipeline::IntakeOutcome::Existing(i) => (i, false, false),
+        crate::pipeline::IntakeOutcome::Linked(i) => (i, false, false),
         crate::pipeline::IntakeOutcome::Deferred(reason) => {
             mark_deferred(root, &key, &reason);
             (Value::Null, false, true)
@@ -187,6 +196,10 @@ pub fn backfill_issues(root: &Path) -> (usize, usize) {
             crate::pipeline::IntakeOutcome::Deferred(reason) => {
                 mark_deferred(root, &key, &reason);
                 deferred += 1;
+            }
+            crate::pipeline::IntakeOutcome::Linked(i) => {
+                let pk = i.get("key").and_then(|v| v.as_str()).unwrap_or("");
+                patch_candidate(root, &key, &[("linkedIssue", json!(pk))]);
             }
             crate::pipeline::IntakeOutcome::Existing(_) => {}
         }

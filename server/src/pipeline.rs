@@ -608,6 +608,9 @@ pub fn assess_preview(issues: &[Value], issue: &Value) -> Value {
 pub enum IntakeOutcome {
     Created(Value),
     Existing(Value),
+    /// 親課題リンク（manual-488ea7f9）: candidate の parentIssue が既存課題に
+    /// 帰属解決できた。新規起票はせず元課題へ followUps 追記+再実行要求済み
+    Linked(Value),
     Deferred(String),
 }
 
@@ -1003,6 +1006,62 @@ fn intake_inner(root: &Path, cand: &Value, force: bool) -> IntakeOutcome {
         return IntakeOutcome::Existing(out);
     }
 
+    // 親課題リンク（manual-488ea7f9）: candidate が parentIssue（例: ci-failure
+    // detector が失敗コミットの Issue: トレーラから逆引きした帰属 key）を
+    // emit したら既存課題へ帰属させる。新規課題は作らず、元課題の followUps
+    // へ追記（ref=候補 key で重複抑止）し、failed の元課題は queued へ
+    // 差し戻して再実行を要求する。帰属できない・parentIssue 無しは従来どおり
+    // 新規起票へ進む。force（人の対応ボタン）はこの帰属を bypass する
+    if !force {
+        if let Some(pk) = cand.get("parentIssue").and_then(|v| v.as_str()) {
+            if !pk.is_empty() {
+                if let Some(pos) = issues
+                    .iter()
+                    .position(|i| i.get("key").and_then(|v| v.as_str()) == Some(pk))
+                {
+                    let fu_ref = key.clone();
+                    let fu_text = format!(
+                        "{} — {}",
+                        title,
+                        cand.get("url").and_then(|v| v.as_str()).unwrap_or("")
+                    );
+                    let o = issues[pos].as_object_mut().unwrap();
+                    let mut fus: Vec<Value> = o
+                        .get("followUps")
+                        .and_then(|v| v.as_array())
+                        .cloned()
+                        .unwrap_or_default();
+                    if !fus
+                        .iter()
+                        .any(|f| f.get("ref").and_then(|v| v.as_str()) == Some(fu_ref.as_str()))
+                    {
+                        fus.push(json!({
+                            "at": now_iso(),
+                            "kind": source,
+                            "text": fu_text,
+                            "ref": fu_ref,
+                            "consumedAt": Value::Null,
+                        }));
+                        o.insert("followUps".into(), json!(fus));
+                    }
+                    o.insert("updatedAt".into(), json!(now_iso()));
+                    // 再実行要求: failed の元課題は queued へ差し戻す
+                    if issues[pos]
+                        .get("status")
+                        .and_then(|v| v.as_str())
+                        == Some(ST_FAILED)
+                    {
+                        transition(&mut issues[pos], ST_QUEUED);
+                    }
+                    let parent = issues[pos].clone();
+                    store::save_issues(root, &issues);
+                    sync_queue(root, &issues);
+                    return IntakeOutcome::Linked(parent);
+                }
+            }
+        }
+    }
+
     let cfg = load_config(root);
     // silence（detect-pipeline.mmd SIL）: メンテ窓・既知症状のミュート。
     // matcher+期限に合う候補は課題を作らない（期限切れは自動解除）
@@ -1241,6 +1300,7 @@ mod tests {
         match intake(root, c) {
             IntakeOutcome::Created(i) => (i, true),
             IntakeOutcome::Existing(i) => (i, false),
+            IntakeOutcome::Linked(i) => (i, false),
             IntakeOutcome::Deferred(_) => (Value::Null, false),
         }
     }
@@ -1471,6 +1531,7 @@ mod tests {
         }
         match intake_forced(&root, &c2) {
             IntakeOutcome::Created(_) | IntakeOutcome::Existing(_) => {}
+            IntakeOutcome::Linked(_) => {}
             IntakeOutcome::Deferred(r) => panic!("forced, got {}", r),
         }
         let _ = std::fs::remove_dir_all(&root);
@@ -1918,6 +1979,89 @@ mod tests {
         }
         let _ = std::fs::remove_dir_all(&root);
     }
+
+    // ---- 親課題リンク（manual-488ea7f9） ----
+
+    #[test]
+    fn parent_issue_links_followup_and_requeues_failed() {
+        let root = temp_root("plink");
+        // 親課題を failed にしておく（ci-failure の帰属先）
+        let (parent, created) = intake_v(&root, &cand("original bug", "b"));
+        assert!(created);
+        let pk = parent["key"].as_str().unwrap().to_string();
+        let mut issues = store::load_issues(&root);
+        let p = issues
+            .iter_mut()
+            .find(|i| i["key"].as_str() == Some(pk.as_str()))
+            .unwrap();
+        p["status"] = json!(ST_FAILED);
+        store::save_issues(&root, &issues);
+
+        // parentIssue 付き候補は新規起票せず親へ帰属（Linked）
+        let mut c = cand("ci failure on commit", "build broke");
+        c["source"] = json!("ci-failure");
+        c["parentIssue"] = json!(pk);
+        match intake(&root, &c) {
+            IntakeOutcome::Linked(i) => {
+                assert_eq!(i["key"].as_str().unwrap(), pk);
+                // failed の親は queued へ差し戻し（再実行要求）
+                assert_eq!(i["status"], json!(ST_QUEUED));
+            }
+            _ => panic!("expected Linked"),
+        }
+        // followUps に ref=候補 key で追記される
+        let parent = store::load_issues(&root)
+            .into_iter()
+            .find(|i| i["key"].as_str() == Some(pk.as_str()))
+            .unwrap();
+        let fus = parent["followUps"].as_array().unwrap();
+        assert_eq!(fus.len(), 1);
+        assert_eq!(fus[0]["kind"], json!("ci-failure"));
+        assert!(fus[0]["ref"].as_str().unwrap().contains("ci-failure"));
+
+        // 同一候補の再 emit は ref dedupe で followUps が増殖しない
+        match intake(&root, &c) {
+            IntakeOutcome::Linked(i) => {
+                assert_eq!(i["followUps"].as_array().unwrap().len(), 1);
+            }
+            _ => panic!("expected Linked on re-emit"),
+        }
+        // 新規課題は増えない（候補は起票されない）
+        assert_eq!(store::load_issues(&root).len(), 1);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn parent_issue_link_bypassed_by_force_and_unknown_parent() {
+        let root = temp_root("plink-force");
+        // 存在しない親 key は帰属せず通常起票
+        let mut c = cand("ci failure", "b");
+        c["parentIssue"] = json!("no:such:parent");
+        let (i, created) = intake_v(&root, &c);
+        assert!(created);
+        assert_eq!(i["status"], json!(ST_QUEUED));
+        // force（人の対応ボタン）は帰属を bypass して新規起票する
+        let (parent, _) = intake_v(&root, &cand("parent issue", "b"));
+        let pk = parent["key"].as_str().unwrap().to_string();
+        let mut c = cand("ci failure forced", "b");
+        c["source"] = json!("ci-failure");
+        c["parentIssue"] = json!(pk);
+        match intake_forced(&root, &c) {
+            IntakeOutcome::Created(i) => assert_eq!(i["status"], json!(ST_QUEUED)),
+            _ => panic!("forced intake should file a new issue"),
+        }
+        // 親の followUps には触れない
+        let parent = store::load_issues(&root)
+            .into_iter()
+            .find(|i| i["key"].as_str() == Some(pk.as_str()))
+            .unwrap();
+        assert_eq!(parent["followUps"].as_array().unwrap().len(), 0);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // ---- 大規模課題の分割起票（manual-0577d650） ----
+
+    #[test]
     fn oversized_issue_gates_with_split_proposal() {
         let root = temp_root("split-gate");
         // splitMaxItems 超の箇条書き = 分割提案付き gated

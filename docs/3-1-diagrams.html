@@ -115,11 +115,14 @@ flowchart LR
 title: detect → normalize → dedupe
 ---
 flowchart TD
-    DET[detector / manual API /&lt;br/&gt;派生（done chat の&lt;br/&gt;変更ターン source=derived）&lt;br/&gt;github-issues は open issue 全件&lt;br/&gt;（ラベル選別なし）&lt;br/&gt;closed は --import-github で&lt;br/&gt;終端取込] --&gt;|candidate&lt;br/&gt;source/repo/title/body/&lt;br/&gt;symptomHash/detectedAt&lt;br/&gt;（任意: kind/labels/&lt;br/&gt;count/durationSeconds）| NORM[正規化]
+    DET[detector / manual API /&lt;br/&gt;派生（done chat の&lt;br/&gt;変更ターン source=derived）&lt;br/&gt;github-issues は open issue 全件&lt;br/&gt;（ラベル選別なし）&lt;br/&gt;closed は --import-github で&lt;br/&gt;終端取込] --&gt;|candidate&lt;br/&gt;source/repo/title/body/&lt;br/&gt;symptomHash/detectedAt&lt;br/&gt;（任意: kind/labels/&lt;br/&gt;count/durationSeconds/&lt;br/&gt;parentIssue）| NORM[正規化]
     NORM --&gt; HASH[issue key =&lt;br/&gt;source+repo+symptomHash]
     HASH --&gt; EXIST{既出?}
     EXIST --&gt;|yes| BUMP[既存課題の&lt;br/&gt;lastSeen 更新のみ]
-    EXIST --&gt;|no| SIL{silence?&lt;br/&gt;silences.json の&lt;br/&gt;matcher（source/repo/&lt;br/&gt;kind/severity）+&lt;br/&gt;startsAt〜endsAt 窓内&lt;br/&gt;（設定 UI / API で作成）}
+    EXIST --&gt;|no| PAR{親課題リンク?&lt;br/&gt;candidate.parentIssue&lt;br/&gt;（ci-failure が失敗コミットの&lt;br/&gt;Issue:トレーラを逆引き。&lt;br/&gt;force 起票は bypass）}
+    PAR --&gt;|帰属解決| LINK[新規課題は作らず&lt;br/&gt;元課題の followUps へ追記&lt;br/&gt;（ref=候補key で重複抑止）&lt;br/&gt;failed の元課題は queued へ&lt;br/&gt;差し戻し＝再実行要求&lt;br/&gt;candidate は linkedIssue 表示]
+    LINK --&gt; INBOX
+    PAR --&gt;|帰属不明| SIL{silence?&lt;br/&gt;silences.json の&lt;br/&gt;matcher（source/repo/&lt;br/&gt;kind/severity）+&lt;br/&gt;startsAt〜endsAt 窓内&lt;br/&gt;（設定 UI / API で作成）}
     SIL --&gt;|窓内| SH[candidate に留め置く&lt;br/&gt;deferred=silenced&lt;br/&gt;課題は作らない]
     SH -.-&gt;|期限切れで自動解除| SIL
     SIL --&gt;|窓外・非合致| CD{クールダウン?&lt;br/&gt;同一バケット&lt;br/&gt;intakeCooldownBy&lt;br/&gt;（既定 source+repo+kind）の&lt;br/&gt;reject/verify NG から&lt;br/&gt;intakeCooldownMinutes 未満}

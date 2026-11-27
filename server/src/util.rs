@@ -193,6 +193,21 @@ pub fn open_browser(url: &str) {
     let _ = std::process::Command::new("xdg-open").arg(url).spawn();
 }
 
+/// コミットメッセージの `Issue: <key>` トレーラを抽出（runner の帰属整理と
+/// ci-failure detector の親課題リンクで共有。複数あれば最後の1件。
+/// `issue:` 小文字始まりも許容）
+pub fn issue_trailer(text: &str) -> Option<String> {
+    text.lines()
+        .filter_map(|l| {
+            let l = l.trim();
+            l.strip_prefix("Issue:")
+                .or_else(|| l.strip_prefix("issue:"))
+        })
+        .map(|v| v.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .last()
+}
+
 /// Component ベースの相対化（registry/refs 用）
 pub fn relative_path(from: &str, to: &str) -> Option<String> {
     let a: Vec<Component> = Path::new(from).components().collect();

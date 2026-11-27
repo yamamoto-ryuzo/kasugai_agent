@@ -159,11 +159,14 @@ flowchart LR
 title: detect → normalize → dedupe
 ---
 flowchart TD
-    DET[detector / manual API /<br/>派生（done chat の<br/>変更ターン source=derived）<br/>github-issues は open issue 全件<br/>（ラベル選別なし）<br/>closed は --import-github で<br/>終端取込] -->|candidate<br/>source/repo/title/body/<br/>symptomHash/detectedAt<br/>（任意: kind/labels/<br/>count/durationSeconds）| NORM[正規化]
+    DET[detector / manual API /<br/>派生（done chat の<br/>変更ターン source=derived）<br/>github-issues は open issue 全件<br/>（ラベル選別なし）<br/>closed は --import-github で<br/>終端取込] -->|candidate<br/>source/repo/title/body/<br/>symptomHash/detectedAt<br/>（任意: kind/labels/<br/>count/durationSeconds/<br/>parentIssue）| NORM[正規化]
     NORM --> HASH[issue key =<br/>source+repo+symptomHash]
     HASH --> EXIST{既出?}
     EXIST -->|yes| BUMP[既存課題の<br/>lastSeen 更新のみ]
-    EXIST -->|no| SIL{silence?<br/>silences.json の<br/>matcher（source/repo/<br/>kind/severity）+<br/>startsAt〜endsAt 窓内<br/>（設定 UI / API で作成）}
+    EXIST -->|no| PAR{親課題リンク?<br/>candidate.parentIssue<br/>（ci-failure が失敗コミットの<br/>Issue:トレーラを逆引き。<br/>force 起票は bypass）}
+    PAR -->|帰属解決| LINK[新規課題は作らず<br/>元課題の followUps へ追記<br/>（ref=候補key で重複抑止）<br/>failed の元課題は queued へ<br/>差し戻し＝再実行要求<br/>candidate は linkedIssue 表示]
+    LINK --> INBOX
+    PAR -->|帰属不明| SIL{silence?<br/>silences.json の<br/>matcher（source/repo/<br/>kind/severity）+<br/>startsAt〜endsAt 窓内<br/>（設定 UI / API で作成）}
     SIL -->|窓内| SH[candidate に留め置く<br/>deferred=silenced<br/>課題は作らない]
     SH -.->|期限切れで自動解除| SIL
     SIL -->|窓外・非合致| CD{クールダウン?<br/>同一バケット<br/>intakeCooldownBy<br/>（既定 source+repo+kind）の<br/>reject/verify NG から<br/>intakeCooldownMinutes 未満}

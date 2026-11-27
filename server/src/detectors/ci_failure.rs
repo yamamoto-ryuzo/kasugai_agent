@@ -86,7 +86,10 @@ pub async fn poll(cfg: &Value) -> Vec<Value> {
                 .get("headBranch")
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
-            out.push(json!({
+            // 親課題リンク（manual-488ea7f9）: 失敗 run の head コミットに
+            // `Issue: <key>` トレーラがあれば帰属課題として parentIssue を emit。
+            // intake は帰属できれば新規起票でなく元課題への追記+再実行要求にする
+            let mut cand = json!({
                 "source": "ci-failure",
                 "repo": slug,
                 "slug": slug,
@@ -97,8 +100,28 @@ pub async fn poll(cfg: &Value) -> Vec<Value> {
                 "kind": wf,
                 "symptomHash": format!("ci-{}", id),
                 "detectedAt": now_iso(),
-            }));
+            });
+            if !sha.is_empty() {
+                if let Some(pk) = parent_issue_of_commit(slug, sha, cwd).await {
+                    cand["parentIssue"] = json!(pk);
+                }
+            }
+            out.push(cand);
         }
     }
     out
+}
+
+/// 失敗 run の head コミットメッセージを取得し `Issue:` トレーラを逆引きする
+/// （manual-488ea7f9。PagerDuty Content-Based Grouping の regex 抽出キー相当）。
+/// コミットが取得できない・トレーラ無しは None（従来どおり新規起票へ）。
+async fn parent_issue_of_commit(slug: &str, sha: &str, cwd: Option<&Path>) -> Option<String> {
+    let endpoint = format!("repos/{}/commits/{}", slug, sha);
+    let msg = github::gh(
+        &["api", &endpoint, "--jq", ".commit.message"],
+        cwd,
+    )
+    .await
+    .ok()?;
+    crate::util::issue_trailer(&msg)
 }
