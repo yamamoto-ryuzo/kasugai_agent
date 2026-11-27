@@ -383,11 +383,12 @@ Playwright 等で画面・応答を駆動確認する。「実装の確認」と
 title: verify（L0〜L4）
 ---
 flowchart TD
-    IMPL[実装完了<br/>ローカルコミット] --> VL{verifyLevel}
+    REPRO[L2+ は再現ファースト<br/>修正前に最小再現手順 repro.md<br/>症状の再現・ベースラインを記録] --> IMPL[実装完了<br/>ローカルコミット]
+    IMPL --> VL{verifyLevel}
     VL -->|L0/L1| STATIC[静的・単体チェック<br/>構文・lint・テスト・ビルド]
     VL -->|L2以上| LAUNCH[実機で対象EXE自体を起動<br/>QGIS等・成果物バイナリ]
     LAUNCH --> DRIVE[実機駆動<br/>Playwright等でUI操作・応答確認]
-    STATIC --> EVID[証跡採取<br/>shots/logs/応答 → evidence/]
+    STATIC --> EVID[証跡採取<br/>shots/logs/応答・L2+ は repro.md<br/>→ evidence/]
     DRIVE --> EVID
     EVID --> JUDGE{合格?<br/>実装の確認}
     JUDGE -->|OK| ATTRIB[コミット帰属確認<br/>Issue: #N]
@@ -413,6 +414,11 @@ flowchart TD
   severity+confidence 付きで、Severe かつ `diffReviewMinConfidence`
   （既定0.7）以上の指摘があれば push せず verify NG と同じ差し戻し経路へ
   送る。`config.diffReview=false` で無効化できる
+- **再現ファースト検証（reproFirst）**: L2+ 課題は実装着手前に症状を
+  再現する最小手順とベースライン結果を `evidence/<key>/repro.md` に
+  記録し、修正後は非再現となった結果を追記する標形にする
+  （「再現成功→修正→非再現」の証跡）。repro.md が無い L2+ は verify NG。
+  `config.reproFirst=false` で無効化できる
 - 実機リソース（QGIS harness・固定ポート等）は `locks` で排他利用
 - 証跡は課題キー単位で `evidence/` に保存し、Issue コメントに添付/リンク
 

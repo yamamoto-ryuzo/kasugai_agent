@@ -1003,6 +1003,27 @@ fn build_prompt_full(root: &Path, issue: &Value) -> (String, Value) {
         p.push_str("\n\n## 承認済み実装計画（この計画に従って実装する）\n\n");
         p.push_str(plan);
     }
+    // 再現ファースト検証（manual-612ec7e1・verify-levels.mmd）: L2+ は
+    // 実装着手前に症状を再現する最小手順を evidence/<slug>/repro.md へ
+    // 記録するよう prompt に指示する（verify が証跡を必須チェックする）
+    let lvl_n = issue
+        .get("verifyLevel")
+        .map(|v| {
+            v.as_u64()
+                .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+                .unwrap_or(1)
+        })
+        .unwrap_or(1);
+    if lvl_n >= 2 && cfg_bool_default_true(&load_config(root), "reproFirst") {
+        p.push_str(&format!(
+            "\n\n## 再現ファースト検証（L2+ 必須）\n\n\
+             実装に着手する前に、症状を再現する最小手順とベースライン結果\
+             （未修正状態での再現結果）を {} へ記録する。\
+             修正後は同じ手順で非再現となった結果を追記する。\
+             verify はこの証跡を必須チェックする",
+            root.join("evidence").join(&kslug).join("repro.md").display()
+        ));
+    }
     // 参照した知見を run の記録に残す（どの知見を使ったか追跡可能に）
     let refs = json!({
         "knowledge": if injected_knowledge { json!(kslug) } else { Value::Null },
@@ -1645,6 +1666,16 @@ async fn run_checks(app: &Shared, issue: &Value, repo: &Value, ev_dir: &Path) ->
 
     // ---- L2+: 実機起動（実機リソースを locks で排他取得） ----
     if ok && level >= 2 {
+        // 再現ファースト証跡（manual-612ec7e1・verify-levels.mmd）: L2+ は
+        // 実装前の最小再現手順・ベースラインを記した repro.md が必須
+        let has_repro = std::fs::metadata(ev_dir.join("repro.md"))
+            .map(|m| m.len() > 0)
+            .unwrap_or(false);
+        if !has_repro && cfg_bool_default_true(&app.cfg().await, "reproFirst") {
+            ok = false;
+            note = "L2+ は repro.md（最小再現手順＋修正前ベースライン）の証跡が必須".into();
+            log.push_str(&format!("NG: {}\n", note));
+        }
         let mut got = locks::acquire(root, "machine");
         let mut waited = 0u64;
         while !got && waited < 120 {

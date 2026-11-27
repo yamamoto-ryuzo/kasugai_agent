@@ -47,6 +47,7 @@
   "diffReview": true,
   "diffReviewMinConfidence": 0.7,
   "diffReviewTimeoutMinutes": 15,
+  "reproFirst": true,
   "intakeMaxPerHour": 0,
   "intakeCooldownMinutes": 60,
   "intakeCooldownBy": ["source", "repo", "kind"],

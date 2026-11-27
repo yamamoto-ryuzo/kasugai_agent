@@ -162,11 +162,12 @@ flowchart TD
 title: verify（L0〜L4）
 ---
 flowchart TD
-    IMPL[実装完了&lt;br/&gt;ローカルコミット] --&gt; VL{verifyLevel}
+    REPRO[L2+ は再現ファースト&lt;br/&gt;修正前に最小再現手順 repro.md&lt;br/&gt;症状の再現・ベースラインを記録] --&gt; IMPL[実装完了&lt;br/&gt;ローカルコミット]
+    IMPL --&gt; VL{verifyLevel}
     VL --&gt;|L0/L1| STATIC[静的・単体チェック&lt;br/&gt;構文・lint・テスト・ビルド]
     VL --&gt;|L2以上| LAUNCH[実機で対象EXE自体を起動&lt;br/&gt;QGIS等・成果物バイナリ]
     LAUNCH --&gt; DRIVE[実機駆動&lt;br/&gt;Playwright等でUI操作・応答確認]
-    STATIC --&gt; EVID[証跡採取&lt;br/&gt;shots/logs/応答 → evidence/]
+    STATIC --&gt; EVID[証跡採取&lt;br/&gt;shots/logs/応答・L2+ は repro.md&lt;br/&gt;→ evidence/]
     DRIVE --&gt; EVID
     EVID --&gt; JUDGE{合格?&lt;br/&gt;実装の確認}
     JUDGE --&gt;|OK| ATTRIB[コミット帰属確認&lt;br/&gt;Issue: #N]
