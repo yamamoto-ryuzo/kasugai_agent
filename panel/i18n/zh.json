@@ -320,6 +320,8 @@
   "iss.planCritic": "计划评审",
   "iss.planNote": "计划备注",
   "iss.planApproved": "已批准",
+  "iss.diffReview": "diff 评审",
+  "iss.diffReviewOk": "已通过",
   "src.github-issues": "GitHub 议题",
   "src.ci-failure": "CI 失败",
   "src.local-health": "本地健康",

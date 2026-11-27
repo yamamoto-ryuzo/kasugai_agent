@@ -320,6 +320,8 @@
   "iss.planCritic": "plan critic",
   "iss.planNote": "plan note",
   "iss.planApproved": "approved",
+  "iss.diffReview": "diff review",
+  "iss.diffReviewOk": "passed",
   "src.github-issues": "GitHub issues",
   "src.ci-failure": "CI failure",
   "src.local-health": "local health",

@@ -386,6 +386,39 @@ const DEFAULT_CRITIC: &str = r#"以下は課題の実装計画です。計画を
 
 5. この実行は非対話（-p）モード。確認を求めず批評を出力して終了する"#;
 
+const DEFAULT_DIFFREVIEW: &str = r#"以下は課題への対応として生成された未 push の差分です。push 前のレビューとして批評してください（修正・追加のコード生成はしない）。
+
+## 課題
+
+{{title}}
+
+{{body}}
+
+- verifyLevel: L{{verifyLevel}}
+- 受入条件: {{acceptance}}
+
+## 差分
+
+```diff
+{{diff}}
+```
+
+## 出力ルール
+
+1. 課題の受入条件に照らして、誤った変更・抜け漏れ・混入した無関係な変更・
+   セキュリティ上の問題（秘密情報の混入等）を指摘する
+2. 指摘には severity（severe=このまま push すべきでない /
+   non-severe=改善提案）と confidence（0.0〜1.0）を必ず付ける
+3. 問題がなければ findings は空配列にする
+4. 最後に必ず次の形式の結果ブロックを1つだけ出力する:
+
+```kasugai-review
+{"findings":[{"severity":"severe","confidence":0.9,"note":"指摘"}]}
+```
+
+5. この実行は非対話（-p）モード。確認を求めず批評を出力して終了する"#;
+
+
 /// ```kasugai-<tag> ブロックの内容を抽出（最後の1つ）
 fn extract_tag_block(text: &str, tag: &str) -> Option<String> {
     let open = format!("```{}", tag);
@@ -486,6 +519,13 @@ fn critic_prompt(root: &Path, issue: &Value, plan: &str) -> String {
         knowledge::load_prompt(root, "critic").unwrap_or_else(|| DEFAULT_CRITIC.into());
     subst_fields(&tpl, issue, &[("plan", plan.to_string())])
 }
+
+fn diff_review_prompt(root: &Path, issue: &Value, diff: &str) -> String {
+    let tpl = knowledge::load_prompt(root, "diffreview")
+        .unwrap_or_else(|| DEFAULT_DIFFREVIEW.into());
+    subst_fields(&tpl, issue, &[("diff", diff.to_string())])
+}
+
 
 /// 計画フェーズ起動: queued → planning で計画生成タスクを spawn
 async fn start_plan(app: &Shared, issue: Value) -> Result<(), String> {
@@ -1077,6 +1117,17 @@ async fn finalize(app: &Shared, key: &str, issue: &Value, repo: &Value) {
             return;
         }
     }
+    // 独立 diff レビュー（manual-475831d2・verify-levels.mmd）: push 前に
+    // 生成系と独立したコンテキストで未push差分を批評する。Severe 検出は
+    // verify NG と同じ差し戻し経路へ
+    if cfg_bool_default_true(&app.cfg().await, "diffReview")
+        && issue.get("diffReviewOk").and_then(|v| v.as_bool()) != Some(true)
+    {
+        if let Err(note) = diff_review(app, key, issue, repo).await {
+            send_back(app, key, &note).await;
+            return;
+        }
+    }
     let need_approval = repo
         .get("requirePushApproval")
         .and_then(|v| v.as_bool())
@@ -1228,6 +1279,77 @@ fn parse_issue_trailer(body: &str) -> Option<String> {
         .map(|v| v.trim().to_string())
         .filter(|s| !s.is_empty())
         .last()
+}
+
+/// 独立 diff レビュー（diffReview=on・manual-475831d2）: 未push範囲の差分を
+/// 生成系と独立したコンテキストの批評パスでレビューし、Severe
+/// （confidence>=diffReviewMinConfidence）の finding があれば Err を返す
+/// （呼び出し側は send_back で差し戻す）。レビュー結果は課題の
+/// diffReview フィールドへ残す。合格時は diffReviewOk を立て、
+/// push リトライ経路での再批評を抑止する
+async fn diff_review(app: &Shared, key: &str, issue: &Value, repo: &Value) -> Result<(), String> {
+    let root = &app.root;
+    let cfg = app.cfg().await;
+    let repo_path = PathBuf::from(repo.get("path").and_then(|v| v.as_str()).unwrap_or(""));
+    let Some(range) = unpushed_range(&repo_path).await else {
+        // clean_unpushed で upstream 不明は既に拒否済み（到達しない想定）
+        return Ok(());
+    };
+    let (c, diff) = git(&repo_path, &["diff", &range]).await;
+    if c != 0 || diff.trim().is_empty() {
+        return Ok(());
+    }
+    let Some((exe, args)) = resolve_agent(&cfg) else {
+        conlog("runner", "sys", &format!("{}: diff レビュー実行体無し（skip）", key));
+        return Ok(());
+    };
+    // 巨大差分は頭打ち（prompt 投入上限。末尾側の情報が失われても
+    // 差し戻し判定の精度には影響しにくい）
+    let diff: String = diff.chars().take(30000).collect();
+    let prompt = diff_review_prompt(root, issue, &diff);
+    let timeout = Duration::from_secs_f64(cfg_f64(&cfg, "diffReviewTimeoutMinutes", 15.0) * 60.0);
+    let review = match spawn_capture(&exe, &args, &repo_path, &prompt, timeout).await {
+        Ok(out) => crate::verify::extract_review(&out),
+        Err(e) => {
+            conlog("runner", "err", &format!("{}: diff レビュー実行失敗: {}", key, e));
+            None
+        }
+    };
+    let Some(review) = review else {
+        // 批評結果が取れない場合はブロックしない（verify 合格・人ゲートへ委ねる）
+        let _ = pipeline::set_field(
+            root,
+            key,
+            "diffReview",
+            json!({"at": now_iso(), "error": "レビュー結果を取得できず"}),
+        );
+        return Ok(());
+    };
+    let min_conf = cfg_f64(&cfg, "diffReviewMinConfidence", 0.7);
+    let severe = crate::verify::severe_findings(&review, min_conf);
+    let n = review.findings.len();
+    let _ = pipeline::set_field(
+        root,
+        key,
+        "diffReview",
+        json!({"at": now_iso(), "findings": review.findings}),
+    );
+    if severe.is_empty() {
+        let _ = pipeline::set_field(root, key, "diffReviewOk", json!(true));
+        conlog(
+            "runner",
+            "sys",
+            &format!("{}: diff レビュー合格（findings {} 件）", key, n),
+        );
+        return Ok(());
+    }
+    let notes: Vec<String> = severe.iter().map(|f| f.note.clone()).collect();
+    Err(format!(
+        "diff レビューで Severe 検出（{}/{} 件）: {}",
+        severe.len(),
+        n,
+        notes.join(" / ")
+    ))
 }
 
 /// 未push範囲（`@{u}..HEAD`。upstream 未設定は `origin/HEAD..HEAD`、

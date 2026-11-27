@@ -2665,6 +2665,17 @@ function renderIssue(i) {
             `<div class="muted">[${esc(f.severity || '')} ${Math.round((f.confidence ?? 0) * 100)}%] ${esc(f.note || '')}</div>`).join('')
         : '') +
       '</div>' : '';
+  // 独立 diff レビュー（manual-475831d2）: push 前批評の findings を表示
+  const drev = i.diffReview || {};
+  const drevFindings = drev.findings || [];
+  const drevCard = (drev.at || drevFindings.length)
+    ? '<div class="rcard" style="max-width:none"><b>' + esc(t('iss.diffReview')) + '</b>' +
+      (i.diffReviewOk ? ` <span class="pill run">${esc(t('iss.diffReviewOk'))}</span>` : '') +
+      (drev.at ? `<div class="muted">${esc(fmtTs(drev.at))}</div>` : '') +
+      (drev.error ? `<div class="muted">${esc(drev.error)}</div>` : '') +
+      drevFindings.map((f) =>
+        `<div class="muted">[${esc(f.severity || '')} ${Math.round((f.confidence ?? 0) * 100)}%] ${esc(f.note || '')}</div>`).join('') +
+      '</div>' : '';
   const members = (i.stormMembers || []).length
     ? '<div class="rcard" style="max-width:none"><b>' +
       esc(t('iss.stormMembers', { count: i.stormMembers.length })) + '</b>' +
@@ -2678,7 +2689,7 @@ function renderIssue(i) {
         (r.sessionLog ? ` &middot; ${esc(r.sessionLog)}` : '') + '</div>').join('') +
       '</div>' : '';
   const box = document.getElementById('box');
-  box.innerHTML = renderItemHead(i, true) + info + plan + members + runs + renderItemBody(i.body);
+  box.innerHTML = renderItemHead(i, true) + info + plan + drevCard + members + runs + renderItemBody(i.body);
   Viewer.drawMermaid(box);
   box.scrollTop = 0;
 }

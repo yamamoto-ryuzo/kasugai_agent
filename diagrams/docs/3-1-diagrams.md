@@ -155,8 +155,10 @@ flowchart TD
     JUDGE -->|OK| ATTRIB[コミット帰属確認<br/>Issue: #N]
     ATTRIB --> CLEAN{帰属不明/<br/>rejected 混入?}
     CLEAN -->|yes| REVERT[git revert で除去]
-    CLEAN -->|no| PUSH[git push]
-    REVERT --> PUSH
+    CLEAN -->|no| DREV{独立 diff レビュー<br/>severity+confidence 付き findings}
+    REVERT --> DREV
+    DREV -->|Severe 無し| PUSH[git push]
+    DREV -->|Severe 検出| RETRY
     PUSH --> DONE[status=done]
     JUDGE -->|NG| SEP[課題を分離<br/>実装済みNG課題 × 未実装課題<br/>kasugai-verify verdict]
     SEP --> BACK[差し戻し prompt を組み立て保留<br/>実装済み→修正 / 未実装→実装<br/>（自動送信はしない）]

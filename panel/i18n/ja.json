@@ -320,6 +320,8 @@
   "iss.planCritic": "計画 critic",
   "iss.planNote": "計画メモ",
   "iss.planApproved": "承認済み",
+  "iss.diffReview": "diff レビュー",
+  "iss.diffReviewOk": "合格",
   "src.github-issues": "GitHub Issue",
   "src.ci-failure": "CI失敗",
   "src.local-health": "ローカル健全性",
