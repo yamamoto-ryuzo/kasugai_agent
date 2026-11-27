@@ -250,11 +250,30 @@ fn assess(issues: &[Value], issue: &mut Value) {
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
-    let level = rule_verify_level(issue);
+    // CBR（manual-654b11c2）: 高一致の成功 case があれば verifyLevel を
+    // その値に合わせ、verifyLevelBasis に出典を記録する
+    let mut basis = Value::Null;
+    let level = match cases::adopted_case(&related) {
+        Some(c) => {
+            let lv = c
+                .get("verifyLevel")
+                .and_then(|v| v.as_u64())
+                .unwrap_or_else(|| rule_verify_level(issue));
+            basis = json!({
+                "case": cases::str_of(&c, "key"),
+                "score": c.get("score").cloned().unwrap_or(json!(0)),
+            });
+            lv
+        }
+        None => rule_verify_level(issue),
+    };
     let o = issue.as_object_mut().unwrap();
     o.insert("autonomous".into(), json!(autonomous));
     o.insert("priority".into(), json!(priority));
     o.insert("verifyLevel".into(), json!(level));
+    if !basis.is_null() {
+        o.insert("verifyLevelBasis".into(), basis);
+    }
     o.insert(
         "acceptance".into(),
         json!(format!("{} が期待どおり動作することを実機で確認する", title)),

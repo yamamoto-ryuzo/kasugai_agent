@@ -420,6 +420,12 @@ flowchart TD
   前回の fix / reject / run 成否）を付記し、dispatch prompt の
   「類似過去事例」節へ注入する。参照した知見は `runs[].knowledgeRefs`
   に記録され、どの知見を使ったか追跡できる
+- **case 化（CBR）**: 終端課題は `knowledge/cases.json` へ case
+  （kind/repo/symptomHash/採用アプローチ/結果/verifyLevel）として蓄積。
+  高一致の成功 case があれば verifyLevel をその値に合わせ
+  （`verifyLevelBasis` に出典を記録）、採用アプローチは run prompt の
+  few-shot に転用する
+
 ## 6. 状態とファイル
 
 | ファイル | 内容 | Git 管理 |

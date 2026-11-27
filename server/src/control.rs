@@ -3856,6 +3856,9 @@ pub fn spawn_watchers(app: Shared) {
             loop {
                 let cfg = app.cfg().await;
                 let (_, props) = crate::knowledge::learn_pass(&app.root);
+                // CBR（manual-654b11c2）: 終端済み課題を knowledge/cases.json
+                // の事例ベースへ蓄積（決定的スコアの検索元）
+                crate::cases::sync_cases(&app.root);
                 if props > 0 {
                     app.sse("proposals", &json!({}));
                 }
