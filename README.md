@@ -401,9 +401,10 @@ flowchart TD
     PUSH --> DONE[status=done]
     JUDGE -->|NG| SEP[課題を分離<br/>実装済みNG課題 × 未実装課題<br/>kasugai-verify verdict]
     SEP --> BACK[差し戻し prompt を組み立て保留<br/>実装済み→修正 / 未実装→実装<br/>（自動送信はしない）]
-    BACK --> RETRY[status=retry<br/>要対応列で再送待ち<br/>verifyBackLimit まで]
+    BACK --> RETRY[status=retry<br/>要対応列で再送待ち<br/>段階的修復: remediations を順に試行<br/>（retry → replan → human）]
     RETRY -->|処理再開ボタン /<br/>個別の差し戻しボタン /<br/>再起動時の自動再処理| IMPL
-    RETRY -->|上限到達| FAIL[status=failed<br/>要人対応マーク + sys 報告]
+    RETRY -->|手段の backs/timeout<br/>で昇格| RETRY
+    RETRY -->|全手段失敗| FAIL[status=failed<br/>人ゲートへ差し戻し + sys 報告]
 ```
 
 - **push は verify だけが行う**。検証を通っていないコミットは公開しない
@@ -419,6 +420,13 @@ flowchart TD
   記録し、修正後は非再現となった結果を追記する標形にする
   （「再現成功→修正→非再現」の証跡）。repro.md が無い L2+ は verify NG。
   `config.reproFirst=false` で無効化できる
+- **段階的修復（remediations）**: verify NG の差し戻しは
+  `config.remediations`（対処手段の順序リスト）を軽い手段から順に試す。
+  各手段は `{name, backs, timeoutMinutes?}` — 手段内の NG が `backs` 回を
+  超えるか `timeoutMinutes` が経過すると次の重い手段へ昇格する
+  （`retry` = 同手順の再試行、`replan` = 計画を破棄して planGate 経由で
+  計画からやり直し、`human` = failed で人ゲートへ差し戻し）。
+  未指定時は `[retry(verifyBackLimit), human]` で従来動作と同じ
 - 実機リソース（QGIS harness・固定ポート等）は `locks` で排他利用
 - 証跡は課題キー単位で `evidence/` に保存し、Issue コメントに添付/リンク
 

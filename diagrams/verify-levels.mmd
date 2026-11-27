@@ -20,6 +20,7 @@ flowchart TD
     PUSH --> DONE[status=done]
     JUDGE -->|NG| SEP[課題を分離<br/>実装済みNG課題 × 未実装課題<br/>kasugai-verify verdict]
     SEP --> BACK[差し戻し prompt を組み立て保留<br/>実装済み→修正 / 未実装→実装<br/>（自動送信はしない）]
-    BACK --> RETRY[status=retry<br/>要対応列で再送待ち<br/>verifyBackLimit まで]
+    BACK --> RETRY[status=retry<br/>要対応列で再送待ち<br/>段階的修復: remediations を順に試行<br/>（retry → replan → human）]
     RETRY -->|処理再開ボタン /<br/>個別の差し戻しボタン /<br/>再起動時の自動再処理| IMPL
-    RETRY -->|上限到達| FAIL[status=failed<br/>要人対応マーク + sys 報告]
+    RETRY -->|手段の backs/timeout<br/>で昇格| RETRY
+    RETRY -->|全手段失敗| FAIL[status=failed<br/>人ゲートへ差し戻し + sys 報告]

@@ -1108,6 +1108,127 @@ async fn send_back(app: &Shared, key: &str, reason: &str) {
         .and_then(|v| v.as_u64())
         .unwrap_or(0);
     let limit = cfg_u64(&app.cfg().await, "verifyBackLimit", 3);
+    // 段階的修復（manual-139ec5ce・EscalatingRemediations 型）: config
+    // `remediations` を対処手段の順序リスト（[{name, backs, timeoutMinutes?}]）
+    // として順に試す。各手段は verify NG backs 回または timeoutMinutes で
+    // 次の重い手段へ昇格する（既定: retry → human）。全手段失敗で人ゲート
+    let remedies: Vec<Value> = {
+        let cfg = app.cfg().await;
+        cfg.get("remediations")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_else(|| {
+                vec![json!({"name": "retry", "backs": limit}), json!({"name": "human"})]
+            })
+    };
+    let stage_idx = it
+        .get("remediationStage")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0) as usize;
+    let stage = remedies.get(stage_idx).or_else(|| remedies.last());
+    let stage_name = stage
+        .and_then(|s| s.get("name"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("retry");
+    // 現在手段の backs を差し戻し上限として扱う（無指定は verifyBackLimit）
+    let limit = stage
+        .and_then(|s| s.get("backs"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(limit);
+    if it.get("remediationStage").is_none() {
+        let _ = pipeline::set_field(root, key, "remediationStage", json!(stage_idx));
+        let _ = pipeline::set_field(root, key, "remediation", json!(stage_name));
+        let _ = pipeline::set_field(
+            root,
+            key,
+            "remediationSince",
+            json!(chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)),
+        );
+    }
+    let timed_out = stage
+        .and_then(|s| s.get("timeoutMinutes"))
+        .and_then(|v| v.as_f64())
+        .is_some_and(|mins| {
+            it.get("remediationSince")
+                .and_then(|v| v.as_str())
+                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                .is_some_and(|since| {
+                    (chrono::Utc::now() - since.with_timezone(&chrono::Utc)).num_seconds()
+                        as f64
+                        > mins * 60.0
+                })
+        });
+    if timed_out || backs > limit {
+        // 昇格: 次の対処手段へ。リストを尽きれば human ゲート（failed）
+        let next = remedies.get(stage_idx + 1);
+        let next_name = next
+            .and_then(|s| s.get("name"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("human");
+        let why = if timed_out { "timeout" } else { "backs 上限" };
+        let _ = pipeline::set_field(root, key, "remediationStage", json!(stage_idx + 1));
+        let _ = pipeline::set_field(root, key, "verifyBacks", json!(0));
+        let _ = pipeline::set_field(root, key, "remediation", json!(next_name));
+        let _ = pipeline::set_field(
+            root,
+            key,
+            "remediationSince",
+            json!(chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)),
+        );
+        conlog(
+            "runner",
+            "warn",
+            &format!(
+                "{}: 対処手段昇格 {} → {}（{}）",
+                key, stage_name, next_name, why
+            ),
+        );
+        if next_name == "replan" {
+            // 計画からやり直し（より重い手段）: 計画・批評の成果を捨て、
+            // planGate 経由で再 dispatch → planning → 承認ゲートを再通過する
+            for f in [
+                "plan",
+                "planApproved",
+                "planNote",
+                "criticOk",
+                "criticNote",
+                "specNote",
+            ] {
+                let _ = pipeline::set_field(root, key, f, Value::Null);
+            }
+            let _ = pipeline::set_field(root, key, "planGate", json!(true));
+        }
+        if next_name == "human" || next.is_none() {
+            let _ = pipeline::request_transition(root, key, pipeline::ST_FAILED);
+            conlog(
+                "runner",
+                "err",
+                &format!("{}: 全対処手段失敗 → failed（人ゲートへ差し戻し）", key),
+            );
+            report_issue(
+                app,
+                &it,
+                &format!(
+                    "[kasugai-agent] 自動処理が失敗しました（対処手段 {} が尽きました）: {}",
+                    stage_name, reason
+                ),
+            )
+            .await;
+        } else {
+            let _ = pipeline::request_transition(root, key, pipeline::ST_QUEUED);
+            report_issue(
+                app,
+                &it,
+                &format!(
+                    "[kasugai-agent] 対処手段を昇格しました（{}→{}）: {}",
+                    stage_name, next_name, reason
+                ),
+            )
+            .await;
+        }
+        app.sse("issues", &json!({}));
+        return;
+    }
     if backs > limit {
         let _ = pipeline::request_transition(root, key, pipeline::ST_FAILED);
         conlog(

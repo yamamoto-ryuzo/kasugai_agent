@@ -319,6 +319,7 @@
   "iss.planReject": "reject plan",
   "iss.planCritic": "plan critic",
   "iss.planNote": "plan note",
+  "iss.remediation": "remediation",
   "iss.planApproved": "approved",
   "iss.diffReview": "diff review",
   "iss.diffReviewOk": "passed",

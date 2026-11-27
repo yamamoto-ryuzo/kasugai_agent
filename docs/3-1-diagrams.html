@@ -180,9 +180,10 @@ flowchart TD
     PUSH --&gt; DONE[status=done]
     JUDGE --&gt;|NG| SEP[課題を分離&lt;br/&gt;実装済みNG課題 × 未実装課題&lt;br/&gt;kasugai-verify verdict]
     SEP --&gt; BACK[差し戻し prompt を組み立て保留&lt;br/&gt;実装済み→修正 / 未実装→実装&lt;br/&gt;（自動送信はしない）]
-    BACK --&gt; RETRY[status=retry&lt;br/&gt;要対応列で再送待ち&lt;br/&gt;verifyBackLimit まで]
+    BACK --&gt; RETRY[status=retry&lt;br/&gt;要対応列で再送待ち&lt;br/&gt;段階的修復: remediations を順に試行&lt;br/&gt;（retry → replan → human）]
     RETRY --&gt;|処理再開ボタン /&lt;br/&gt;個別の差し戻しボタン /&lt;br/&gt;再起動時の自動再処理| IMPL
-    RETRY --&gt;|上限到達| FAIL[status=failed&lt;br/&gt;要人対応マーク + sys 報告]
+    RETRY --&gt;|手段の backs/timeout&lt;br/&gt;で昇格| RETRY
+    RETRY --&gt;|全手段失敗| FAIL[status=failed&lt;br/&gt;人ゲートへ差し戻し + sys 報告]
 </pre>
 <h3>learn（知見の還流）</h3>
 <!-- diagram: learn-flow -->

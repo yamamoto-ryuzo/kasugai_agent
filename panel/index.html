@@ -2683,11 +2683,12 @@ function renderCand(c) {
 }
 // issue は検証情報（合格条件・検証メモ・retry 回数）と実行履歴を追加表示
 function renderIssue(i) {
-  const info = (i.acceptance || i.verifyNote || i.retries || i.verifyBacks)
+  const info = (i.acceptance || i.verifyNote || i.retries || i.verifyBacks || i.remediation)
     ? '<div class="rcard" style="max-width:none">' +
       (i.acceptance ? `<div class="muted">${esc(t('iss.acceptance'))}: ${esc(i.acceptance)}</div>` : '') +
       (i.verifyNote ? `<div class="muted">${esc(t('iss.verifyNote'))}: ${esc(i.verifyNote)}</div>` : '') +
       (i.planNote ? `<div class="muted">${esc(t('iss.planNote'))}: ${esc(i.planNote)}</div>` : '') +
+      (i.remediation ? `<div class="muted">${esc(t('iss.remediation'))}: ${esc(i.remediation)} (#${(i.remediationStage ?? 0) + 1})</div>` : '') +
       `<div class="muted">retries: ${i.retries ?? 0} &middot; verifyBacks: ${i.verifyBacks ?? 0}</div>` +
       '</div>' : '';
   // 計画承認ゲート（manual-883d17ee）: 生成済み計画と critic 結果を表示

@@ -319,6 +319,7 @@
   "iss.planReject": "退回计划",
   "iss.planCritic": "计划评审",
   "iss.planNote": "计划备注",
+  "iss.remediation": "处置手段",
   "iss.planApproved": "已批准",
   "iss.diffReview": "diff 评审",
   "iss.diffReviewOk": "已通过",

@@ -48,6 +48,11 @@
   "diffReviewMinConfidence": 0.7,
   "diffReviewTimeoutMinutes": 15,
   "reproFirst": true,
+  "remediations": [
+    {"name": "retry", "backs": 3},
+    {"name": "replan", "backs": 2},
+    {"name": "human"}
+  ],
   "intakeMaxPerHour": 0,
   "intakeCooldownMinutes": 60,
   "intakeCooldownBy": ["source", "repo", "kind"],
