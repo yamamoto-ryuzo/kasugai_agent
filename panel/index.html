@@ -2521,6 +2521,9 @@ async function loadMgmt() {
     } else if (st === 'verifying' && !i.pushApproved &&
                repoOfIssue(i)?.requirePushApproval) {
       btns.push(`<button onclick="event.stopPropagation();issueAct('${esc(i.key)}','push-approve')">${esc(t('iss.pushApprove'))}</button>`);
+    // run 制御（manual-5dabae8b/-4929fc13）: 実行中 run の中断と方針注入
+    if (st === 'running' || st === 'verifying') {
+      btns.push(`<button onclick="event.stopPropagation();issueSteer('${esc(i.key)}')">${esc(t('iss.steer'))}</button>`);
       btns.push(`<button onclick="event.stopPropagation();issueAct('${esc(i.key)}','cancel')">${esc(t('iss.cancel'))}</button>`);
     }
     }
@@ -2608,6 +2611,12 @@ async function issueAct(key, action, body) {
   if (!r.ok) alert(r.error || 'error');
   loadMgmt();
 }
+// run 制御（run-control.mmd）: 実行中 run への方針修正入力。
+// in-flight run の stdin へ best-effort 注入 + followUps kind=steer 記録
+async function issueSteer(key) {
+  const text = (prompt(t('iss.steerPrompt')) || '').trim();
+  if (!text) return;
+  const r = await J('POST', `/api/issues/${encodeURIComponent(key)}/steer`, { text });
   if (!r.ok) alert(r.error || 'error');
   loadMgmt();
 // 上限延長（manual-94172864/-175e7229）: cycleCapExtend・budgetExtend を
@@ -2810,6 +2819,9 @@ function renderItemHead(it, isIssue) {
   if (isIssue && st === 'verifying' && !it.pushApproved &&
       repoOfIssue(it)?.requirePushApproval) {
     btns.push(`<button onclick="issueAct('${esc(it.key)}','push-approve')">${esc(t('iss.pushApprove'))}</button>`);
+  // run 制御（manual-5dabae8b/-4929fc13）: 実行中 run の中断と方針注入
+  if (isIssue && (st === 'running' || st === 'verifying')) {
+    btns.push(`<button onclick="issueSteer('${esc(it.key)}')">${esc(t('iss.steer'))}</button>`);
     btns.push(`<button onclick="issueAct('${esc(it.key)}','cancel')">${esc(t('iss.cancel'))}</button>`);
   }
   }

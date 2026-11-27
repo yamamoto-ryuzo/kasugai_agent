@@ -278,6 +278,8 @@
   "iss.requeue": "重新执行",
   "iss.dispatch": "处理",
   "iss.cancel": "中断",
+  "iss.steer": "方针注入",
+  "iss.steerPrompt": "对运行中的 run 输入方针修正",
   "iss.extend": "延长上限",
   "iss.extendConfirm": "提高运行周期/预算上限并重新 dispatch?",
   "iss.stuck": "卡死",

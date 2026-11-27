@@ -278,6 +278,8 @@
   "iss.requeue": "reintentar",
   "iss.dispatch": "atender",
   "iss.cancel": "cancelar",
+  "iss.steer": "dirigir",
+  "iss.steerPrompt": "Indicación de corrección para la ejecución en curso",
   "iss.extend": "ampliar límite",
   "iss.extendConfirm": "¿Ampliar los límites de ciclo/presupuesto y reenviar?",
   "iss.stuck": "atascado",

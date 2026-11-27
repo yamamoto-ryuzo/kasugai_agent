@@ -24,6 +24,7 @@ use serde_json::{json, Map, Value};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
+use tokio::io::AsyncWriteExt;
 use tokio::sync::watch;
 use std::time::{Duration, Instant};
 
@@ -204,6 +205,44 @@ pub async fn cancel_issue(app: &Shared, key: &str) -> Result<Value, String> {
         }
     }
     Err("cancel did not complete".into())
+}
+
+/// steering チャネル（manual-4929fc13）: 実行中 run の stdin へ方針修正を
+/// best-effort 注入し、常に followUps（kind=steer）へも記録する
+/// （次回 dispatch の prompt「フォローアップ入力」に入る）
+pub async fn steer(app: &Shared, key: &str, text: &str) -> Result<(), String> {
+    let mut injected = false;
+    if let Some((_, stdin)) = ctl_get(key) {
+        let mut g = stdin.lock().await;
+        if let Some(s) = g.as_mut() {
+            injected = s
+                .write_all(format!("{}\n", text).as_bytes())
+                .await
+                .is_ok();
+            let _ = s.flush().await;
+        }
+    }
+    pipeline::add_followup(&app.root, key, "steer", text, None)?;
+    let run_idx = find_issue(&app.root, key)
+        .map(|it| trajectory::latest_run_idx(&it))
+        .flatten();
+    audit::record(
+        &app.root,
+        key,
+        "human",
+        "steer",
+        run_idx,
+        Map::from_iter([
+            ("injected".into(), json!(injected)),
+            ("chars".into(), json!(text.len())),
+        ]),
+    );
+    conlog(
+        "runner",
+        "sys",
+        &format!("{}: steer（stdin 注入={}）", key, injected),
+    );
+    Ok(())
 }
 
 /// 出力監視（run-control.mmd）: reader タスクが実行体の出力行を供給し、
@@ -1314,6 +1353,7 @@ async fn run_and_verify(
     let mut cmd = tokio::process::Command::new(&exe);
     cmd.args(&prompt_args)
         .arg(&prompt)
+        .stdin(std::process::Stdio::piped())
         .current_dir(&repo_path)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());

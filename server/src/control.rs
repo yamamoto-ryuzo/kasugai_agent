@@ -3323,6 +3323,27 @@ async fn api_issues_action(
             Err(e) => err(StatusCode::CONFLICT, &e),
         };
     }
+    // steer は body {text} を受ける run 中の方針修正入力
+    // （manual-4929fc13。in-flight run の stdin へ best-effort 注入 +
+    // followUps kind=steer へ記録して次回 prompt に入れる）
+    if action == "steer" {
+        let a = body_json(b).await;
+        let text = a
+            .get("text")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim();
+        if text.is_empty() {
+            return err(StatusCode::BAD_REQUEST, "text required");
+        }
+        return match crate::runner::steer(&app, &key, text).await {
+            Ok(_) => {
+                app.sse("issues", &json!({}));
+                j(json!({"ok": true}))
+            }
+            Err(e) => err(StatusCode::CONFLICT, &e),
+        };
+    }
     // extend は body {cycleCap?: 追加分, budget?: {maxSteps?,
     // maxWallMinutes?, maxCostUsd?}} で上限を引き上げて再 dispatch
     // （manual-94172864・manual-175e7229。cycleCapExtend / budgetExtend

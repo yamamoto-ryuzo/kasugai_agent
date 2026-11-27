@@ -278,6 +278,8 @@
   "iss.requeue": "再実行",
   "iss.dispatch": "対応",
   "iss.cancel": "中断",
+  "iss.steer": "方針注入",
+  "iss.steerPrompt": "実行中 run への方針修正入力",
   "iss.extend": "上限延長",
   "iss.extendConfirm": "実行サイクル上限・予算上限を引き上げて再 dispatch しますか?",
   "iss.stuck": "スタック",

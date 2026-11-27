@@ -278,6 +278,8 @@
   "iss.requeue": "relancer",
   "iss.dispatch": "traiter",
   "iss.cancel": "annuler",
+  "iss.steer": "orienter",
+  "iss.steerPrompt": "Correction de cap pour l'exécution en cours",
   "iss.extend": "augmenter la limite",
   "iss.extendConfirm": "Augmenter les limites de cycle/budget et relancer ?",
   "iss.stuck": "bloqué",

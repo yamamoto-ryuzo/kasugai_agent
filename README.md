@@ -356,6 +356,10 @@ flowchart TD
   上限到達は失敗ではなく run を halt して `budgetHold` を記録し
   `queued` へ戻す（LimitsExceeded を trajectory 終了理由に記録）。
   「上限延長」ボタン（POST extend）で `budgetExtend` を加算して再 dispatch
+- **steering チャネル（manual-4929fc13）**: 実行中 run への方針修正入力
+  （`POST /api/issues/:key/steer {text}`）。in-flight run の child stdin
+  へ best-effort で注入し、常に `followUps`（kind=steer）にも記録して
+  次回 dispatch prompt の「フォローアップ入力」へ入れる
 - **Stuck Detector（manual-1a459b0c）**: 実行体の出力行から非生産
   パターンを検出（stuck.rs。同一行4回・同一 error 行3回・同一行3連続の
   独白相当・2パターン交互6行・context window error 連続）して run を
@@ -974,6 +978,8 @@ flowchart TD
   秘匿系は `denied` として返すが本文は返さない）
 - `POST /api/issues/:key/cancel` — 実行中 run の中断（running|verifying →
   queued。同一 key の再 dispatch も同じ経路で旧 run を止める。run-control.mmd）
+- `POST /api/issues/:key/steer` — `{text}` を実行中 run の stdin へ
+  best-effort 注入 + followUps（kind=steer）へ記録（次回 prompt 注入）
 - `POST /api/issues/:key/extend` — `{cycles?,steps?,wallMinutes?,costUsd?}` で
   runCycleCap・issue.budget の上限を延長して再 dispatch
   （省略時は config の extend* 既定増分）

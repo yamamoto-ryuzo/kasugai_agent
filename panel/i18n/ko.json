@@ -278,6 +278,8 @@
   "iss.requeue": "재실행",
   "iss.dispatch": "처리",
   "iss.cancel": "중단",
+  "iss.steer": "방향 주입",
+  "iss.steerPrompt": "실행 중인 run에 대한 방향 수정 입력",
   "iss.extend": "상한 연장",
   "iss.extendConfirm": "실행 사이클/예산 상한을 올리고 재 dispatch 할까요?",
   "iss.stuck": "스턱",

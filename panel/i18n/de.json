@@ -278,6 +278,8 @@
   "iss.requeue": "erneut ausführen",
   "iss.dispatch": "bearbeiten",
   "iss.cancel": "abbrechen",
+  "iss.steer": "steuern",
+  "iss.steerPrompt": "Steuerungshinweis für den laufenden Lauf",
   "iss.extend": "Limit erhöhen",
   "iss.extendConfirm": "Laufzyklen-/Budgetlimits erhöhen und erneut starten?",
   "iss.stuck": "festgefahren",
