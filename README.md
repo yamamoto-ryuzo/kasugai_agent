@@ -495,6 +495,39 @@ flowchart TD
   出力は常に proposals 経由で人が採否し、採用時に既存の runbook 注入
   へ反映される
 
+<!-- diagram: eval-set -->
+```mermaid
+---
+title: 回帰評価セット（closed issue → eval case）
+---
+flowchart TD
+    TERM[課題が終端へ<br/>done/failed/rejected] --> SYNC[evals.sync_evals<br/>learn watcher から定期実行]
+    EVD[evidence/verdict.json<br/>verify 結果 + L1 実行コマンド] --> SYNC
+    SYNC --> EC[(knowledge/evals.json<br/>eval case<br/>入力=課題 spec<br/>期待=採用された assess 判定<br/>+ verify verdict)]
+    EC --> REG[assess 回帰テスト<br/>evals.assess_regression<br/>pipeline.assess_preview で再評価<br/>実機不要・安い]
+    REG --> DIFF{verifyLevel/priority/<br/>autonomous/planGate<br/>に退化?}
+    DIFF -->|diff あり| REPD[差分レポート<br/>evals.json の lastReport へ<br/>conlog へ警告]
+    DIFF -->|一致| PASSR[回帰 OK]
+    EC --> REP[verify リプレイ<br/>evals.verify_replay<br/>記録済み L1 コマンドを再実行]
+    REP --> VCMP{verdict と<br/>ok 一致?}
+    VCMP -->|不一致| REPV[退行検出<br/>レポートへ記録]
+    VCMP -->|一致| PASSV[リプレイ OK]
+    PROP[proposal vet<br/>prompts/config/skills 変更] --> SMK[smoke eval<br/>evals.smoke<br/>直近 eval case 小集合で<br/>assess 回帰のみ実行]
+    SMK --> GATE{退行あり?}
+    GATE -->|yes| VETNG[vet 不合格<br/>accept 不能]
+    GATE -->|no| VETOK[採否へ進む]
+```
+
+- **eval セット**（`server/src/evals.rs`）: 終端課題を `knowledge/evals.json`
+  へ eval case（入力=課題 spec、期待=採用された assess 判定 +
+  `evidence/verdict.json` の verify verdict）として蓄積。learn watcher が
+  **assess 回帰**（`assess_preview` で再評価し判定退化を検出、実機不要）を
+  定期実行して `knowledge/eval-report.json` へ残し、**verify リプレイ**
+  （記録済み L1 コマンドの再実行、L0-L2 のみ）はアイドル時・1時間間隔で
+  少量だけ回す。prompts/config/skills 系の変更 proposal には vet の
+  `eval-smoke` 検査（直近 case の assess 回帰）が付き、退行があれば
+  accept 不能になる
+
 ## 6. 状態とファイル
 
 | ファイル | 内容 | Git 管理 |

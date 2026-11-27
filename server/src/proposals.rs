@@ -182,6 +182,19 @@ pub fn vet(p: &Value, ws_root: &str) -> Value {
         }
     }
 
+    // eval-smoke（eval-set.mmd・manual-a2de7417）: prompts/config/skills 系の
+    // 変更は、採否前に直近 eval case で assess 回帰を smoke 実行し、
+    // 機械的退行（verifyLevel/kind 判定の退化）があれば vet 不合格にする
+    let behavioral = changes.iter().any(|c| {
+        c.get("path")
+            .and_then(|v| v.as_str())
+            .is_some_and(crate::evals::affects_behavior)
+    });
+    if behavioral {
+        let (ok, detail) = crate::evals::smoke(Path::new(ws_root));
+        checks.push(chk("eval-smoke", "-", ok, &detail));
+    }
+
     let ok = checks.iter().all(|c| c.get("ok").and_then(|v| v.as_bool()).unwrap_or(false));
     json!({"ok": ok, "checks": checks, "advisories": advisories})
 }

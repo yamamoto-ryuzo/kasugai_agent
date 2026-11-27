@@ -1081,12 +1081,14 @@ async fn run_checks(app: &Shared, issue: &Value, repo: &Value, ev_dir: &Path) ->
     }
 
     // ---- L1: build/test 試行 ----
+    let mut ran_checks: Vec<Vec<String>> = vec![];
     if ok && level >= 1 {
         let checks = detect_checks(repo, &repo_path);
         if checks.is_empty() {
             log.push_str("== L1: 自動検出チェックなし\n");
         }
         for argv in checks {
+            ran_checks.push(argv.clone());
             let (code, out) = run_cmd(&repo_path, &argv, 600).await;
             log.push_str(&format!("\n== L1 {}\n{}\n", argv.join(" "), out));
             if code != 0 {
@@ -1124,6 +1126,9 @@ async fn run_checks(app: &Shared, issue: &Value, repo: &Value, ev_dir: &Path) ->
         ev_dir.join("verdict.json"),
         serde_json::to_string_pretty(&json!({
             "level": level, "ok": ok, "note": note, "at": now_iso(),
+            // verify リプレイ（eval-set.mmd・manual-a2de7417）用に
+            // L1 で実行したチェックコマンドを残す
+            "checks": ran_checks,
         }))
         .unwrap_or_default(),
     );

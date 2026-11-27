@@ -3867,6 +3867,29 @@ pub fn spawn_watchers(app: Shared) {
                 // アイドル時のみ knowledge/ をクラスタ統合し上位レッスンを
                 // runbook proposal として起票（出力は proposals のみ）
                 let cons = crate::consolidate::consolidate_pass(&app.root, &cfg);
+                // eval セット（manual-a2de7417・eval-set.mmd）: 終端課題を
+                // eval case 化し、assess 回帰レポートを更新（実機不要・安い）。
+                // verify リプレイは重いのでアイドル時・1h 間隔に限定
+                crate::evals::sync_evals(&app.root);
+                let reg = crate::evals::assess_regression(&app.root, 0);
+                crate::evals::save_report(&app.root, &reg);
+                if reg.get("diffCount").and_then(|v| v.as_u64()).unwrap_or(0) > 0 {
+                    conlog(
+                        "control",
+                        "err",
+                        &format!(
+                            "assess 回帰で {} 件の退化を検出（knowledge/eval-report.json）",
+                            reg.get("diffCount").and_then(|v| v.as_u64()).unwrap_or(0)
+                        ),
+                    );
+                }
+                if crate::consolidate::is_idle(&crate::store::load_issues(&app.root), &cfg)
+                    && last_replay.elapsed().as_secs() >= 3600
+                {
+                    let rep = crate::evals::verify_replay(&app.root).await;
+                    crate::evals::save_report(&app.root, &rep);
+                    last_replay = std::time::Instant::now();
+                }
                 if props > 0 || cons > 0 {
                     app.sse("proposals", &json!({}));
                 }

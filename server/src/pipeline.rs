@@ -281,6 +281,21 @@ fn assess(issues: &[Value], issue: &mut Value) {
     transition(issue, ST_QUEUED);
 }
 
+/// assess 回帰評価用のプレビュー（eval-set.mmd・manual-a2de7417）:
+/// 課題 spec の複製へ assess を適用し、判定結果
+/// （verifyLevel/priority/autonomous/planGate）だけを返す。
+/// 状態遷移・保存は行わない（複製への評価のみ）。
+pub fn assess_preview(issues: &[Value], issue: &Value) -> Value {
+    let mut clone = issue.clone();
+    assess(issues, &mut clone);
+    json!({
+        "verifyLevel": clone.get("verifyLevel").cloned().unwrap_or(Value::Null),
+        "priority": clone.get("priority").cloned().unwrap_or(Value::Null),
+        "autonomous": clone.get("autonomous").cloned().unwrap_or(Value::Null),
+        "planGate": clone.get("planGate").cloned().unwrap_or(Value::Null),
+    })
+}
+
 // ---- intake（detect → normalize → dedupe。detect-pipeline.mmd） ----
 
 /// intake の結果。Deferred は起票レート制限で課題を作らず

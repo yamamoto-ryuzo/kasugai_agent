@@ -28,6 +28,7 @@ mod consolidate;
 mod control;
 mod detector_health;
 mod detectors;
+mod evals;
 mod github;
 mod heartbeat;
 mod housekeep;
