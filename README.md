@@ -459,6 +459,10 @@ flowchart TD
   `knowledge/lessons.json` へ蓄積。dispatch prompt には同一課題の直近
   1-3 件 + 類似課題の上位 N 件を注入し、注入分は
   `runs[].knowledgeRefs.lessons` に記録する
+- **ACE 型カウンタ**: レッスンは id + helpful/harmful を持ち、注入後 run
+  の成否で更新。harmful が `lessonHarmLimit`（既定2）に達したレッスンは
+  注入対象から自動除外し、削除 proposal を起票（台帳汚染を止める）
+
 ## 6. 状態とファイル
 
 | ファイル | 内容 | Git 管理 |

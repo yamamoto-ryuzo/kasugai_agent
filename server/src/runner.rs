@@ -287,6 +287,9 @@ async fn fail_run(app: &Shared, key: &str, run_idx: usize, reason: &str) {
     // を lessons.json へ保存し、次回 run の prompt へ注入する
     if let Some(it) = find_issue(&app.root, key) {
         lessons::record_failure(&app.root, &it, run_idx, reason);
+        // ACE カウンタ（manual-bcf981dd）: この run に注入したレッスンは
+        // 成果に結びつかなかったので harmful++
+        lessons::record_outcome(&app.root, &it, false, &app.cfg().await);
     }
     if pipeline::request_transition(&app.root, key, pipeline::ST_FAILED).is_ok() {
         conlog("runner", "err", &format!("{}: run 失敗: {}", key, reason));
@@ -605,6 +608,9 @@ async fn send_back(app: &Shared, key: &str, reason: &str) {
             .unwrap_or(0)
             .saturating_sub(1);
         lessons::record_failure(root, &it, run_idx, reason);
+        // ACE カウンタ（manual-bcf981dd）: verify NG の run に注入された
+        // レッスンは harmful++
+        lessons::record_outcome(root, &it, false, &app.cfg().await);
     }
     let backs = it
         .get("verifyBacks")
@@ -660,6 +666,9 @@ async fn send_back(app: &Shared, key: &str, reason: &str) {
 /// → requirePushApproval/pushApproved 判定 → git push → done
 async fn finalize(app: &Shared, key: &str, issue: &Value, repo: &Value) {
     let root = &app.root;
+    // ACE カウンタ（manual-bcf981dd）: verify 合格まで到達した run に
+    // 注入されたレッスンは helpful++（finalize は verify 合格後のみ呼ばれる）
+    lessons::record_outcome(root, issue, true, &app.cfg().await);
     let repo_path = PathBuf::from(
         repo.get("path").and_then(|v| v.as_str()).unwrap_or(""),
     );

@@ -51,6 +51,7 @@
   "intakeObserveMinutes": 10,
   "intakeObserveMinHits": 2,
   "observingExempt": ["manual", "derived"],
+  "lessonHarmLimit": 2,
   "stormBatchMin": 5,
   "stormWindowMinutes": 10,
   "maxConcurrentRuns": 4,

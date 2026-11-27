@@ -10,7 +10,10 @@ use crate::util::*;
 
 /// 提案が変更対象にできるパス（ws_root 相対プレフィックス）。
 /// 生成物（docs/*.html・state等）・コード（server/, src/）・secrets は対象外。
-const ALLOWED_PREFIXES: &[&str] = &["prompts/", "diagrams/", "skills/", ".devin/skills/"];
+// knowledge/ は agent の生の知見ストア（正本ではない）だが、harmful レッスン
+// 削除 proposal（manual-bcf981dd）等が knowledge/lessons.json を対象にするため
+// path-allowlist に含める（採否は従来どおり人のゲート）
+const ALLOWED_PREFIXES: &[&str] = &["prompts/", "diagrams/", "skills/", ".devin/skills/", "knowledge/"];
 const ALLOWED_FILES: &[&str] = &["AGENTS.md", "README.md", "config.json"];
 
 const KINDS: &[&str] = &["skill", "prompt", "config", "doc", "other"];
