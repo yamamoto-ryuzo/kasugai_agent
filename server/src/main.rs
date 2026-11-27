@@ -45,6 +45,7 @@ mod runner;
 mod snapshots;
 mod split;
 mod store;
+mod trajectory;
 mod util;
 mod verify;
 

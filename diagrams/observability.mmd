@@ -1,0 +1,18 @@
+---
+title: run の観測記録と可視化
+---
+flowchart TD
+    DISP[dispatch<br/>人判断の対応ボタン] --> RUN[runner.rs<br/>run 実行]
+    RUN --> TRAJ[trajectory.rs<br/>run 全過程の記録<br/>SWE-agent .traj 参考]
+    RUN --> PROC[接続AI -p 実行<br/>stdout/stderr 監視]
+    PROC -->|1行ごと| OBS[observation ステップ<br/>trajectory.jsonl へ逐次追記<br/>中断でも過程が残る]
+    TRAJ -->|action| SPAWN[spawn / verify / push を<br/>action ステップとして記録]
+    TRAJ -->|state| ST[状態遷移を<br/>state ステップとして記録]
+    TRAJ -->|thought| NOTE[verifyNote・NG理由を<br/>thought ステップとして記録]
+    OBS --> TRJ[(evidence/slug/run-idx/<br/>trajectory.jsonl<br/>steps 逐次追記)]
+    SPAWN --> TRJ
+    ST --> TRJ
+    NOTE --> TRJ
+    TRJ --> END{run 終了}
+    END -->|成功・上限・スタック・<br/>中断・エラー| FIN[trajectory.json<br/>meta + steps + endReason<br/>終了理由は構造化データ<br/>kind/detail/exitCode/timedOut]
+    FIN --> ANAL[SKILL draft 生成・<br/>失敗分析の原料]

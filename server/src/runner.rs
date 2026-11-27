@@ -37,7 +37,46 @@ use crate::locks;
 use crate::pipeline;
 use crate::repomatch::repo_slug;
 use crate::store;
+use crate::trajectory::{self, Trajectory};
 use crate::util::{hide_console_tokio, now_iso};
+
+/// trajectory の共有ハンドル（出力監視タスクが observation を逐次追記するため）
+type SharedTraj = Arc<Mutex<Trajectory>>;
+
+/// run の観測ハンドル（trajectory + trace span を束ねて runner 各段へ渡す。
+/// 旧形式 run（ファイル未作成）では両方 None で何もしない）
+#[derive(Clone, Default)]
+struct Obs {
+    traj: Option<SharedTraj>,
+}
+
+/// 既存 run の trajectory を開く（trajectory.jsonl がある run のみ。
+/// drain が verify を再開する別タスク経路用。無ければ None で記録なし継続）
+fn traj_existing(root: &Path, key: &str) -> Option<Trajectory> {
+    let issue = find_issue(root, key)?;
+    let idx = trajectory::latest_run_idx(&issue)?;
+    let dir = trajectory::run_dir(
+        &root.join("evidence").join(knowledge::key_slug(key)),
+        idx,
+    );
+    dir.join("trajectory.jsonl")
+        .is_file()
+        .then(|| Trajectory::open(root, key, idx))
+}
+
+/// trajectory へ1ステップ追記（traj が無い旧形式 run は何もしない）
+fn tstep(traj: &Option<SharedTraj>, kind: &str, name: &str, data: Value) {
+    if let Some(t) = traj {
+        t.lock().unwrap().step(kind, name, data);
+    }
+}
+
+/// trajectory を終了理由で閉じる
+fn tfin(traj: &Option<SharedTraj>, kind: &str, detail: &str) {
+    if let Some(t) = traj {
+        t.lock().unwrap().finish(trajectory::end_reason(kind, detail));
+    }
+}
 
 // drain 再入防止（root 単位）と、run/verify 実行中（in-flight）の課題キー。
 // 再起動で in-flight は空になるため、残存 running/verifying は drain が復帰処理する
@@ -179,7 +218,7 @@ async fn drain_inner(app: &Shared) {
                 }
                 let app2 = app.clone();
                 tokio::spawn(async move {
-                    resume_verify(&app2, &key).await;
+                    resume_verify(&app2, &key, Obs::default()).await;
                     flight_del(&key);
                 });
             }
@@ -221,6 +260,8 @@ async fn drain_inner(app: &Shared) {
                     "verifyNote",
                     json!("control 再起動で run の追跡を喪失"),
                 );
+                // 孤児 run の trajectory に終了理由 aborted を補記する
+                trajectory::abort_orphan(&root, &key);
                 if pipeline::request_transition(&root, &key, pipeline::ST_FAILED).is_ok() {
                     conlog(
                         "runner",
@@ -726,11 +767,23 @@ fn update_run(root: &Path, key: &str, idx: usize, extra: Map<String, Value>) {
 }
 
 /// 実行不能・異常終了時の failed 処理（running → failed）
-async fn fail_run(app: &Shared, key: &str, run_idx: usize, reason: &str) {
+async fn fail_run(
+    app: &Shared,
+    key: &str,
+    run_idx: usize,
+    reason: &str,
+    obs: Obs,
+) {
     let mut extra = Map::new();
     extra.insert("endedAt".into(), json!(now_iso()));
     extra.insert("error".into(), json!(reason));
     update_run(&app.root, key, run_idx, extra);
+    if let Some(t) = &obs.traj {
+        let mut t = t.lock().unwrap();
+        t.step("state", "failed", json!({}));
+        t.step("thought", "error", json!({"reason": reason}));
+        t.finish(trajectory::end_reason("error", reason));
+    }
     let _ = pipeline::set_field(&app.root, key, "verifyNote", json!(reason));
     // 失敗レッスン（lesson-loop.mmd・manual-29799d3e）: 何が・なぜ失敗したか
     // を lessons.json へ保存し、次回 run の prompt へ注入する
@@ -760,12 +813,43 @@ async fn run_and_verify(
     run_idx: usize,
 ) {
     let root = &app.root;
+    // trajectory 記録開始（observability.mmd）: meta を確定して
+    // state=running から逐次ステップを追記する
+    let traj: SharedTraj = {
+        let mut meta = Map::new();
+        meta.insert("issue".into(), json!(key));
+        meta.insert("run".into(), json!(run_idx));
+        meta.insert("startedAt".into(), json!(now_iso()));
+        meta.insert(
+            "verifyLevel".into(),
+            issue.get("verifyLevel").cloned().unwrap_or(json!(1)),
+        );
+        if let Some((e, _)) = &agent {
+            meta.insert("agent".into(), json!(e));
+        }
+        if let Some(r) = &repo {
+            meta.insert(
+                "repo".into(),
+                json!(r.get("path").and_then(|v| v.as_str()).unwrap_or("")),
+            );
+        }
+        let t = Arc::new(Mutex::new(Trajectory::begin(
+            trajectory::run_dir(ev_dir, run_idx),
+            meta,
+        )));
+        t.lock().unwrap().step("state", "running", json!({}));
+        t
+    };
+    let traj = Some(traj);
+    let obs = Obs {
+        traj: traj.clone(),
+    };
     let Some((exe, prompt_args)) = agent else {
-        fail_run(app, key, run_idx, "chatAgents に実行可能な exe がありません").await;
+        fail_run(app, key, run_idx, "chatAgents に実行可能な exe がありません", obs).await;
         return;
     };
     let Some(repo_v) = repo else {
-        fail_run(app, key, run_idx, "課題の repo が config.repos に未登録").await;
+        fail_run(app, key, run_idx, "課題の repo が config.repos に未登録", obs).await;
         return;
     };
     let repo_path = PathBuf::from(
@@ -775,7 +859,7 @@ async fn run_and_verify(
             .unwrap_or(""),
     );
     if !repo_path.is_dir() {
-        fail_run(app, key, run_idx, "repo path が存在しない").await;
+        fail_run(app, key, run_idx, "repo path が存在しない", obs).await;
         return;
     }
 
@@ -786,6 +870,12 @@ async fn run_and_verify(
         extra.insert("knowledgeRefs".into(), krefs);
         update_run(root, key, run_idx, extra);
     }
+    tstep(
+        &traj,
+        "action",
+        "dispatch",
+        json!({"exe": exe, "args": prompt_args, "promptChars": prompt.len()}),
+    );
     let log_path = ev_dir.join("run.log");
     let mut cmd = tokio::process::Command::new(&exe);
     cmd.args(&prompt_args)
@@ -802,7 +892,14 @@ async fn run_and_verify(
     let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
-            fail_run(app, key, run_idx, &format!("実行体の起動失敗: {}", e)).await;
+            fail_run(
+                app,
+                key,
+                run_idx,
+                &format!("実行体の起動失敗: {}", e),
+                obs,
+            )
+            .await;
             return;
         }
     };
@@ -822,11 +919,21 @@ async fn run_and_verify(
         let Some(pipe) = pipe else { continue };
         let src = src.clone();
         let buf = buf.clone();
+        let traj = traj.clone();
         readers.push(tokio::spawn(async move {
             use tokio::io::AsyncBufReadExt;
             let mut lines = tokio::io::BufReader::new(pipe).lines();
             while let Ok(Some(l)) = lines.next_line().await {
                 conlog(&src, stream, &l);
+                if let Some(t) = &traj {
+                    // observation: 実行体出力を1行1ステップで逐次追記
+                    // （中断しても過程が残る。長行は打ち切る）
+                    t.lock().unwrap().step(
+                        "observation",
+                        stream,
+                        json!({"line": l.chars().take(4000).collect::<String>()}),
+                    );
+                }
                 let mut b = buf.lock().unwrap();
                 b.push_str(&l);
                 b.push('\n');
@@ -863,6 +970,12 @@ async fn run_and_verify(
         }
         update_run(root, key, run_idx, extra);
     }
+    tstep(
+        &traj,
+        "action",
+        "exec.end",
+        json!({"exitCode": code, "timedOut": timed_out, "error": wait_err}),
+    );
     conlog(
         "runner",
         "sys",
@@ -881,10 +994,17 @@ async fn run_and_verify(
             "err",
             &format!("{}: verifying 遷移失敗: {}", key, e),
         );
+        tstep(
+            &traj,
+            "thought",
+            "transition.error",
+            json!({"note": format!("verifying 遷移失敗: {}", e)}),
+        );
         return;
     }
     app.sse("issues", &json!({}));
-    resume_verify(app, key).await;
+    tstep(&traj, "state", "verifying", json!({}));
+    resume_verify(app, key, obs).await;
 }
 
 // ---------- prompt 組立（dispatch。非対話 -p 実行） ----------
@@ -1098,8 +1218,9 @@ fn build_prompt(root: &Path, issue: &Value) -> String {
 // ---------- verify（L0〜L4） + push ----------
 
 /// verifying の再開: verifyOk 未記録なら検証を（再）実行、記録済みなら
-/// push 段階（帰属整理 → 承認判定 → push）へ進む
-async fn resume_verify(app: &Shared, key: &str) {
+/// push 段階（帰属整理 → 承認判定 → push）へ進む。
+/// traj は run 側で開いた trajectory（drain 再開経路は None → 既存分を開く）
+async fn resume_verify(app: &Shared, key: &str, obs: Obs) {
     let root = &app.root;
     let Some(issue) = find_issue(root, key) else {
         return;
@@ -1108,6 +1229,14 @@ async fn resume_verify(app: &Shared, key: &str) {
     {
         return;
     }
+    // drain 再開経路（obs 空）は既存 run の観測ファイルを開いて追記を続ける
+    let run_idx = trajectory::latest_run_idx(&issue);
+    let obs = Obs {
+        traj: obs.traj.or_else(|| {
+            traj_existing(root, key).map(|t| Arc::new(Mutex::new(t)))
+        }),
+    };
+    let traj = &obs.traj;
     let cfg = app.cfg().await;
     let repo = App::git_repo(
         &cfg,
@@ -1115,7 +1244,7 @@ async fn resume_verify(app: &Shared, key: &str) {
     )
     .cloned();
     let Some(repo_v) = repo else {
-        send_back(app, key, "repo が config.repos に未登録").await;
+        send_back(app, key, "repo が config.repos に未登録", obs).await;
         return;
     };
     let ev_dir = root.join("evidence").join(knowledge::key_slug(key));
@@ -1124,21 +1253,34 @@ async fn resume_verify(app: &Shared, key: &str) {
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
     if !verified {
-        let (ok, _note) = run_checks(app, &issue, &repo_v, &ev_dir).await;
+        let level = issue
+            .get("verifyLevel")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(1);
+        tstep(traj, "action", "verify.start", json!({"level": level}));
+        let (ok, note) = run_checks(app, &issue, &repo_v, &ev_dir).await;
+        tstep(
+            traj,
+            "action",
+            "verify.end",
+            json!({"level": level, "ok": ok, "note": note}),
+        );
         if !ok {
-            send_back(app, key, "verify 不合格（evidence の verify.log を参照）")
+            tstep(traj, "thought", "verify.ng", json!({"note": note}));
+            send_back(app, key, "verify 不合格（evidence の verify.log を参照）", obs)
                 .await;
             return;
         }
         let _ = pipeline::set_field(root, key, "verifyOk", json!(true));
     }
     let issue = find_issue(root, key).unwrap_or(issue);
-    finalize(app, key, &issue, &repo_v).await;
+    finalize(app, key, &issue, &repo_v, obs).await;
 }
 
 /// NG 差し戻し: verifying → retry（verifyBacks++）→ queued or failed
 /// （verifyBackLimit 超過で failed）
-async fn send_back(app: &Shared, key: &str, reason: &str) {
+async fn send_back(app: &Shared, key: &str, reason: &str, obs: Obs) {
+    let traj = &obs.traj;
     let root = &app.root;
     let _ = pipeline::set_field(root, key, "verifyNote", json!(reason));
     if pipeline::request_transition(root, key, pipeline::ST_RETRY).is_err() {
@@ -1291,6 +1433,12 @@ async fn send_back(app: &Shared, key: &str, reason: &str) {
     }
     if backs > limit {
         let _ = pipeline::request_transition(root, key, pipeline::ST_FAILED);
+        tstep(traj, "state", "failed", json!({"verifyBacks": backs}));
+        tfin(
+            traj,
+            "limit",
+            &format!("差し戻し上限超過（{}回）: {}", backs, reason),
+        );
         conlog(
             "runner",
             "err",
@@ -1307,6 +1455,13 @@ async fn send_back(app: &Shared, key: &str, reason: &str) {
         .await;
     } else {
         let _ = pipeline::request_transition(root, key, pipeline::ST_QUEUED);
+        tstep(
+            traj,
+            "state",
+            "retry",
+            json!({"verifyBacks": backs, "note": reason}),
+        );
+        tfin(traj, "verify_ng", reason);
         // 指数バックオフ（manual-6c3ed946）: verify NG の再試行は
         // verifyBackoffMinutes × 2^(backs-1)（上限 verifyBackoffMaxMinutes）
         // だけ待機させる。retryAfter 経過前の再 dispatch は can_dispatch が止める
@@ -1336,7 +1491,14 @@ async fn send_back(app: &Shared, key: &str, reason: &str) {
 
 /// verify 合格後の仕上げ: 帰属整理（非本課題コミットを revert で除去）
 /// → requirePushApproval/pushApproved 判定 → git push → done
-async fn finalize(app: &Shared, key: &str, issue: &Value, repo: &Value) {
+async fn finalize(
+    app: &Shared,
+    key: &str,
+    issue: &Value,
+    repo: &Value,
+    obs: Obs,
+) {
+    let traj = &obs.traj;
     let root = &app.root;
     // ACE カウンタ（manual-bcf981dd）: verify 合格まで到達した run に
     // 注入されたレッスンは helpful++（finalize は verify 合格後のみ呼ばれる）
@@ -1353,9 +1515,15 @@ async fn finalize(app: &Shared, key: &str, issue: &Value, repo: &Value) {
                     &format!("{}: 混入コミットを revert 除去: {}", key, s),
                 );
             }
+            tstep(
+                traj,
+                "action",
+                "git.clean",
+                json!({"reverted": removed.len(), "commits": removed}),
+            );
         }
         Err(e) => {
-            send_back(app, key, &format!("帰属整理に失敗: {}", e)).await;
+            send_back(app, key, &format!("帰属整理に失敗: {}", e), obs).await;
             return;
         }
     }
@@ -1366,7 +1534,7 @@ async fn finalize(app: &Shared, key: &str, issue: &Value, repo: &Value) {
         && issue.get("diffReviewOk").and_then(|v| v.as_bool()) != Some(true)
     {
         if let Err(note) = diff_review(app, key, issue, repo).await {
-            send_back(app, key, &note).await;
+            send_back(app, key, &note, obs).await;
             return;
         }
     }
@@ -1384,12 +1552,16 @@ async fn finalize(app: &Shared, key: &str, issue: &Value, repo: &Value) {
             "sys",
             &format!("{}: verify 合格。push は承認待ち（requirePushApproval）", key),
         );
+        tstep(traj, "state", "push_pending", json!({}));
         return; // drain が pushApproved を拾って再開する
     }
     match git_push(&repo_path).await {
         Ok(_) => {
+            tstep(traj, "action", "push", json!({"ok": true}));
             let _ = pipeline::set_field(root, key, "pushedAt", json!(now_iso()));
             if pipeline::request_transition(root, key, pipeline::ST_DONE).is_ok() {
+                tstep(traj, "state", "done", json!({}));
+                tfin(traj, "success", "verify 合格・push 済み");
                 conlog(
                     "runner",
                     "sys",
@@ -1405,6 +1577,12 @@ async fn finalize(app: &Shared, key: &str, issue: &Value, repo: &Value) {
         }
         Err(e) => {
             conlog("runner", "err", &format!("{}: push 失敗: {}", key, e));
+            tstep(
+                traj,
+                "action",
+                "push",
+                json!({"ok": false, "error": e}),
+            );
             let _ = pipeline::set_field(
                 root,
                 key,
@@ -2403,7 +2581,7 @@ mod tests {
         issue["status"] = json!(pipeline::ST_VERIFYING);
         seed(&root, &issue);
 
-        send_back(&app, key, "検証失敗").await;
+        send_back(&app, key, "検証失敗", Obs::default()).await;
         let it = find_issue(&root, key).unwrap();
         assert_eq!(it["status"], json!(pipeline::ST_QUEUED));
         assert_eq!(it["verifyBacks"], json!(1));

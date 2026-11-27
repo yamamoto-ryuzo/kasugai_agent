@@ -660,6 +660,47 @@ flowchart TD
   `eval-smoke` 検査（直近 case の assess 回帰）が付き、退行があれば
   accept 不能になる
 
+### 5.8 run の観測記録（trajectory）
+
+run の証跡（`evidence/` の run.log・verify.log）は結果の証拠だが、
+それとは別に **run の全過程**を trajectory として構造化記録する
+（SWE-agent の `.traj` 参考）。失敗分析・SKILL draft 生成の原料になる。
+
+<!-- diagram: observability -->
+```mermaid
+---
+title: run の観測記録と可視化
+---
+flowchart TD
+    DISP[dispatch<br/>人判断の対応ボタン] --> RUN[runner.rs<br/>run 実行]
+    RUN --> TRAJ[trajectory.rs<br/>run 全過程の記録<br/>SWE-agent .traj 参考]
+    RUN --> PROC[接続AI -p 実行<br/>stdout/stderr 監視]
+    PROC -->|1行ごと| OBS[observation ステップ<br/>trajectory.jsonl へ逐次追記<br/>中断でも過程が残る]
+    TRAJ -->|action| SPAWN[spawn / verify / push を<br/>action ステップとして記録]
+    TRAJ -->|state| ST[状態遷移を<br/>state ステップとして記録]
+    TRAJ -->|thought| NOTE[verifyNote・NG理由を<br/>thought ステップとして記録]
+    OBS --> TRJ[(evidence/slug/run-idx/<br/>trajectory.jsonl<br/>steps 逐次追記)]
+    SPAWN --> TRJ
+    ST --> TRJ
+    NOTE --> TRJ
+    TRJ --> END{run 終了}
+    END -->|成功・上限・スタック・<br/>中断・エラー| FIN[trajectory.json<br/>meta + steps + endReason<br/>終了理由は構造化データ<br/>kind/detail/exitCode/timedOut]
+    FIN --> ANAL[SKILL draft 生成・<br/>失敗分析の原料]
+```
+
+- 記録先は run 単位の artifact ディレクトリ `evidence/<slug>/run-<idx>/`。
+  steps は `trajectory.jsonl` へ1行1ステップで逐次追記し
+  （thought/action/observation/state の4種）、run 終了時に
+  `trajectory.json` へ meta + steps + `endReason` をまとめて書き出す。
+  逐次追記のため control 再起動などで中断しても過程が残る
+- ステップの内訳: `action`=spawn・verify・push の実行、`observation`=実行体
+  出力（stdout/stderr 1行ごと）、`state`=課題の状態遷移、
+  `thought`=verifyNote・NG理由等の判定根拠
+- **終了理由（endReason）の構造化**: `kind`（success / verify_ng / limit /
+  stuck / aborted / error）+ `detail` + `exitCode` + `timedOut`。
+  verify NG の差し戻しは `verify_ng`、差し戻し上限・タイムアウトは `limit`、
+  control 再起動で追跡を失った孤児 run は drain が `aborted` を補記する
+
 ## 6. 状態とファイル
 
 | ファイル | 内容 | Git 管理 |
