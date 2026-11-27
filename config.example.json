@@ -52,6 +52,8 @@
   "intakeObserveMinHits": 2,
   "observingExempt": ["manual", "derived"],
   "lessonHarmLimit": 2,
+  "consolidateIdleMinutes": 30,
+  "consolidateMinCluster": 3,
   "stormBatchMin": 5,
   "stormWindowMinutes": 10,
   "maxConcurrentRuns": 4,

@@ -3853,13 +3853,21 @@ pub fn spawn_watchers(app: Shared) {
     {
         let app = app.clone();
         tokio::spawn(async move {
+            // verify リプレイの最終実行（初回は即実行可能に 1h 前で初期化）
+            let mut last_replay = std::time::Instant::now()
+                .checked_sub(std::time::Duration::from_secs(3600))
+                .unwrap_or_else(std::time::Instant::now);
             loop {
                 let cfg = app.cfg().await;
                 let (_, props) = crate::knowledge::learn_pass(&app.root);
                 // CBR（manual-654b11c2）: 終端済み課題を knowledge/cases.json
                 // の事例ベースへ蓄積（決定的スコアの検索元）
                 crate::cases::sync_cases(&app.root);
-                if props > 0 {
+                // sleep-time consolidation（manual-fd394ace・consolidation.mmd）:
+                // アイドル時のみ knowledge/ をクラスタ統合し上位レッスンを
+                // runbook proposal として起票（出力は proposals のみ）
+                let cons = crate::consolidate::consolidate_pass(&app.root, &cfg);
+                if props > 0 || cons > 0 {
                     app.sse("proposals", &json!({}));
                 }
                 let secs = cfg_obj(&cfg, "pollSeconds")

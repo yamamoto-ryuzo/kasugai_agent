@@ -463,6 +463,38 @@ flowchart TD
   の成否で更新。harmful が `lessonHarmLimit`（既定2）に達したレッスンは
   注入対象から自動除外し、削除 proposal を起票（台帳汚染を止める）
 
+<!-- diagram: consolidation -->
+```mermaid
+---
+title: 知見圧縮（sleep-time consolidation）
+---
+flowchart TD
+    TICK[learn watcher<br/>pollSeconds.learn] --> IDLE{アイドル判定<br/>queued/running/verifying<br/>なし + 前回活動から<br/>consolidateIdleMinutes 経過}
+    IDLE -->|busy| SKIP[今回は統合しない]
+    IDLE -->|idle| SCAN[knowledge/*.md 走査<br/>課題 key 単位の生知見]
+    SCAN --> CLU[クラスタ化・決定的<br/>source + repo + kind で分類<br/>consolidateMinCluster 以上を対象]
+    CLU --> SYN[上位レッスン合成・決定的<br/>結果分布 done/failed/rejected +<br/>頻出レッスン advice +<br/>採用アプローチ要約]
+    SYN --> RB[runbook md 生成<br/>prompts/runbook/<br/>source-kind.md]
+    RB --> EXIST{既存 runbook 同内容<br/>or proposal 済み?}
+    EXIST -->|yes| NOP[起票しない]
+    EXIST -->|no| PROP[proposal 起票<br/>kind=other<br/>changes: runbook path]
+    PROP --> HG{人の採否}
+    HG -->|採用| WRITE[root の prompts/<br/>runbook/ へ書込み]
+    HG -->|却下| NOCHG[蓄積は変えない]
+    WRITE --> INJ[次回 dispatch の<br/>runbook 注入へ反映<br/>knowledge.load_runbook]
+    SKIP --> TICK
+    NOP --> TICK
+```
+
+- **sleep-time consolidation**（`server/src/consolidate.rs`）: 実行系が
+  アイドル（活動課題なし・`consolidateIdleMinutes` 経過）のときだけ、
+  `knowledge/` の課題知見を source+kind でクラスタ化し、
+  `consolidateMinCluster`（既定3）以上のクラスタから上位レッスン
+  （傾向・既知の失敗パターン・成功アプローチ）を合成して
+  `prompts/runbook/<source>-<kind>.md` の proposal を起票。
+  出力は常に proposals 経由で人が採否し、採用時に既存の runbook 注入
+  へ反映される
+
 ## 6. 状態とファイル
 
 | ファイル | 内容 | Git 管理 |

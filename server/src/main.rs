@@ -24,6 +24,7 @@ mod chat;
 mod claims;
 mod conlog;
 mod config;
+mod consolidate;
 mod control;
 mod detector_health;
 mod detectors;
