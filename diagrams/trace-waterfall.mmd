@@ -1,0 +1,17 @@
+---
+title: 構造化トレース（OTel GenAI 風 span）とウォーターフォール
+---
+flowchart TD
+    RUN[runner.rs<br/>run 実行] --> ROOT[root span<br/>kind=AGENT name=kasugai.run]
+    ROOT --> PL[llm.plan<br/>kind=LLM<br/>計画生成・critic]
+    ROOT --> EX[llm.exec<br/>kind=LLM<br/>接続AI -p 実行<br/>gen_ai.system=exe<br/>gen_ai.usage.*]
+    ROOT --> VF[eval.verify<br/>kind=EVALUATOR<br/>verify L0-L4<br/>gen_ai.eval.*]
+    ROOT --> CL[tool.git.clean<br/>kind=TOOL<br/>帰属整理 revert]
+    ROOT --> PS[tool.push<br/>kind=TOOL<br/>git push]
+    ROOT -.->|瞬時イベント| EVT[run.start / state 遷移 /<br/>send_back など<br/>durationMs=0 の点 span]
+    PL & EX & VF & CL & PS & EVT --> TJ[(evidence/slug/run-idx/<br/>trace.jsonl<br/>1行1span・JSONL 追記<br/>spanId/parentSpanId/<br/>traceId/startTime/endTime/<br/>status/attributes)]
+    TJ --> API[GET /api/issues/key/trace<br/>?run=N]
+    API --> WF[パネル ISSUES 詳細<br/>ウォーターフォール<br/>左: 時系列バー<br/>右: 選択 span 詳細]
+    SSE[SSE issues push] -->|再取得| WF
+    RUN -->|run 中の span 完了ごと| SSE
+    UF[run.usage<br/>elapsedMs/promptChars/<br/>outputChars/tokens/cost] -->|span 属性へ集約| EX

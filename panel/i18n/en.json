@@ -390,5 +390,7 @@
   "iss.incDispatch": "dispatch incident",
   "iss.incMerge": "merge into incident",
   "iss.incUnmerge": "remove from incident",
-  "iss.incMergePrompt": "Enter the issue key or incident id (inc-…) to merge with"
+  "iss.incMergePrompt": "Enter the issue key or incident id (inc-…) to merge with",
+  "iss.trace": "Trace",
+  "iss.traceNone": "No spans yet"
 }

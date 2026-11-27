@@ -701,6 +701,44 @@ flowchart TD
   verify NG の差し戻しは `verify_ng`、差し戻し上限・タイムアウトは `limit`、
   control 再起動で追跡を失った孤児 run は drain が `aborted` を補記する
 
+### 5.9 構造化トレース span とウォーターフォール
+
+trajectory が「全過程の逐語記録」なら、trace は run の**構造化 span**
+（OpenTelemetry GenAI semantic conventions / OpenInference 参考）。
+run の各段階（plan→exec→verify→push）を span として
+`evidence/<slug>/run-<idx>/trace.jsonl` へ1行1spanで追記し、
+パネルの ISSUES 詳細にウォーターフォール表示する。
+
+<!-- diagram: trace-waterfall -->
+```mermaid
+---
+title: 構造化トレース（OTel GenAI 風 span）とウォーターフォール
+---
+flowchart TD
+    RUN[runner.rs<br/>run 実行] --> ROOT[root span<br/>kind=AGENT name=kasugai.run]
+    ROOT --> PL[llm.plan<br/>kind=LLM<br/>計画生成・critic]
+    ROOT --> EX[llm.exec<br/>kind=LLM<br/>接続AI -p 実行<br/>gen_ai.system=exe<br/>gen_ai.usage.*]
+    ROOT --> VF[eval.verify<br/>kind=EVALUATOR<br/>verify L0-L4<br/>gen_ai.eval.*]
+    ROOT --> CL[tool.git.clean<br/>kind=TOOL<br/>帰属整理 revert]
+    ROOT --> PS[tool.push<br/>kind=TOOL<br/>git push]
+    ROOT -.->|瞬時イベント| EVT[run.start / state 遷移 /<br/>send_back など<br/>durationMs=0 の点 span]
+    PL & EX & VF & CL & PS & EVT --> TJ[(evidence/slug/run-idx/<br/>trace.jsonl<br/>1行1span・JSONL 追記<br/>spanId/parentSpanId/<br/>traceId/startTime/endTime/<br/>status/attributes)]
+    TJ --> API[GET /api/issues/key/trace<br/>?run=N]
+    API --> WF[パネル ISSUES 詳細<br/>ウォーターフォール<br/>左: 時系列バー<br/>右: 選択 span 詳細]
+    SSE[SSE issues push] -->|再取得| WF
+    RUN -->|run 中の span 完了ごと| SSE
+    UF[run.usage<br/>elapsedMs/promptChars/<br/>outputChars/tokens/cost] -->|span 属性へ集約| EX
+```
+
+- span は `{traceId, spanId, parentSpanId, name, kind, startTime, endTime,
+  durationMs, status:{code,message}, attributes}`。kind は OTel GenAI 風の
+  `AGENT`（run 全体）/`LLM`（計画・実行体呼出）/`EVALUATOR`（verify）/
+  `TOOL`（git clean・push）。瞬時イベントは `durationMs=0` の点 span
+- `gen_ai.*` 属性: `gen_ai.system`=実行体 exe、`gen_ai.usage.*`=トークン/
+  費用（対応実行体のみ）、`gen_ai.eval.*`=verify level・結果
+- API は `GET /api/issues/{key}/trace?run=N`。SSE の `issues` push で
+  パネルが再取得し、実行中のウォーターフォールがリアルタイムに伸長する
+
 ### 5.11 run コスト可視化（トークン/費用/経過時間）
 
 Devin Session Insights 参考に、run ごとのトークン量・費用・経過時間を

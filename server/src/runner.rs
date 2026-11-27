@@ -37,17 +37,20 @@ use crate::locks;
 use crate::pipeline;
 use crate::repomatch::repo_slug;
 use crate::store;
+use crate::trace::{self, Trace};
 use crate::trajectory::{self, Trajectory};
 use crate::util::{hide_console_tokio, now_iso};
 
 /// trajectory の共有ハンドル（出力監視タスクが observation を逐次追記するため）
 type SharedTraj = Arc<Mutex<Trajectory>>;
+type SharedTrace = Arc<Trace>;
 
 /// run の観測ハンドル（trajectory + trace span を束ねて runner 各段へ渡す。
 /// 旧形式 run（ファイル未作成）では両方 None で何もしない）
 #[derive(Clone, Default)]
 struct Obs {
     traj: Option<SharedTraj>,
+    trace: Option<SharedTrace>,
 }
 
 /// 既存 run の trajectory を開く（trajectory.jsonl がある run のみ。
@@ -262,6 +265,17 @@ async fn drain_inner(app: &Shared) {
                 );
                 // 孤児 run の trajectory に終了理由 aborted を補記する
                 trajectory::abort_orphan(&root, &key);
+                if let Some(idx) = trajectory::latest_run_idx(&it) {
+                    let dir = trajectory::run_dir(
+                        &root.join("evidence").join(knowledge::key_slug(&key)),
+                        idx,
+                    );
+                    if dir.join("trace.jsonl").is_file() {
+                        let tr = Trace::open(dir);
+                        tr.event("aborted", Map::new());
+                        tr.finish_root(false, "aborted");
+                    }
+                }
                 if pipeline::request_transition(&root, &key, pipeline::ST_FAILED).is_ok() {
                     conlog(
                         "runner",
@@ -648,12 +662,36 @@ async fn run_plan_phase(app: &Shared, key: &str, issue: &Value) {
         return;
     }
 
+    // 計画フェーズの span は次の run dir（run-<runs.len()>）へ書く。
+    // 計画→running へ進んだ場合は同じ run の前半 span になる
+    let plan_trace = {
+        let next_idx = issue
+            .get("runs")
+            .and_then(|v| v.as_array())
+            .map(|a| a.len())
+            .unwrap_or(0);
+        let dir = trajectory::run_dir(
+            &root.join("evidence").join(knowledge::key_slug(key)),
+            next_idx,
+        );
+        Trace::open(dir)
+    };
     // 1. 計画生成（読み取り専用・実装しない）
+    let pspan = plan_trace.start(
+        "llm.plan",
+        trace::KIND_LLM,
+        Map::from_iter([("gen_ai.system".into(), json!(exe))]),
+    );
     let ptimeout = Duration::from_secs_f64(cfg_f64(&cfg, "planTimeoutMinutes", 30.0) * 60.0);
     let out = match spawn_capture(&exe, &args, &repo_path, &plan_prompt(root, issue), ptimeout).await {
-        Ok(o) => {            o
+        Ok(o) => {
+            plan_trace.end(&pspan, true, "", Map::new());
+            o
         }
-        Err(e) => {            back(&format!("計画生成に失敗: {}", e));
+        Err(e) => {
+            plan_trace.end(&pspan, false, &e.to_string(), Map::new());
+            plan_trace.event("plan.back", Map::new());
+            back(&format!("計画生成に失敗: {}", e));
             app.sse("issues", &json!({}));
             return;
         }
@@ -662,7 +700,9 @@ async fn run_plan_phase(app: &Shared, key: &str, issue: &Value) {
         // ブロックが無ければ末尾 6000 文字を計画として採用
         out.chars().rev().take(6000).collect::<String>().chars().rev().collect()
     });
-    if plan.trim().is_empty() {        back("計画の出力が空");
+    if plan.trim().is_empty() {
+        plan_trace.event("plan.back", Map::new());
+        back("計画の出力が空");
         app.sse("issues", &json!({}));
         return;
     }
@@ -673,6 +713,7 @@ async fn run_plan_phase(app: &Shared, key: &str, issue: &Value) {
     let ctimeout = Duration::from_secs_f64(cfg_f64(&cfg, "criticTimeoutMinutes", 15.0) * 60.0);
     let min_conf = cfg_f64(&cfg, "planCriticMinConfidence", 0.7);
     let mut critic_ok = false;
+    let cspan = plan_trace.start("llm.plan.critic", trace::KIND_LLM, Map::new());
     let critic_res = spawn_capture(&exe, &args, &repo_path, &critic_prompt(root, issue, &plan), ctimeout).await;
     match critic_res {
         Ok(cout) => match crate::verify::extract_review(&cout) {
@@ -685,7 +726,10 @@ async fn run_plan_phase(app: &Shared, key: &str, issue: &Value) {
                     json!({"at": now_iso(), "findings": review.findings}),
                 );
                 if !severe.is_empty() {
-                    let notes: Vec<String> = severe.iter().map(|f| f.note.clone()).collect();                    back(&format!("計画 critic で Severe 検出: {}", notes.join(" / ")));
+                    let notes: Vec<String> = severe.iter().map(|f| f.note.clone()).collect();
+                    plan_trace.end(&cspan, false, &notes.join(" / "), Map::new());
+                    plan_trace.event("plan.back", Map::new());
+                    back(&format!("計画 critic で Severe 検出: {}", notes.join(" / ")));
                     app.sse("issues", &json!({}));
                     return;
                 }
@@ -704,14 +748,22 @@ async fn run_plan_phase(app: &Shared, key: &str, issue: &Value) {
             );
         }
     }
+    // critic span を閉じる（severe return 経路は既に end 済みで、
+    // ここでの end は open map からの remove なので冪等に無視される）
+    plan_trace.end(&cspan, critic_ok, "", Map::new());
+
     // 3. 承認判定: autoApprovePlan=on は critic 合格（要必須）で即承認、
     //    それ以外（critic 未取得/失敗を含む）は plan_review で人を待つ
     if cfg_bool_default_false(&cfg, "autoApprovePlan") && critic_ok {
-        let _ = pipeline::set_field(root, key, "planApproved", json!(true));        conlog("runner", "sys", &format!("{}: 計画を自動承認 → running", key));
+        let _ = pipeline::set_field(root, key, "planApproved", json!(true));
+        plan_trace.event("plan.approved", Map::from_iter([("actor".into(), json!("system"))]));
+        conlog("runner", "sys", &format!("{}: 計画を自動承認 → running", key));
         if let Some(cur) = find_issue(root, key) {
             let _ = start_run(app, cur).await;
         }
-    } else if pipeline::request_transition(root, key, pipeline::ST_PLAN_REVIEW).is_ok() {        conlog(
+    } else if pipeline::request_transition(root, key, pipeline::ST_PLAN_REVIEW).is_ok() {
+        plan_trace.event("plan_review", Map::new());
+        conlog(
             "runner",
             "sys",
             &format!("{}: 計画を plan_review で承認待ち", key),
@@ -778,6 +830,10 @@ async fn fail_run(
     extra.insert("endedAt".into(), json!(now_iso()));
     extra.insert("error".into(), json!(reason));
     update_run(&app.root, key, run_idx, extra);
+    if let Some(tr) = &obs.trace {
+        tr.event("failed", Map::from_iter([("reason".into(), json!(reason))]));
+        tr.finish_root(false, reason);
+    }
     if let Some(t) = &obs.traj {
         let mut t = t.lock().unwrap();
         t.step("state", "failed", json!({}));
@@ -843,6 +899,7 @@ async fn run_and_verify(
     let traj = Some(traj);
     let obs = Obs {
         traj: traj.clone(),
+        trace: Some(Trace::begin(trajectory::run_dir(ev_dir, run_idx))),
     };
     let Some((exe, prompt_args)) = agent else {
         fail_run(app, key, run_idx, "chatAgents に実行可能な exe がありません", obs).await;
@@ -889,10 +946,24 @@ async fn run_and_verify(
         "sys",
         &format!("{}: spawn {} {:?}", key, exe, prompt_args),
     );
+    // OTel GenAI 風 span（trace-waterfall.mmd）: 実行体呼出を LLM span で括る
+    let exec_span = obs.trace.as_ref().map(|t| {
+        t.start(
+            "llm.exec",
+            trace::KIND_LLM,
+            Map::from_iter([
+                ("gen_ai.system".into(), json!(exe)),
+                ("gen_ai.request.prompt_chars".into(), json!(prompt.len())),
+            ]),
+        )
+    });
     let exec_t0 = Instant::now();
     let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
+            if let (Some(t), Some(s)) = (&obs.trace, &exec_span) {
+                t.end(s, false, &e.to_string(), Map::new());
+            }
             fail_run(
                 app,
                 key,
@@ -986,6 +1057,18 @@ async fn run_and_verify(
         }
         update_run(root, key, run_idx, extra);
     }
+    if let (Some(t), Some(s)) = (&obs.trace, &exec_span) {
+        let mut attrs = Map::new();
+        attrs.insert("gen_ai.usage.elapsed_ms".into(), json!(usage["elapsedMs"]));
+        if let Some(v) = usage.get("tokens") {
+            attrs.insert("gen_ai.usage.total_tokens".into(), v.clone());
+        }
+        if let Some(v) = usage.get("costUsd") {
+            attrs.insert("gen_ai.usage.cost_usd".into(), v.clone());
+        }
+        attrs.insert("exit_code".into(), code.map(|c| json!(c)).unwrap_or(Value::Null));
+        t.end(s, code == Some(0) && !timed_out, &format!("{:?}", code), attrs);
+    }
     tstep(
         &traj,
         "action",
@@ -1020,6 +1103,9 @@ async fn run_and_verify(
     }
     app.sse("issues", &json!({}));
     tstep(&traj, "state", "verifying", json!({}));
+    if let Some(t) = &obs.trace {
+        t.event("state.verifying", Map::new());
+    }
     resume_verify(app, key, obs).await;
 }
 
@@ -1294,6 +1380,14 @@ async fn resume_verify(app: &Shared, key: &str, obs: Obs) {
         traj: obs.traj.or_else(|| {
             traj_existing(root, key).map(|t| Arc::new(Mutex::new(t)))
         }),
+        trace: obs.trace.or_else(|| {
+            run_idx.map(|i| {
+                Trace::open(trajectory::run_dir(
+                    &root.join("evidence").join(knowledge::key_slug(key)),
+                    i,
+                ))
+            })
+        }),
     };
     let traj = &obs.traj;
     let cfg = app.cfg().await;
@@ -1317,7 +1411,23 @@ async fn resume_verify(app: &Shared, key: &str, obs: Obs) {
             .and_then(|v| v.as_u64())
             .unwrap_or(1);
         tstep(traj, "action", "verify.start", json!({"level": level}));
+        // EVALUATOR span（verify L0-L4 全体を1spanで括る）
+        let vspan = obs.trace.as_ref().map(|t| {
+            t.start(
+                "eval.verify",
+                trace::KIND_EVALUATOR,
+                Map::from_iter([("gen_ai.eval.level".into(), json!(level))]),
+            )
+        });
         let (ok, note) = run_checks(app, &issue, &repo_v, &ev_dir).await;
+        if let (Some(t), Some(s)) = (&obs.trace, &vspan) {
+            t.end(
+                s,
+                ok,
+                &note,
+                Map::from_iter([("gen_ai.eval.ok".into(), json!(ok))]),
+            );
+        }
         tstep(
             traj,
             "action",
@@ -1365,6 +1475,15 @@ async fn send_back(app: &Shared, key: &str, reason: &str, obs: Obs) {
         .and_then(|v| v.as_u64())
         .unwrap_or(0);
     let limit = cfg_u64(&app.cfg().await, "verifyBackLimit", 3);
+    if let Some(t) = &obs.trace {
+        t.event(
+            "send_back",
+            Map::from_iter([
+                ("reason".into(), json!(reason)),
+                ("verifyBacks".into(), json!(backs)),
+            ]),
+        );
+    }
     // 段階的修復（manual-139ec5ce・EscalatingRemediations 型）: config
     // `remediations` を対処手段の順序リスト（[{name, backs, timeoutMinutes?}]）
     // として順に試す。各手段は verify NG backs 回または timeoutMinutes で
@@ -1498,6 +1617,9 @@ async fn send_back(app: &Shared, key: &str, reason: &str, obs: Obs) {
             "limit",
             &format!("差し戻し上限超過（{}回）: {}", backs, reason),
         );
+        if let Some(t) = &obs.trace {
+            t.finish_root(false, "verify 差し戻し上限超過");
+        }
         conlog(
             "runner",
             "err",
@@ -1521,6 +1643,9 @@ async fn send_back(app: &Shared, key: &str, reason: &str, obs: Obs) {
             json!({"verifyBacks": backs, "note": reason}),
         );
         tfin(traj, "verify_ng", reason);
+        if let Some(t) = &obs.trace {
+            t.finish_root(false, reason);
+        }
         // 指数バックオフ（manual-6c3ed946）: verify NG の再試行は
         // verifyBackoffMinutes × 2^(backs-1)（上限 verifyBackoffMaxMinutes）
         // だけ待機させる。retryAfter 経過前の再 dispatch は can_dispatch が止める
@@ -1565,14 +1690,22 @@ async fn finalize(
     let repo_path = PathBuf::from(
         repo.get("path").and_then(|v| v.as_str()).unwrap_or(""),
     );
-    match clean_unpushed(&repo_path, key).await {
+    let cspan = obs
+        .trace
+        .as_ref()
+        .map(|t| t.start("tool.git.clean", trace::KIND_TOOL, Map::new()));
+    let clean_res = clean_unpushed(&repo_path, key).await;
+    match &clean_res {
         Ok(removed) => {
-            for s in &removed {
+            for s in removed {
                 conlog(
                     "runner",
                     "sys",
                     &format!("{}: 混入コミットを revert 除去: {}", key, s),
                 );
+            }
+            if let (Some(t), Some(s)) = (&obs.trace, &cspan) {
+                t.end(s, true, "", Map::new());
             }
             tstep(
                 traj,
@@ -1582,6 +1715,9 @@ async fn finalize(
             );
         }
         Err(e) => {
+            if let (Some(t), Some(s)) = (&obs.trace, &cspan) {
+                t.end(s, false, e, Map::new());
+            }
             send_back(app, key, &format!("帰属整理に失敗: {}", e), obs).await;
             return;
         }
@@ -1612,15 +1748,29 @@ async fn finalize(
             &format!("{}: verify 合格。push は承認待ち（requirePushApproval）", key),
         );
         tstep(traj, "state", "push_pending", json!({}));
+        if let Some(t) = &obs.trace {
+            t.event("push_pending", Map::new());
+        }
         return; // drain が pushApproved を拾って再開する
     }
+    let pspan = obs
+        .trace
+        .as_ref()
+        .map(|t| t.start("tool.push", trace::KIND_TOOL, Map::new()));
     match git_push(&repo_path).await {
         Ok(_) => {
+            if let (Some(t), Some(s)) = (&obs.trace, &pspan) {
+                t.end(s, true, "", Map::new());
+            }
             tstep(traj, "action", "push", json!({"ok": true}));
             let _ = pipeline::set_field(root, key, "pushedAt", json!(now_iso()));
             if pipeline::request_transition(root, key, pipeline::ST_DONE).is_ok() {
                 tstep(traj, "state", "done", json!({}));
                 tfin(traj, "success", "verify 合格・push 済み");
+                if let Some(t) = &obs.trace {
+                    t.event("done", Map::new());
+                    t.finish_root(true, "verify 合格・push 済み");
+                }
                 conlog(
                     "runner",
                     "sys",
@@ -1636,6 +1786,9 @@ async fn finalize(
         }
         Err(e) => {
             conlog("runner", "err", &format!("{}: push 失敗: {}", key, e));
+            if let (Some(t), Some(s)) = (&obs.trace, &pspan) {
+                t.end(s, false, &e, Map::new());
+            }
             tstep(
                 traj,
                 "action",

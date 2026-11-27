@@ -390,5 +390,7 @@
   "iss.incDispatch": "despachar incidente",
   "iss.incMerge": "mesclar no incidente",
   "iss.incUnmerge": "remover do incidente",
-  "iss.incMergePrompt": "Informe a chave do issue ou id do incidente (inc-…) a mesclar"
+  "iss.incMergePrompt": "Informe a chave do issue ou id do incidente (inc-…) a mesclar",
+  "iss.trace": "Trace",
+  "iss.traceNone": "Ainda sem spans"
 }

@@ -85,6 +85,21 @@
   .pill.def { background: #f1f5f9; color: #475569; min-width: 0; }
   /* ヘッダの親子リンク（子→親 / 親→子） */
   #plink a { color: #a21caf; font-size: 12px; margin-right: 8px; cursor: pointer; }
+  /* ---- トレース waterfall（ISSUES 詳細。trace-waterfall.mmd） ---- */
+  .wf { font-size: 11px; }
+  .wfrow { display: flex; align-items: center; gap: 6px; height: 18px; cursor: pointer; }
+  .wfrow:hover { background: #f8fafc; }
+  .wfrow.sel { background: #eff6ff; }
+  .wflbl { flex: 0 0 190px; overflow: hidden; text-overflow: ellipsis;
+           white-space: nowrap; color: #4b5563; }
+  .wfdur { flex: 0 0 56px; text-align: right; color: #9ca3af; }
+  .wftrack { position: relative; flex: 1; height: 10px; background: #f3f4f6;
+             border-radius: 2px; }
+  .wfbar { position: absolute; top: 0; height: 10px; border-radius: 2px; min-width: 2px; }
+  .wfev { position: absolute; top: -2px; width: 2px; height: 14px; background: #9ca3af; }
+  .wfdetail { margin-top: 6px; padding: 6px 8px; background: #f9fafb; border-radius: 4px;
+              font-size: 11px; white-space: pre-wrap; word-break: break-all;
+              max-height: 220px; overflow: auto; }
   /* ---- 処理状況カンバン（中央ペイン: 状態別の横並び列） ---- */
   #board { display: flex; gap: 10px; align-items: flex-start; }
   .bcol { flex: 1 1 0; min-width: 170px; background: #f8fafc;
@@ -2827,10 +2842,84 @@ function renderIssue(i) {
     `<div class="pbtns"><input id="fu-text" placeholder="${esc(t('iss.fuPh'))}" style="flex:1">` +
     `<button onclick="issueFollowup('${esc(i.key)}')">${esc(t('iss.fuAdd'))}</button></div></div>`;
   const box = document.getElementById('box');
-  box.innerHTML = renderItemHead(i, true) + info + plan + members + incCard + runs + fuCard + renderItemBody(i.body);
+  box.innerHTML = renderItemHead(i, true) + info + plan + members + incCard + runs + fuCard +
+    '<div id="iobs"></div>' + renderItemBody(i.body);
   Viewer.drawMermaid(box);
   box.scrollTop = 0;
+  loadIssueObs(i.key);      // trace waterfall + 監査タイムライン（非同期追記）
 }
+
+// ---------- ISSUES 詳細の観測セクション（README §5.9/§5.10） ----------
+// trace waterfall（OTel GenAI 風 span）と監査タイムラインを API から取得して
+// 描画する。SSE issues push → loadMgmt → renderIssue 経由で再取得されるため、
+// 実行中の run もリアルタイムに伸長する
+let wfSpans = [];           // waterfall 詳細表示用の取得済み span
+async function loadIssueObs(key) {
+  const tr = await J('GET', `/api/issues/${encodeURIComponent(key)}/trace`);
+  if (centerMode !== 'issue' || curItemKey !== key) return;
+  const el = document.getElementById('iobs');
+  if (!el) return;
+  wfSpans = tr.spans || [];
+  el.innerHTML =
+    `<div class="rcard" style="max-width:none"><b>${esc(t('iss.trace'))}` +
+    ` <span class="muted">run-${tr.run ?? 0}</span></b>` +
+    (wfSpans.length
+      ? `<div class="wf">${wfRows(wfSpans)}</div>` +
+        `<div id="wfd" class="wfdetail" style="display:none"></div>`
+      : `<div class="empty">${esc(t('iss.traceNone'))}</div>`) + '</div>';
+}
+// waterfall の1行群: 左=span 名（depth インデント）、中央=時系列バー、
+// 右=経過時間。行クリックで属性の詳細表示
+const WF_KIND_COLOR = { AGENT: '#3b82f6', LLM: '#22c55e', EVALUATOR: '#f59e0b',
+                        TOOL: '#a855f7', EVENT: '#9ca3af' };
+function wfRows(spans) {
+  const t0 = Math.min(...spans.map((s) => Date.parse(s.startTime) || 0));
+  const t1 = Math.max(
+    ...spans.map((s) => Date.parse(s.endTime || s.startTime) || 0));
+  const range = Math.max(1, t1 - t0);
+  const byId = {};
+  spans.forEach((s) => { byId[s.spanId] = s; });
+  const depth = (s) => {
+    let d = 0, p = s;
+    while (d < 8 && p.parentSpanId && byId[p.parentSpanId]) {
+      d++; p = byId[p.parentSpanId];
+    }
+    return d;
+  };
+  const rows = spans.slice()
+    .sort((a, b) => (Date.parse(a.startTime) || 0) - (Date.parse(b.startTime) || 0));
+  return rows.map((s) => {
+    const i = spans.indexOf(s);
+    const l = ((Date.parse(s.startTime) || 0) - t0) / range * 100;
+    const w = Math.max(0.6, (s.durationMs || 0) / range * 100);
+    const bar = s.kind === 'EVENT'
+      ? `<div class="wfev" style="left:${l}%"></div>`
+      : `<div class="wfbar" style="left:${l}%;width:${w}%;` +
+        `background:${WF_KIND_COLOR[s.kind] || '#6b7280'}"></div>`;
+    return `<div class="wfrow" id="wfr${i}" onclick="wfSel(${i})">` +
+      `<div class="wflbl">${'&nbsp;'.repeat(depth(s) * 2)}${esc(s.name)}</div>` +
+      `<div class="wftrack">${bar}</div>` +
+      `<div class="wfdur">${s.durationMs ? esc(fmtDur(s.durationMs / 1000)) : ''}</div></div>`;
+  }).join('');
+}
+// 選択 span の詳細（属性・status・時刻を JSON で表示）
+function wfSel(i) {
+  const s = wfSpans[i];
+  if (!s) return;
+  document.querySelectorAll('.wfrow.sel').forEach((e) => e.classList.remove('sel'));
+  document.getElementById('wfr' + i)?.classList.add('sel');
+  const d = document.getElementById('wfd');
+  if (!d) return;
+  const attrs = Object.entries(s.attributes || {})
+    .map(([k, v]) => `  ${k} = ${typeof v === 'object' ? JSON.stringify(v) : v}`)
+    .join('\n');
+  d.textContent = `${s.name} [${s.kind}] ${s.status?.code || ''}` +
+    (s.status?.message ? ` — ${s.status.message}` : '') +
+    `\n${s.startTime} → ${s.endTime} (${s.durationMs ?? 0}ms)` +
+    (attrs ? `\n${attrs}` : '');
+  d.style.display = 'block';
+}
+// 監査タイムライン: 時刻・actor(human/system)・action・run・detail 概要
 
 // ---------- 省略ラベルの全文ポップアップ ----------
 // [data-tip] へホバーで即時表示（ネイティブ title より速く改行も出せる）。

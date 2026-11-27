@@ -390,5 +390,7 @@
   "iss.incDispatch": "事件调度",
   "iss.incMerge": "合并到事件",
   "iss.incUnmerge": "从事件移除",
-  "iss.incMergePrompt": "输入要合并的议题 key 或事件 id（inc-…）"
+  "iss.incMergePrompt": "输入要合并的议题 key 或事件 id（inc-…）",
+  "iss.trace": "追踪",
+  "iss.traceNone": "暂无 span"
 }

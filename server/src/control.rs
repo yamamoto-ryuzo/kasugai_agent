@@ -3130,6 +3130,28 @@ async fn api_issues_get(
     j(json!({"ok": true, "issues": issues, "counts": counts}))
 }
 
+// GET /api/issues/{key}/trace?run=N — run の OTel GenAI 風 span 一覧
+// （trace-waterfall.mmd・README §5.9。run 省略時は最新 run）
+async fn api_issue_trace(
+    State(app): State<Shared>,
+    AxPath(key): AxPath<String>,
+    Query(q): Query<HashMap<String, String>>,
+) -> Response {
+    let Some(issue) = crate::store::load_issues(&app.root)
+        .into_iter()
+        .find(|i| i.get("key").and_then(|v| v.as_str()) == Some(key.as_str()))
+    else {
+        return err(StatusCode::NOT_FOUND, "issue not found");
+    };
+    let idx = q
+        .get("run")
+        .and_then(|s| s.parse::<usize>().ok())
+        .or_else(|| crate::trajectory::latest_run_idx(&issue))
+        .unwrap_or(0);
+    j(json!({"ok": true, "run": idx,
+             "spans": crate::trace::read_spans(&app.root, &key, idx)}))
+}
+
 /// 対応/却下の適用（issues・candidates 共通の人ゲート）。
 /// dispatch: queued→running（gated は承認→queued・failed は再実行→queued を
 /// 兼ねた即時 dispatch）。reject: gated|queued|failed→rejected。
@@ -3776,6 +3798,7 @@ pub fn router(app: Shared) -> Router {
         .route("/api/candidates/{key}/{action}", post(api_candidates_action))
         .route("/api/issues", get(api_issues_get))
         .route("/api/issues/{key}/{action}", post(api_issues_action))
+        .route("/api/issues/{key}/trace", get(api_issue_trace))
         .route("/api/incidents", get(api_incidents_get))
         .route("/api/incidents/merge", post(api_incidents_merge))
         .route("/api/incidents/unmerge", post(api_incidents_unmerge))

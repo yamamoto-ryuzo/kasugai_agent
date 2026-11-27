@@ -390,5 +390,7 @@
   "iss.incDispatch": "事案 dispatch",
   "iss.incMerge": "事案へ結合",
   "iss.incUnmerge": "事案から外す",
-  "iss.incMergePrompt": "結合相手の課題 key または事案 id（inc-…）を入力"
+  "iss.incMergePrompt": "結合相手の課題 key または事案 id（inc-…）を入力",
+  "iss.trace": "トレース",
+  "iss.traceNone": "span はまだありません"
 }

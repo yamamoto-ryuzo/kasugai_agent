@@ -390,5 +390,7 @@
   "iss.incDispatch": "Vorfall dispatchen",
   "iss.incMerge": "in Vorfall zusammenführen",
   "iss.incUnmerge": "aus Vorfall entfernen",
-  "iss.incMergePrompt": "Issue-Schlüssel oder Vorfall-ID (inc-…) zum Zusammenführen eingeben"
+  "iss.incMergePrompt": "Issue-Schlüssel oder Vorfall-ID (inc-…) zum Zusammenführen eingeben",
+  "iss.trace": "Trace",
+  "iss.traceNone": "Noch keine Spans"
 }
