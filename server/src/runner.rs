@@ -183,6 +183,35 @@ async fn drain_inner(app: &Shared) {
                     flight_del(&key);
                 });
             }
+            Some(pipeline::ST_ROLLBACK) => {
+                // rollback 中に control 再起動 → 帰属コミットの revert を
+                // やり直してから failed へ送る（revert は冪等: 除去済みの
+                // コミットは未push履歴から消えているため再 revert されない）
+                if !flight_add(&key) {
+                    continue;
+                }
+                let app2 = app.clone();
+                let key2 = key.clone();
+                tokio::spawn(async move {
+                    let it = find_issue(&app2.root, &key2).unwrap_or_default();
+                    rollback_issue_commits(&app2, &key2, &it).await;
+                    if pipeline::request_transition(
+                        &app2.root,
+                        &key2,
+                        pipeline::ST_FAILED,
+                    )
+                    .is_ok()
+                    {
+                        conlog(
+                            "runner",
+                            "sys",
+                            &format!("{}: 中断した rollback を完了し failed へ", key2),
+                        );
+                        app2.sse("issues", &json!({}));
+                    }
+                    flight_del(&key2);
+                });
+            }
             Some(pipeline::ST_RUNNING) => {
                 // run 追跡を持たない running（再起動で子プロセスの待機を喪失）
                 // は失敗扱いにする。再実行は failed → queued で人が戻す
@@ -1226,11 +1255,15 @@ async fn send_back(app: &Shared, key: &str, reason: &str) {
             let _ = pipeline::set_field(root, key, "planGate", json!(true));
         }
         if next_name == "human" || next.is_none() {
+            // verify NG 確定の自動クリーン復帰（manual-c11945d2）: rollback
+            // 遷移で帰属コミットのみ git revert してから failed へ
+            let _ = pipeline::request_transition(root, key, pipeline::ST_ROLLBACK);
+            rollback_issue_commits(app, key, &it).await;
             let _ = pipeline::request_transition(root, key, pipeline::ST_FAILED);
             conlog(
                 "runner",
                 "err",
-                &format!("{}: 全対処手段失敗 → failed（人ゲートへ差し戻し）", key),
+                &format!("{}: 全対処手段失敗 → rollback 済み failed（人ゲートへ差し戻し）", key),
             );
             report_issue(
                 app,
@@ -1615,6 +1648,105 @@ async fn unpushed_commits(repo: &Path) -> Vec<Unpushed> {
         .collect()
 }
 
+/// verify NG 確定時の自動クリーン復帰（manual-c11945d2・issue-lifecycle.mmd）:
+/// 打ち切り時にその課題に帰属する（`Issue: <key>` トレーラ付き）未push
+/// コミットだけを git revert で除去し、base を健全状態へ戻す。
+/// git reset は使わない（規約。他課題コミットを破壊する）。
+/// push 前の帰属整理と同じく新しい順に revert し、除去コミットにも
+/// 本課題のトレーラを付ける（後続の帰属整理で revert 自体が落とされない）。
+async fn rollback_issue_commits(app: &Shared, key: &str, it: &Value) {
+    let root = &app.root;
+    let repo = App::git_repo(
+        &app.cfg().await,
+        it.get("repo").and_then(|v| v.as_str()).unwrap_or(""),
+    )
+    .cloned();
+    let Some(repo_v) = repo else {
+        conlog(
+            "runner",
+            "warn",
+            &format!("{}: rollback スキップ（repo が config.repos に未登録）", key),
+        );
+        return;
+    };
+    let repo_path = PathBuf::from(
+        repo_v
+            .get("path")
+            .and_then(|v| v.as_str())
+            .unwrap_or(""),
+    );
+    if !repo_path.is_dir() || unpushed_range(&repo_path).await.is_none() {
+        conlog(
+            "runner",
+            "warn",
+            &format!("{}: rollback スキップ（repo/未push範囲を特定できない）", key),
+        );
+        return;
+    }
+    let mut removed = 0usize;
+    // 帰属コミットのみを新しい順に revert。他課題・帰属不明は触らない
+    for c in unpushed_commits(&repo_path).await {
+        if c.issue.as_deref() != Some(key) {
+            continue;
+        }
+        let (rc, rout) = git(&repo_path, &["revert", "--no-commit", &c.sha]).await;
+        if rc != 0 {
+            let _ = git(&repo_path, &["revert", "--abort"]).await;
+            conlog(
+                "runner",
+                "err",
+                &format!(
+                    "{}: rollback revert {} 失敗: {}",
+                    key,
+                    &c.sha[..8.min(c.sha.len())],
+                    rout
+                ),
+            );
+            break;
+        }
+        let msg = format!(
+            "Revert \"{}\"\n\nThis reverts commit {}.\n\nIssue: {}",
+            c.subject, c.sha, key
+        );
+        let (cc, cout) = git(&repo_path, &["commit", "-m", &msg]).await;
+        if cc != 0 {
+            let _ = git(&repo_path, &["revert", "--abort"]).await;
+            conlog(
+                "runner",
+                "err",
+                &format!("{}: rollback revert コミット失敗: {}", key, cout),
+            );
+            break;
+        }
+        removed += 1;
+        conlog(
+            "runner",
+            "sys",
+            &format!(
+                "{}: rollback で {}（{}）を revert",
+                key,
+                &c.sha[..8.min(c.sha.len())],
+                c.subject
+            ),
+        );
+    }
+    // revert 後も tracked 変更が残るなら run の残滓として破棄する
+    // （課題起因の変更を残さない。untracked は証跡等他資産を潰さないため触らない）
+    let (_, st) = git(&repo_path, &["status", "--porcelain"]).await;
+    if st
+        .lines()
+        .any(|l| matches!(l.chars().nth(1), Some('M') | Some('D')))
+    {
+        let _ = git(&repo_path, &["checkout", "--", "."]).await;
+    }
+    let _ = pipeline::set_field(root, key, "rollbackAt", json!(now_iso()));
+    let _ = pipeline::set_field(root, key, "rollbackCount", json!(removed));
+    conlog(
+        "runner",
+        "sys",
+        &format!("{}: rollback 完了（{} 件の帰属コミットを除去）", key, removed),
+    );
+}
 /// 帰属整理: `Issue: <key>` トレーラを持たない未pushコミットを
 /// git revert で除去する（reset 禁止。新しい順に revert し、
 /// 除去コミット自体にも本課題のトレーラを付ける）。

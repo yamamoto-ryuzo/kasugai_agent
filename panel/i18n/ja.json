@@ -312,6 +312,7 @@
   "iss.st.retry": "再試行",
   "iss.st.done": "完了",
   "iss.st.failed": "失敗",
+  "iss.st.rollback": "ロールバック",
   "iss.st.planning": "計画生成中",
   "iss.st.plan_review": "計画承認待ち",
   "iss.plan": "実装計画",

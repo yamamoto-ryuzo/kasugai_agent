@@ -312,6 +312,7 @@
   "iss.st.retry": "reintento",
   "iss.st.done": "hecho",
   "iss.st.failed": "fallido",
+  "iss.st.rollback": "reversión",
   "iss.st.planning": "planificando",
   "iss.st.plan_review": "revisión del plan",
   "iss.plan": "plan de implementación",

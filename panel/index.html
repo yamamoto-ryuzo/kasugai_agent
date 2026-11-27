@@ -2344,10 +2344,10 @@ async function loadMgmt() {
   // candidates は人の判断待ちのみ表示（未起票・gated・queued・failed。
   // 起票は自動が既定で、実行中・終端の課題行は出さない。detect-pipeline.mmd）
   const candidates = (cand.candidates || []).filter((c) => matchRepo(c.repo) &&
-    !['running', 'planning', 'plan_review', 'verifying', 'done', 'rejected', 'dropped'].includes(c.issueStatus || ''));
+    !['running', 'planning', 'plan_review', 'verifying', 'rollback', 'done', 'rejected', 'dropped'].includes(c.issueStatus || ''));
   candList = candidates;
   const stRank = { verifying: 0, running: 1, planning: 2, plan_review: 3,
-                   retry: 4, queued: 5, gated: 6,
+                   rollback: 4, retry: 4, queued: 5, gated: 6,
                    assessed: 7, failed: 8, done: 9, rejected: 10, dropped: 11 };
   const issues = (iss.issues || []).filter(matchIssue).sort((a, b) =>
     (stRank[a.status] ?? 10) - (stRank[b.status] ?? 10) ||
@@ -2378,7 +2378,7 @@ async function loadMgmt() {
     kpiRows(issues);
   const issuePill = { gated: 'wait', queued: 'wait', retry: 'wait',
                       plan_review: 'wait',
-                      running: 'run', planning: 'run', verifying: 'ver', done: 'live' };
+                      running: 'run', planning: 'run', verifying: 'ver', rollback: 'unres', done: 'live' };
   // candidate 行は起票済み課題の status を併記（起票は自動が既定。
   // detect-pipeline.mmd）。全行 対応/却下ボタンで人が一括判断する
   document.getElementById('mcands').innerHTML = candidates.length ? candidates.map((c) => {

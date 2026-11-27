@@ -312,6 +312,7 @@
   "iss.st.retry": "재시도",
   "iss.st.done": "완료",
   "iss.st.failed": "실패",
+  "iss.st.rollback": "롤백",
   "iss.st.planning": "계획 생성 중",
   "iss.st.plan_review": "계획 승인 대기",
   "iss.plan": "구현 계획",

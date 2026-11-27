@@ -26,6 +26,7 @@ pub const ST_PLAN_REVIEW: &str = "plan_review";
 pub const ST_RUNNING: &str = "running";
 pub const ST_VERIFYING: &str = "verifying";
 pub const ST_RETRY: &str = "retry";
+pub const ST_ROLLBACK: &str = "rollback";
 pub const ST_DONE: &str = "done";
 pub const ST_FAILED: &str = "failed";
 pub const ST_REJECTED: &str = "rejected";
@@ -40,6 +41,7 @@ pub const STATUSES: &[&str] = &[
     ST_RUNNING,
     ST_VERIFYING,
     ST_RETRY,
+    ST_ROLLBACK,
     ST_DONE,
     ST_FAILED,
     ST_REJECTED,
@@ -73,6 +75,8 @@ fn allowed(from: &str, to: &str) -> bool {
             | (ST_VERIFYING, ST_DONE)
             | (ST_VERIFYING, ST_RETRY)
             | (ST_RETRY, ST_QUEUED)
+            | (ST_RETRY, ST_ROLLBACK)
+            | (ST_ROLLBACK, ST_FAILED)
             | (ST_RETRY, ST_FAILED)
             | (ST_FAILED, ST_QUEUED)
             | (ST_FAILED, ST_REJECTED)
@@ -1249,7 +1253,7 @@ pub fn can_dispatch(cfg: &Value, issues: &[Value], key: &str) -> Result<(), Stri
             .filter(|x| {
                 matches!(
                     x.get("status").and_then(|v| v.as_str()),
-                    Some(ST_RUNNING) | Some(ST_VERIFYING) | Some(ST_PLANNING)
+                    Some(ST_RUNNING) | Some(ST_VERIFYING) | Some(ST_PLANNING) | Some(ST_ROLLBACK)
                 )
             })
             .count();
@@ -1263,7 +1267,7 @@ pub fn can_dispatch(cfg: &Value, issues: &[Value], key: &str) -> Result<(), Stri
             && x.get("repo").and_then(|v| v.as_str()) == Some(repo)
             && matches!(
                 x.get("status").and_then(|v| v.as_str()),
-                Some(ST_RUNNING) | Some(ST_VERIFYING) | Some(ST_PLANNING)
+                Some(ST_RUNNING) | Some(ST_VERIFYING) | Some(ST_PLANNING) | Some(ST_ROLLBACK)
             )
     }) {
         return Err(format!(

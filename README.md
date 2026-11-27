@@ -72,7 +72,9 @@ stateDiagram-v2
     verifying --> done : 検証合格
     verifying --> retry : NG (差し戻し)
     retry --> queued : 差し戻し（対応ボタンで<br/>再 dispatch）
-    retry --> failed : リトライ上限（要人対応）
+    retry --> rollback : 全対処手段失敗<br/>（remediations 昇格の末）
+    rollback --> failed : 帰属コミットのみ git revert で除去し<br/>base を健全状態へ（要人対応）
+    retry --> failed : 直接の失敗確定（要人対応）
     running --> failed : 異常終了
     failed --> queued : 再実行
     failed --> rejected : 人が却下
@@ -468,6 +470,12 @@ flowchart TD
   （`retry` = 同手順の再試行、`replan` = 計画を破棄して planGate 経由で
   計画からやり直し、`human` = failed で人ゲートへ差し戻し）。
   未指定時は `[retry(verifyBackLimit), human]` で従来動作と同じ
+- **自動クリーン復帰（rollback）**: 全対処手段が失敗して verify NG が
+  確定した課題は `rollback` 状態を経由し、その課題に帰属する
+  （`Issue: <key>` トレーラ付き）未pushコミットだけを `git revert` で
+  除去してから `failed` へ送る。`git reset` は使わない
+  （他課題コミットを破壊する規約違反）。push 前の帰属整理と同じ規律を
+  run 打ち切り時にも適用し、base を健全状態へ戻す
 - 実機リソース（QGIS harness・固定ポート等）は `locks` で排他利用
 - 証跡は課題キー単位で `evidence/` に保存し、Issue コメントに添付/リンク
 

@@ -48,7 +48,9 @@ stateDiagram-v2
     verifying --&gt; done : 検証合格
     verifying --&gt; retry : NG (差し戻し)
     retry --&gt; queued : 差し戻し（対応ボタンで&lt;br/&gt;再 dispatch）
-    retry --&gt; failed : リトライ上限（要人対応）
+    retry --&gt; rollback : 全対処手段失敗&lt;br/&gt;（remediations 昇格の末）
+    rollback --&gt; failed : 帰属コミットのみ git revert で除去し&lt;br/&gt;base を健全状態へ（要人対応）
+    retry --&gt; failed : 直接の失敗確定（要人対応）
     running --&gt; failed : 異常終了
     failed --&gt; queued : 再実行
     failed --&gt; rejected : 人が却下
