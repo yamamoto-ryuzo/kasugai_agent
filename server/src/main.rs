@@ -19,6 +19,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod assets;
+mod cases;
 mod chat;
 mod claims;
 mod conlog;

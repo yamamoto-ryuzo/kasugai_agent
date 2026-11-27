@@ -12,6 +12,7 @@
 use serde_json::{json, Value};
 use std::path::Path;
 
+use crate::cases;
 use crate::config::{cfg_arr, cfg_f64, cfg_u64, load_config};
 use crate::store;
 use crate::util::now_iso;
@@ -223,7 +224,11 @@ fn rule_priority(issue: &Value) -> u64 {
 
 /// assess: verifyLevel・受入条件・自律可否を決め、assessed → gated|queued へ遷移。
 /// external は評価にも進めない（候補一覧表示のみ。README §5.3）。
-fn assess(issue: &mut Value) {
+fn assess(issues: &[Value], issue: &mut Value) {
+    // assess 時の知見参照: related[] に類似事例（前回の fix / reject /
+    // run 成否）を付記し、dispatch prompt の「類似過去事例」へ繋げる
+    // （case-search.mmd・manual-a8c93d14）
+    let related = cases::attach_related(issues, issue);
     let priority = rule_priority(issue);
     let autonomous = if has_label(issue, "external") {
         let o = issue.as_object_mut().unwrap();
@@ -763,7 +768,7 @@ fn intake_inner(root: &Path, cand: &Value, force: bool) -> IntakeOutcome {
         o.insert("priority".into(), json!(prio));
         o.insert("verifyLevel".into(), json!(0));
     } else {
-        assess(&mut issue);
+        assess(&issues, &mut issue);
     }
     issues.push(issue.clone());
     store::save_issues(root, &issues);

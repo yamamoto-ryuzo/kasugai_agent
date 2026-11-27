@@ -26,6 +26,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
+use crate::cases;
 use crate::conlog::conlog;
 use crate::config::*;
 use crate::control::{App, Shared};
@@ -320,7 +321,13 @@ async fn run_and_verify(
         return;
     }
 
-    let prompt = build_prompt(root, issue);
+    let (prompt, krefs) = build_prompt_full(root, issue);
+    // 参照した知見を run の記録へ紐付ける（manual-a8c93d14・case-search.mmd）
+    {
+        let mut extra = Map::new();
+        extra.insert("knowledgeRefs".into(), krefs);
+        update_run(root, key, run_idx, extra);
+    }
     let log_path = ev_dir.join("run.log");
     let mut cmd = tokio::process::Command::new(&exe);
     cmd.args(&prompt_args)
@@ -448,7 +455,7 @@ const DEFAULT_DISPATCH: &str = r#"以下の課題に対応してください。
 6. この実行は非対話（-p）モード。確認を求めず、最後に
    完了またはブロックの報告を出力して終了すること"#;
 
-fn build_prompt(root: &Path, issue: &Value) -> String {
+fn build_prompt_full(root: &Path, issue: &Value) -> (String, Value) {
     let get = |k: &str| {
         issue
             .get(k)
@@ -485,22 +492,43 @@ fn build_prompt(root: &Path, issue: &Value) -> String {
     let mut p = subst(tpl);
     // runbook（kind 別対処手順。runbook.mmd・README §5.4）:
     // prompts/runbook/ を <source>-<kind> → <kind> → <source> の順に探す
+    let mut injected_runbook: Option<String> = None;
     if let Some((name, rb)) = knowledge::load_runbook(root, &get("source"), &get("kind")) {
         let rb: String = subst(rb.chars().take(4000).collect());
         p.push_str(&format!("\n\n## 対処手順（runbook: {}）\n\n{}", name, rb));
+        injected_runbook = Some(name);
     }
     // knowledge/<slug>.md の知見を注入（課題 key 単位の蓄積）
-    let kfile = root
-        .join("knowledge")
-        .join(format!("{}.md", knowledge::key_slug(&key)));
+    let kslug = knowledge::key_slug(&key);
+    let mut injected_knowledge = false;
+    let kfile = root.join("knowledge").join(format!("{}.md", kslug));
     if let Ok(kn) = std::fs::read_to_string(&kfile) {
         let kn: String = kn.chars().take(4000).collect();
         if !kn.trim().is_empty() {
             p.push_str("\n\n## 既知の知見（knowledge/）\n\n");
             p.push_str(&kn);
+            injected_knowledge = true;
         }
     }
-    p
+    // 類似過去事例（case-search.mmd・manual-a8c93d14）: assess で付記した
+    // related と同じ決定的スコアで、前回の fix / reject / run 成否を注入する
+    let (sec, case_keys) = cases::similar_section(root, issue, cases::TOP_N);
+    if !sec.is_empty() {
+        p.push_str("\n\n## 類似過去事例（knowledge/ 参照）\n\n");
+        p.push_str(&sec);
+    }
+    // 参照した知見を run の記録に残す（どの知見を使ったか追跡可能に）
+    let refs = json!({
+        "knowledge": if injected_knowledge { json!(kslug) } else { Value::Null },
+        "runbook": injected_runbook.map(Value::String).unwrap_or(Value::Null),
+        "cases": case_keys,
+    });
+    (p, refs)
+}
+
+#[cfg(test)]
+fn build_prompt(root: &Path, issue: &Value) -> String {
+    build_prompt_full(root, issue).0
 }
 
 // ---------- verify（L0〜L4） + push ----------

@@ -381,6 +381,45 @@ flowchart LR
 - リポジトリ正本（`.devin/skills`・AGENTS.md）への反映は新規課題として起票し、
   通常パイプで対応する
 
+### 5.7 知見の参照ループ（蓄積 → 類似事例 → レッスン → 評価）
+
+蓄積した知見は参照されて初めてループが閉じる。参照側はすべて決定的
+（非 LLM）ロジックで、context collapse・プロンプト肥大を防ぐ。
+
+<!-- diagram: case-search -->
+```mermaid
+---
+title: 類似事例検索（CBR）と assess/run への知見参照
+---
+flowchart TD
+    ISS[新規課題<br/>source/repo/kind/<br/>symptomHash/title] --> AS[assess<br/>pipeline.rs]
+    AS --> SC[類似度スコア<br/>cases.rs・決定的・非LLM<br/>repo一致40 + kind一致20 +<br/>symptomHash一致20 +<br/>title bigram Jaccard20]
+    CASES[(knowledge/cases.json<br/>終端課題の case:<br/>kind/repo/symptomHash/<br/>採用アプローチ/結果/verifyLevel)] --> SC
+    ISSUES[(issues.json<br/>全課題)] --> CASES
+    ISSUES --> SC
+    SC --> REL[issue.related<br/>類似事例 top N・score>=50<br/>前回の fix / reject /<br/>run 成否]
+    REL --> VL{成功 case と<br/>score>=70 で一致?}
+    VL -->|yes| ADOPT[verifyLevel を成功 case の<br/>値に合わせ<br/>verifyLevelBasis を記録]
+    VL -->|no| RULE[ルール判定のまま]
+    ADOPT --> DISP
+    RULE --> DISP
+    REL --> DISP[dispatch prompt<br/>runner.build_prompt]
+    DISP --> SEC[## 類似過去事例<br/>status・verifyLevel・title・<br/>knowledge/slug.md 抜粋・<br/>成功 case の採用アプローチ<br/>（few-shot）]
+    KN[knowledge/key-slug.md<br/>課題単位の生知見] --> SEC
+    SEC --> RUN[run 実行<br/>接続AI -p]
+    RUN --> REC[runs[].knowledgeRefs に<br/>参照した knowledge/cases/<br/>lessons を記録<br/>（どの知見を使ったか追跡可）]
+    RUN --> OUT{run 結果}
+    OUT -->|done/failed/rejected| TERM[終端課題]
+    TERM -->|learn_pass が<br/>case 化| CASES
+```
+
+- **類似度スコア**（`server/src/cases.rs`）: repo 一致・kind 一致・
+  symptomHash 一致・title の bigram Jaccard を重み付けした決定的スコア
+  （埋め込み基盤なし）。score≥50 を「類似」として top N を選ぶ
+- **assess 時の知見参照**: 新規課題に `related[]`（類似事例 top N:
+  前回の fix / reject / run 成否）を付記し、dispatch prompt の
+  「類似過去事例」節へ注入する。参照した知見は `runs[].knowledgeRefs`
+  に記録され、どの知見を使ったか追跡できる
 ## 6. 状態とファイル
 
 | ファイル | 内容 | Git 管理 |
