@@ -3161,6 +3161,16 @@ async fn api_issue_trace(
              "spans": crate::trace::read_spans(&app.root, &key, idx)}))
 }
 
+// GET /api/metrics — KPI 集計（metrics.mmd・README §5.12。
+// issues.json から決定的に算出する読み取り専用エンドポイント）
+async fn api_metrics(State(app): State<Shared>) -> Response {
+    let mut m = crate::metrics::compute(&app.root);
+    if let Some(o) = m.as_object_mut() {
+        o.insert("ok".into(), json!(true));
+    }
+    j(m)
+}
+
 /// 対応/却下の適用（issues・candidates 共通の人ゲート）。
 /// dispatch: queued→running（gated は承認→queued・failed は再実行→queued を
 /// 兼ねた即時 dispatch）。reject: gated|queued|failed→rejected。
@@ -3830,6 +3840,7 @@ pub fn router(app: Shared) -> Router {
         .route("/api/issues/{key}/{action}", post(api_issues_action))
         .route("/api/issues/{key}/audit", get(api_issue_audit))
         .route("/api/issues/{key}/trace", get(api_issue_trace))
+        .route("/api/metrics", get(api_metrics))
         .route("/api/incidents", get(api_incidents_get))
         .route("/api/incidents/merge", post(api_incidents_merge))
         .route("/api/incidents/unmerge", post(api_incidents_unmerge))

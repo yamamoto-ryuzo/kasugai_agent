@@ -808,6 +808,40 @@ flowchart TD
   カードに run ごとの内訳を表示する（issues API 応答に含まれるため
   SSE push で自動更新）
 
+### 5.12 KPI ダッシュボード（成功率・MTTR・verify NG 率）
+
+AgentOps / Weave leaderboard・SRE 式 SLI 参考に、課題/run データから
+KPI を決定的に算出して `GET /api/metrics` で返し、パネルの
+メトリクス画面（nav メトリクス）に表示する。**成功は verify 通過・
+push 済みで厳密化**（エージェント自己申告に依らない）。
+
+<!-- diagram: metrics -->
+```mermaid
+---
+title: KPI ダッシュボード（/api/metrics）
+---
+flowchart TD
+    ISSUES[(issues.json<br/>runs/verifyBacks/<br/>pushedAt/usage/<br/>symptomHash)] --> M[metrics.rs<br/>KPI 算出・決定的]
+    M --> SR[成功率<br/>done/dispatch 済<br/>push 済みのみ成功]
+    M --> MTTR[MTTR<br/>detectedAt→pushedAt]
+    M --> NG[verify NG 率<br/>verifyBacks>0 の割合<br/>verifyLevel 別]
+    M --> RET[リトライ分布<br/>verifyBacks ヒストグラム]
+    M --> COST[コスト<br/>ΣelapsedMs/tokens/cost]
+    M --> REJ[却下・external 率]
+    M --> BR[kind/repo 別内訳<br/>成功率・件数]
+    M --> REC[同一症状再発率<br/>symptomHash 重複]
+    SR & MTTR & NG & RET & COST & REJ & BR & REC --> API[GET /api/metrics]
+    API --> DASH[パネル メトリクス画面<br/>nav-metrics ボタン<br/>KPI カード + 内訳表]
+    SSE[SSE issues push] -->|再取得| DASH
+```
+
+- 算出項目: 成功率（push 済/dispatch 済）、MTTR（detectedAt→pushedAt）、
+  verify NG 率（全体 + verifyLevel 別）、リトライ分布（verifyBacks
+  ヒストグラム）、課題当たり token/コスト、却下・external 率、
+  kind/repo 別内訳、同一症状再発率（symptomHash 重複率）
+- 集計は全課題（repo 絞込はパネル側）。SSE の `issues` push で
+  メトリクス画面も再取得される
+
 ## 6. 状態とファイル
 
 | ファイル | 内容 | Git 管理 |

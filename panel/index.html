@@ -109,6 +109,16 @@
          font-size: 10px; text-align: center; }
   .aup.human { background: #dbeafe; color: #1e40af; }
   .aup.system { background: #f3f4f6; color: #4b5563; }
+  /* ---- メトリクス画面（metrics.mmd） ---- */
+  .kbig { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 14px; }
+  .kcard { flex: 1 1 140px; padding: 10px 12px; border: 1px solid #e5e7eb;
+           border-radius: 8px; }
+  .kcard b { font-size: 20px; display: block; }
+  .kcard span { font-size: 11px; color: #6b7280; }
+  .mtable { width: 100%; border-collapse: collapse; font-size: 12px; }
+  .mtable td, .mtable th { padding: 3px 8px; border-bottom: 1px solid #f3f4f6;
+                           text-align: left; }
+  .mtable th { color: #6b7280; font-weight: 600; }
   /* ---- 処理状況カンバン（中央ペイン: 状態別の横並び列） ---- */
   #board { display: flex; gap: 10px; align-items: flex-start; }
   .bcol { flex: 1 1 0; min-width: 170px; background: #f8fafc;
@@ -361,6 +371,7 @@
     <button id="nav-agents" onclick="sideView('agents')" title="agent定義・ルール文書を右ペインで開く" data-i18n="nav.agents" data-i18n-attr="title:nav.agents.tip">AGENTS</button>
     <button id="nav-skills" onclick="sideView('skills')" title="SKILL.md 一覧を右ペインで開く" data-i18n="nav.skills" data-i18n-attr="title:nav.skills.tip">SKILL</button>
     <button id="nav-manual" onclick="showManual()" title="docs/ のマニュアルサイトを中央ペインで開く" data-i18n="nav.manual" data-i18n-attr="title:nav.manual.tip">マニュアル</button>
+    <button id="nav-metrics" onclick="showMetrics()" title="KPI ダッシュボードを中央ペインで表示" data-i18n="nav.metrics" data-i18n-attr="title:nav.metrics.tip">メトリクス</button>
     <button id="nav-settings" onclick="showSettings()" title="監視リポジトリの設定を中央ペインで開く" data-i18n="nav.settings" data-i18n-attr="title:nav.settings.tip">設定</button>
     <hr class="nsep">
     <button id="nav-commit" onclick="gitCommit()" title="カレント repo の全変更をローカルコミット（git add -A && git commit）" data-i18n="nav.commit" data-i18n-attr="title:nav.commit.tip">コミット</button>
@@ -1339,6 +1350,56 @@ const scheduleStatus = () => {
   // 発火時にも status 表示中か確認（予約後に chat 画面等へ戻っていたら再描画しない）
   statT = setTimeout(() => { if (centerMode === 'status') showStatus(); }, 300);
 };
+// ---------- メトリクス（KPI ダッシュボード。metrics.mmd・README §5.12） ----------
+// /api/metrics の応答を描画する。成功=verify 通過・push 済みで厳密化済み
+// （server 側で集計。パネルは表示のみ・カレント repo 絞込はしない）
+async function showMetrics() {
+  centerMode = 'metrics';
+  const m = await J('GET', '/api/metrics');
+  if (centerMode !== 'metrics') return;   // 取得中に他ビューへ遷移したら描画しない
+  curDoc = null; curPropId = null; curItemKey = null;
+  document.getElementById('main').classList.add('doc');
+  document.getElementById('box').classList.remove('htmlview');
+  document.getElementById('viewsw').style.display = 'none';
+  renderSide();
+  document.getElementById('ctitle').textContent = t('nav.metrics');
+  document.getElementById('status').textContent = fmtTs(m.at || '');
+  const pct = (v) => ((v ?? 0) * 100).toFixed(1) + '%';
+  const kcard = (v, l) => `<div class="kcard"><b>${esc(v)}</b><span>${esc(l)}</span></div>`;
+  const ng = m.verifyNg || {};
+  const cost = m.cost || {};
+  const rec = m.recurrence || {};
+  const cards = `<div class="kbig">` +
+    kcard(pct(m.successRate), t('met.success') + ` (${m.succeeded ?? 0}/${m.dispatched ?? 0})`) +
+    kcard(m.mttrMedianMs ? fmtDur(m.mttrMedianMs / 1000) : '-', 'MTTR') +
+    kcard(pct(ng.rate), t('met.verifyNg') + ` (${ng.issues ?? 0})`) +
+    kcard(cost.elapsedMs ? fmtDur(cost.elapsedMs / 1000) : '-', t('met.elapsed')) +
+    kcard(cost.tokens ? String(cost.tokens) : '-', t('met.tokens')) +
+    kcard(cost.costUsd ? '$' + cost.costUsd : '-', t('met.cost')) +
+    kcard(pct(rec.rate), t('met.recurrence') + ` (${rec.dupHashes ?? 0})`) +
+    kcard(pct(m.rejectRate), t('met.rejected') + ` (${m.rejected ?? 0})`) +
+    `</div>`;
+  const tbl = (title, heads, rows) =>
+    `<div class="rcard" style="max-width:none"><b>${esc(title)}</b>` +
+    `<table class="mtable"><tr>${heads.map((h) => `<th>${esc(h)}</th>`).join('')}</tr>` +
+    (rows.join('') || `<tr><td colspan="${heads.length}"><span class="empty">-</span></td></tr>`) +
+    `</table></div>`;
+  const lvls = tbl(t('met.verifyNgByLevel'),
+    [t('met.level'), t('met.dispatched'), 'NG', t('met.rate')],
+    (ng.byLevel || []).map((l) =>
+      `<tr><td>L${esc(l.level)}</td><td>${l.dispatched}</td><td>${l.ng}</td><td>${pct(l.rate)}</td></tr>`));
+  const retries = tbl(t('met.retries'),
+    ['verifyBacks', t('met.count')],
+    (m.retryDist || []).map((r) => `<tr><td>${esc(r.backs)}</td><td>${r.count}</td></tr>`));
+  const brk = (title, rows) => tbl(title,
+    [t('met.name'), t('met.dispatched'), 'done', 'failed', t('met.rate')],
+    rows.map((r) =>
+      `<tr><td>${esc(r.name)}</td><td>${r.dispatched}</td><td>${r.done}</td><td>${r.failed}</td><td>${pct(r.successRate)}</td></tr>`));
+  document.getElementById('box').innerHTML =
+    cards + lvls + retries + brk(t('met.byKind'), m.byKind || []) +
+    brk(t('met.byRepo'), m.byRepo || []);
+  document.getElementById('box').scrollTop = 0;
+}
 // ボードのカードを開く。他 repo の chat なら先にカレント repo を切り替える
 // （loadChat はカレント repo 外を表示しないため）
 async function boardOpen(id, slug) {
@@ -2027,10 +2088,11 @@ function renderSide() {
   for (const m of ['chats', 'editor', 'agents', 'skills'])
     document.getElementById('nav-' + m).classList.toggle('active',
       sideMode === m && centerMode !== 'status' && centerMode !== 'settings'
-        && centerMode !== 'manual');
+        && centerMode !== 'manual' && centerMode !== 'metrics');
   document.getElementById('nav-status').classList.toggle('active', centerMode === 'status');
   document.getElementById('nav-settings').classList.toggle('active', centerMode === 'settings');
   document.getElementById('nav-manual').classList.toggle('active', centerMode === 'manual');
+  document.getElementById('nav-metrics').classList.toggle('active', centerMode === 'metrics');
   // 右ペインは常時表示。doc browser / ツリーに出すものがない時（chats モード）は
   // 管理セクション（loop state / candidates / issues / proposals）を表示する
   // （chat の切替は処理状況ボード、新規はヘッダ/ボードの＋新規チャットで行う）
@@ -2525,6 +2587,8 @@ async function loadMgmt() {
     if (i) renderIssue(i);
     else { exitDoc(); if (sel == null) renderEmpty(); else loadChat(); }
   }
+  // メトリクス画面も状態変化（SSE push）で再集計する
+  if (centerMode === 'metrics') showMetrics();
   syncTip();              // 描画し直した行に残ったポップアップを閉じる（同一内容は維持）
 }
 

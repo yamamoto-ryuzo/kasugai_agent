@@ -1,0 +1,16 @@
+---
+title: KPI ダッシュボード（/api/metrics）
+---
+flowchart TD
+    ISSUES[(issues.json<br/>runs/verifyBacks/<br/>pushedAt/usage/<br/>symptomHash)] --> M[metrics.rs<br/>KPI 算出・決定的]
+    M --> SR[成功率<br/>done/dispatch 済<br/>push 済みのみ成功]
+    M --> MTTR[MTTR<br/>detectedAt→pushedAt]
+    M --> NG[verify NG 率<br/>verifyBacks>0 の割合<br/>verifyLevel 別]
+    M --> RET[リトライ分布<br/>verifyBacks ヒストグラム]
+    M --> COST[コスト<br/>ΣelapsedMs/tokens/cost]
+    M --> REJ[却下・external 率]
+    M --> BR[kind/repo 別内訳<br/>成功率・件数]
+    M --> REC[同一症状再発率<br/>symptomHash 重複]
+    SR & MTTR & NG & RET & COST & REJ & BR & REC --> API[GET /api/metrics]
+    API --> DASH[パネル メトリクス画面<br/>nav-metrics ボタン<br/>KPI カード + 内訳表]
+    SSE[SSE issues push] -->|再取得| DASH
