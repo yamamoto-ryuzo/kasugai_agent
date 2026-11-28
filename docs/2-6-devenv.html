@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>2-6 開発環境 — KASUGAI Agent マニュアル</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="nav.js" defer></script>
+  <script type="module">
+    import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+    mermaid.initialize({ startOnLoad: true });
+  </script>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>KASUGAI Agent マニュアル <span class="version-badge">v0.2.0</span></h1>
+      <p>課題の検出 → 評価 → 対応 → 実機検証 → 学習 の自律ループ常駐システム</p>
+    </header>
+    <main>
+      <h2 class="ptitle">2-6 開発環境</h2>
+      <p>左ペイン「開発環境」ナビで中央ペインに開発環境ビューを開きます。<br><code>config.json</code> の <code>devEnvironments[]</code> に登録したローカル dev 環境<br>（Rust+Cargo 等）の起動・停止・状態確認を行う画面です。</p>
+<h3>カードの操作</h3>
+<table><thead><tr><th>ボタン</th><th>動作</th></tr></thead><tbody><tr><td>起動</td><td><code>POST /api/dev-envs/launch</code>。対象 port が未応答なら占有プロセスを <code>taskkill /F /T</code> で解放してから <code>command</code> を detached spawn</td></tr><tr><td>停止</td><td><code>POST /api/dev-envs/stop</code>。port を占有するプロセスを <code>taskkill /F /T</code></td></tr><tr><td>開く</td><td><code>url</code>（未指定時は <code>http://127.0.0.1:&lt;port&gt;/</code>）を新規タブで開く</td></tr></tbody></table>
+<p>状態 pill は port への TCP 応答で判定します（起動中 / 停止）。<br>起動・停止後は SSE <code>devenvs</code> で一覧が即時再描画されます。</p>
+<h3>devEnvironments の項目</h3>
+<pre><code class="lang-json">{
+  "id": "myenv",
+  "label": "表示名",
+  "cwd": "C:/path/to/repo",
+  "command": "cargo run",
+  "port": 8000,
+  "url": "http://127.0.0.1:8000/",
+  "env": { "FOO": "bar" }
+}</code></pre>
+<ul><li><code>command</code> は <code>cmd /c</code>（POSIX は <code>sh -c</code>）経由で実行されるため、 <code>cargo run</code>・<code>npm run dev</code>・<code>python run.py</code> 等をそのまま書けます</li><li>子プロセスの stdout/stderr は <code>logs/devenv-&lt;id&gt;.log</code> へ追記され、 カードに末尾を表示します</li><li>親（kasugai-agent）の <code>PORT</code> 環境変数は子へ継がせません。 個別に渡したい変数は <code>env</code> オブジェクトを使います</li><li><code>port</code> を省略・<code>0</code> にすると状態判定・停止は行いません</li></ul>
+    </main>
+  </div>
+</body>
+</html>

@@ -298,13 +298,15 @@ pub fn save_report(root: &Path, report: &Value) {
     );
 }
 
-/// smoke の評価対象となる変更パスか（prompts/config/skills/.devin/skills）
+/// smoke の評価対象となる変更パスか（prompts/config/各種 skills 配置）
 pub fn affects_behavior(path: &str) -> bool {
     let p = path.to_lowercase();
     p == "config.json"
         || p.starts_with("prompts/")
         || p.starts_with("skills/")
-        || p.starts_with(".devin/skills/")
+        || crate::registry::skills::SKILL_DIRS
+            .iter()
+            .any(|d| p.starts_with(&format!("{}/", d.to_lowercase())))
 }
 
 #[cfg(test)]

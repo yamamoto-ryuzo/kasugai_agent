@@ -1,0 +1,19 @@
+---
+title: 帰属不明作業の検出（unattributed-work detector）
+---
+flowchart TD
+    POLL[spawn_detector_poller<br/>kind=unattributedWork<br/>pollSeconds.unattributedWork<br/>既定600s・<=0 で無効] --> REPOS[config.repos 走査<br/>path 存在する登録 repo のみ]
+    REPOS --> DIRTY[git status --porcelain<br/>未コミット変更の有無]
+    REPOS --> LOG[git log @{u}..HEAD<br/>upstream がある場合のみ<br/>未 push コミット列挙]
+    DIRTY --> HINT[帰属ヒント収集<br/>1. live Devin セッションで<br/>workingDirectory 一致するもの<br/>2. chats.json の busy/verify 中<br/>カレント repo の chat]
+    LOG --> TRL{各コミットの<br/>Issue: トレーラ有無<br/>util::issue_trailer}
+    TRL -->|トレーラ無し| UNATTR[未帰属コミット<br/>件数と先頭件名を集計]
+    HINT --> EMIT1{dirty かつ<br/>帰属ヒントなし?}
+    EMIT1 -->|yes| E1[candidate emit<br/>kind=uncommitted-changes<br/>symptomHash=uncommitted:<repo><br/>body=変更ファイル数・先頭数件<br/>+ wd が repo 上位の live セッションを<br/>トリアージ用ヒントとして併記]
+
+    EMIT1 -->|帰属あり| OK1[検出なし<br/>稼働中セッションの作業]
+    UNATTR --> E2[candidate emit<br/>kind=unattributed-commits<br/>symptomHash=unpushed:<repo><br/>body=件数・先頭コミット件名]
+    E1 --> ING[detectors::ingest<br/>observing 窓で昇格後に起票<br/>一過性の作業中汚れは<br/>窓内解消で課題化しない]
+    E2 --> ING
+    ING --> DD[repo 単位で1課題に収束<br/>解消で emit 停止・再発で再検出]
+    note1[Copilot agent mode 等<br/>観測APIのない実行体は<br/>成果物=git 変更から間接監視する<br/>エージェント本体は見えなくてよい]

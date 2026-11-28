@@ -21,7 +21,8 @@
         { "page": "2-2-chat", "text": "2-2 AIチャット" },
         { "page": "2-3-status", "text": "2-3 処理状況" },
         { "page": "2-4-docs", "text": "2-4 doc browser" },
-        { "page": "2-5-settings", "text": "2-5 設定" }
+        { "page": "2-5-settings", "text": "2-5 設定" },
+        { "page": "2-6-devenv", "text": "2-6 開発環境" }
       ]
     },
     {

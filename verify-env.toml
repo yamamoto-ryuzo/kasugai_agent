@@ -1,0 +1,33 @@
+# KASUGAI verify 環境定義（manual-04c35958・verify-levels.mmd の VENV）
+# repo ルートの verify-env.toml で verify 環境を宣言的に記述する。
+# copilot-setup-steps.yml / Devin environment snapshot 相当。
+# run/verify はこの宣言を読み、[env] → setup → checks → probe の順で
+# 検証環境を構築する。全コマンドは repo ルートを cwd に実行される
+# （コマンド文字列は空白で argv 分割。クオート記法は非対応）。
+
+# [env]: setup/checks/probe の全コマンドへ注入する環境変数
+[env]
+# 常駐 control が server/target/debug/kasugai-agent.exe を掴んでいるため、
+# verify の cargo build/test は別ターゲット dir へ逃がす
+CARGO_TARGET_DIR = "target-verify"
+
+# setup: verify の前に一度だけ順に実行するセットアップコマンド。
+# 依存導入・生成物の用意等。失敗した時点で verify NG。
+setup = []
+
+# checks: L1 の静的・単体チェック（exit 0 = 合格）。
+# 非空なら自動検出（sync --check・cargo build 等の検出ロジック）を上書きする
+checks = [
+  "node tools/sync-diagrams.mjs --check",
+  "node tools/sync-docs.mjs --check",
+  "cargo build --manifest-path server/Cargo.toml",
+  "cargo test --manifest-path server/Cargo.toml",
+]
+
+# [probe]: L2+ の実機起動定義。指定時は config repos[].verifyExe/
+# verifyArgs/verifyPort/verifyWaitSec より優先する
+# [probe]
+# exe = "server/target/debug/kasugai-agent.exe"
+# args = ["--serve"]
+# port = 8586
+# timeoutSecs = 10

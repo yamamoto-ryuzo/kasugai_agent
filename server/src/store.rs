@@ -28,6 +28,20 @@ pub fn load_issues(root: &Path) -> Vec<Value> {
 pub fn save_issues(root: &Path, issues: &[Value]) {
     save_j(&issues_path(root), &json!(issues));
 }
+
+/// issues.json から課題レコードを削除する（並列モードの完了時に課題行を
+/// この枠に残さない仕組み。監査・証跡・知見は別系統に残る）。
+/// 状態遷移ではなくレコード削除のため pipeline を経由しない
+pub fn delete_issue(root: &Path, key: &str) -> bool {
+    let mut issues = load_issues(root);
+    let n = issues.len();
+    issues.retain(|i| i.get("key").and_then(|v| v.as_str()) != Some(key));
+    if issues.len() == n {
+        return false;
+    }
+    save_issues(root, &issues);
+    true
+}
 pub fn load_candidates(root: &Path) -> Vec<Value> {
     load_j(&candidates_path(root), json!([]))
         .as_array()

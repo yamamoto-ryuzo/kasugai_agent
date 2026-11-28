@@ -40,4 +40,4 @@ flowchart TD
     SAGG --> INBOX
     Q --> INBOX
     G --> INBOX
-    INBOX[候補一覧 = 判断待ち inbox<br/>未起票・gated・queued・failed のみ表示<br/>（実行中・終端の課題行は出さない）<br/>全行 対応/却下ボタンで人が一括判断:<br/>対応=起票/承認/再実行を兼ねた即時 dispatch<br/>（未起票は rate-limit を人判断で bypass）<br/>却下=rejected（未起票は起票して即 rejected）]
+    INBOX[候補一覧 = 判断待ち inbox<br/>未起票・gated・queued・failed のみ表示<br/>（実行中・終端の課題行は出さない）<br/>全行 対応/却下ボタンで人が一括判断:<br/>対応=起票/承認/再実行を兼ねた即時 dispatch<br/>（未起票は rate-limit を人判断で bypass）<br/>却下=rejected（未起票は起票して即 rejected）<br/>「一括対応」ボタンは表示中の全候補を順次 dispatch<br/>（起動不可の課題は autoDispatch で待機。<br/>issueExecMode=direct は同一 repo 直列、<br/>parallel 既定は chat 起票で並列処理）]

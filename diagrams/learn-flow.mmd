@@ -3,9 +3,9 @@ title: learn（知見の還流）
 ---
 flowchart LR
     RUN[run 結果・証跡] --> KN[生の知見を蓄積<br/>knowledge/<br/>課題key単位・無条件]
-    KN --> SK[SKILL draft 組立<br/>.devin/skills/<slug>/SKILL.md<br/>slug = source+repo+kind<br/>揮発 id を含まない安定名<br/>mermaid 図必須・図 title = slug]
-    SK --> DUP{同 slug path の proposal 既存？<br/>pending + decided/ を対象<br/>または同一内容<br/>（key/題名/知見名の揮発分を<br/>正規化比較）}
-    DUP -->|なし| PROP[proposals 生成<br/>kind=skill・issueKey=課題key]
+    KN --> SK[SKILL draft 組立<br/><skillDir>/<slug>/SKILL.md<br/>既定 .agents/skills（skillDirs）<br/>slug = source+repo+kind<br/>揮発 id を含まない安定名<br/>mermaid 図必須・図 title = slug]
+    SK --> DUP{同 slug の起票を抑止？<br/>・proposal 既存（pending+decided/<br/>  同 path または同一内容）<br/>・knowledge/skill-drafts.json<br/>  起票済み台帳に slug あり<br/>・適用済み SKILL.md が既存}
+    DUP -->|なし| PROP[proposals 生成<br/>kind=skill・issueKey=課題key<br/>台帳に slug を記録]
     DUP -->|あり| SKIP[起票しない<br/>同じ種別の再検出は抑止]
     PROP --> VET[vet<br/>機械検査<br/>path許可 / secret混入 /<br/>構文 / frontmatter]
     VET -->|fail| VF[vet 不合格<br/>accept 不能・要修正]

@@ -1,0 +1,27 @@
+---
+title: push 後フォローアップループ（CI失敗・レビュー・コンフリクトの監視と修復起票）
+---
+stateDiagram-v2
+    [*] --> checking : git push 成功<br/>postPush={sha, branch, since}<br/>postPushWatch=on の課題のみ
+    checking --> waiting : 監視中 CI run が未完了<br/>（status=in_progress/queued）
+    waiting --> checking : 全 run 完了・検出なし
+    checking --> fixing : 検出あり → 修復課題を起票<br/>CI失敗（gh run list --commit sha）<br/>レビュー指摘（PR reviews・commit comments）<br/>コンフリクト（PR mergeable=CONFLICTING）<br/>repairs[] に起票 key を記録
+    waiting --> fixing : 検出あり
+    fixing --> done : 修復課題が全て done<br/>（各修復課題は自身の push で<br/>別の postPush ループを持つ）
+    fixing --> paused : 修復課題が failed/rejected<br/>reason = repair-failed:&lt;key&gt;
+    checking --> paused : repairs が postPushMaxRepairs<br/>（既定3）到達<br/>reason = max-repairs
+    checking --> done : postPushWatchMinutes（既定120）<br/>経過まで検出なし
+    checking --> paused : 人操作 postpush-pause<br/>reason = manual
+    waiting --> paused : 人操作 postpush-pause
+    fixing --> paused : 人操作 postpush-pause
+    paused --> checking : 人操作 postpush-resume<br/>since を再アンカーして監視再開
+    done --> [*]
+    note right of checking
+        pollSeconds.postPush（既定300s）で
+        postpush.rs が polling する。
+        検出は source=post-push の candidate
+        として ingest（symptomHash で
+        同一事象の再検出を抑止）。
+        postPush は表示用フィールドで
+        status(done)とは別のサブ状態
+    end note

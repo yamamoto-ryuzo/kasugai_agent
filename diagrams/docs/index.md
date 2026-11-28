@@ -29,7 +29,7 @@ detector が課題候補（candidate）を emit し、入口で正規化・重�
 
 - **verify**: L2 以上は対象 EXE を実機で起動して応答確認。証跡は `evidence/` へ
 - **learn**: 実行結果・証跡は SKILL（draft・mermaid 図必須）として
-  `.devin/skills/` へ蓄積し、agent 自身への反映は proposals 機構で人が採否する
+  `.agents/skills/` へ蓄積し、agent 自身への反映は proposals 機構で人が採否する
 
 ## 関連ドキュメント
 

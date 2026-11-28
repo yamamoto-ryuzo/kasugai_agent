@@ -31,12 +31,22 @@ pub fn load_config(root: &Path) -> Value {
     user
 }
 
-/// persistConfig: config.json を読み直し、repos/chatAgents/chatAgent だけ差し替えて保存
+/// persistConfig: config.json を読み直し、repos/chatAgents/chatAgent/
+/// issueExecMode だけ差し替えて保存
 pub fn persist_config(root: &Path, cfg: &Value) {
     let path = root.join("config.json");
     let mut cur = load_j(&path, json!({}));
     if let (Some(c), Some(live)) = (cur.as_object_mut(), cfg.as_object()) {
-        for k in ["repos", "chatAgents", "chatAgent"] {
+        for k in [
+            "repos",
+            "chatAgents",
+            "chatAgent",
+            "issueExecMode",
+            "maxConcurrentSessions",
+            // 並列モード切替（set_parallel_exec）。未登録だと再起動で
+            // 直列ガードへ巻き戻る
+            "conflictWait",
+        ] {
             match live.get(k) {
                 Some(v) => {
                     c.insert(k.to_string(), v.clone());
@@ -79,6 +89,41 @@ pub fn cfg_obj<'a>(cfg: &'a Value, key: &str) -> Option<&'a Map<String, Value>> 
 // ---- secrets.json ----
 pub fn secrets_path(root: &Path) -> PathBuf {
     root.join("secrets.json")
+}
+
+/// agent 定義の env マップを解決し (NAME, value) のペアで返す。
+/// 値は `"リテラル"` / `"env:VAR"`（親環境から転写）/ `"secret:key"`
+/// （secrets.json `tokens[key]` から解決）を取れる。
+/// acp spawn・直接実行 runner の双方が使う共通解決。
+pub fn agent_env(root: &Path, agent: &Value) -> Vec<(String, String)> {
+    agent
+        .get("env")
+        .and_then(|v| v.as_object())
+        .map(|m| {
+            m.iter()
+                .filter_map(|(k, v)| {
+                    let s = v.as_str().unwrap_or("");
+                    let val = if let Some(k2) = s.strip_prefix("secret:") {
+                        secrets_get(root, k2)
+                    } else if let Some(v2) = s.strip_prefix("env:") {
+                        std::env::var(v2).ok()
+                    } else {
+                        Some(s.to_string())
+                    };
+                    val.map(|r| (k.clone(), r))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// secrets.json の tokens[<key>] を直接参照（key 指定の汎用ルート）
+pub fn secrets_get(root: &Path, key: &str) -> Option<String> {
+    load_j(&secrets_path(root), json!({}))
+        .get("tokens")
+        .and_then(|t| t.get(key))
+        .and_then(|v| v.as_str())
+        .map(String::from)
 }
 
 /// secrets.json の tokens[<tokenKey ?? id>] を参照

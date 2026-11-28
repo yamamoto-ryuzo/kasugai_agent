@@ -13,6 +13,18 @@
       ],
       "auth": "devin"
     },
+    "copilot": {
+      "label": "Copilot CLI",
+      "type": "acp",
+      "exe": "copilot",
+      "args": [
+        "--acp"
+      ],
+      "auth": "none",
+      "env": {
+        "COPILOT_GITHUB_TOKEN": "secret:copilot-github-token"
+      }
+    },
     "hub-copilot": {
       "label": "Copilot (bridge-hub)",
       "type": "agent",
@@ -32,6 +44,7 @@
   "autoRestartOnDrift": true,
   "autoVerify": true,
   "autoResumeOnStart": true,
+  "conflictWait": true,
   "heartbeatMinutes": 5,
   "detectorSilentMinutes": 30,
   "retryLimit": 3,
@@ -47,29 +60,74 @@
   "diffReview": true,
   "diffReviewMinConfidence": 0.7,
   "diffReviewTimeoutMinutes": 15,
+  "modelRouting": {
+    "agents": {
+      "light": "",
+      "standard": "",
+      "deep": ""
+    },
+    "criticTier": "light"
+  },
+  "codeMap": {
+    "enabled": true,
+    "maxUnits": 12,
+    "maxBytes": 9000,
+    "maxFiles": 2000,
+    "maxFileBytes": 200000
+  },
   "reproFirst": true,
   "remediations": [
-    {"name": "retry", "backs": 3},
-    {"name": "replan", "backs": 2},
-    {"name": "human"}
+    {
+      "name": "retry",
+      "backs": 3
+    },
+    {
+      "name": "replan",
+      "backs": 2
+    },
+    {
+      "name": "human"
+    }
   ],
+  "postPushWatch": true,
+  "postPushWatchMinutes": 120,
+  "postPushMaxRepairs": 3,
   "intakeMaxPerHour": 0,
   "intakeCooldownMinutes": 60,
-  "intakeCooldownBy": ["source", "repo", "kind"],
+  "intakeCooldownBy": [
+    "source",
+    "repo",
+    "kind"
+  ],
   "inhibitRules": [
     {
-      "cause": {"source": "ci-failure", "kind": "build"},
-      "effect": {"source": "ci-failure", "kind": "test"},
-      "match": ["repo"]
+      "cause": {
+        "source": "ci-failure",
+        "kind": "build"
+      },
+      "effect": {
+        "source": "ci-failure",
+        "kind": "test"
+      },
+      "match": [
+        "repo"
+      ]
     }
   ],
   "intakeObserveMinutes": 10,
   "intakeObserveMinHits": 2,
-  "observingExempt": ["manual", "derived"],
+  "observingExempt": [
+    "manual",
+    "derived"
+  ],
   "lessonHarmLimit": 2,
   "consolidateIdleMinutes": 30,
   "consolidateMinCluster": 3,
   "stormBatchMin": 5,
+  "stormWindowMinutes": 10,
+  "splitMaxBytes": 4000,
+  "splitMaxItems": 8,
+  "incidentWindowMinutes": 60,
   "runCycleCap": 3,
   "allowAutoLoop": false,
   "budgetMaxSteps": 2000,
@@ -79,8 +137,11 @@
   "riskConfirm": true,
   "riskHighPatterns": [],
   "partialPreserve": true,
-  "stormWindowMinutes": 10,
   "maxConcurrentRuns": 4,
+  "issueExecMode": "parallel",
+  "skillDirs": [
+    ".agents/skills"
+  ],
   "retentionDays": 0,
   "repos": [
     {
@@ -89,11 +150,24 @@
       "requirePushApproval": false
     }
   ],
-  "repoScanDirs": ["C:/Users/you/repos"],
+  "repoScanDirs": [
+    "C:/Users/you/repos"
+  ],
+  "devEnvironments": [
+    {
+      "id": "example",
+      "label": "Example dev env",
+      "cwd": "C:/path/to/repo",
+      "command": "cargo run",
+      "port": 8000,
+      "url": "http://127.0.0.1:8000/"
+    }
+  ],
   "pollSeconds": {
     "issues": 120,
     "health": 300,
-    "learn": 60
+    "learn": 60,
+    "postPush": 300
   },
   "cdnBaseUrl": "",
   "cdnCheckMinutes": 0,
@@ -102,8 +176,5 @@
     "panel": true,
     "docs": true,
     "prompts": false
-  },
-  "splitMaxBytes": 4000,
-  "splitMaxItems": 8,
-  "incidentWindowMinutes": 60
+  }
 }

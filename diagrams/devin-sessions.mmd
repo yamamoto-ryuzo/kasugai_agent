@@ -1,0 +1,33 @@
+---
+title: Devin セッション管理（環境維持）
+---
+flowchart LR
+    NAV[セッションナビ → Devin タブ] --> VIEW[中央ペイン<br/>Devin セッション管理ビュー]
+    VIEW --> GET[GET /api/devin-sessions<br/>sessions・live判定・<br/>孤立ファイル数・DBサイズ]
+    GET --> DB[(Devin CLI<br/>%APPDATA%/Devin/cli/<br/>sessions.db)]
+    GET --> LK[session_locks/<br/>&lt;id&gt;.lock<br/>LockFile バイトロック試行<br/>= live 判定]
+    GET --> SM[summaries/<br/>&lt;id&gt;.md]
+    DB --> TURN[ターン状態判定<br/>message_nodes 末尾を遡り最初の実ノードで判定<br/>（通知系 system ノードは読み飛ばし）:<br/>assistant+finish=stop → answered<br/>user/tool 末尾 or tool_calls 途中 → working<br/>割込マーカー or 非liveの途中 → interrupted<br/>※ answered は報告済みの意味。<br/>指示の実現性は lastNote で人が確認]
+    DB --> NOTE[最終応答抜粋 lastNote<br/>最後の assistant ノード冒頭<br/>+ tool_call_state 失敗数 failedTools]
+    VIEW --> DONE[POST /api/devin-sessions/done<br/>{ids} を完了化<br/>live 中は拒否<br/>sessions.db は触らない]
+    VIEW --> UNDONE[POST /api/devin-sessions/undone<br/>{ids} を一覧へ戻す]
+    VIEW --> DEL[POST /api/devin-sessions/delete<br/>{ids} 行削除<br/>live 中は拒否<br/>FTS は delete トリガーで連動]
+    VIEW --> CLS[POST /api/devin-sessions/cleanup<br/>孤立 lock/summary を除去]
+    VIEW --> VAC[POST /api/devin-sessions/vacuum<br/>sessions.db を VACUUM]
+    VIEW --> ATT[POST /api/devin-sessions/attach<br/>{id} → saved_session_id 付き<br/>kasugai chat を作成<br/>（トランスクリプトを履歴に流し込み:<br/>user=本文/assistant=thinking→thought・<br/>本文→agent・tool_calls→tool 行<br/>※tool 結果行・system は除外）<br/>→ chatSelect で本格 AI チャット]
+    DONE --> DF[devin-done.json<br/>kasugai_agent root<br/>done: id→ doneAt/title/wd]
+    UNDONE --> DF
+    DF --> GET2[GET 応答の各 session に<br/>done/doneAt を付与。<br/>DB 消滅 id は読み時に purge]
+    GET2 --> VIEW
+    VIEW --> TABS[タブ: 一覧（!done）/ 完了（done）<br/>完了タブは戻す・削除ボタン]
+    DEL --> DB
+    CLS --> LK
+    CLS --> SM
+    VAC --> DB
+    DEL --> DF2[削除時は done エントリも除去]
+    DF2 --> DF
+    DONE --> REF[応答後に GET で再描画<br/>（状態と画面の乖離を残さない）]
+    UNDONE --> REF
+    DEL --> REF
+    CLS --> REF
+    VAC --> REF

@@ -1,0 +1,27 @@
+---
+title: エージェントセッション管理（共通テンプレート・カンバン）
+---
+flowchart LR
+    NAV[左ペイン セッションナビ<br/>1本に統合] --> VIEW[中央ペイン<br/>エージェントセッションビュー<br/>showAgentSessions]
+    VIEW --> ATAB[エージェントタブ<br/>Devin / Copilot /（将来拡張）<br/>内情はタブで詳細化]
+    VIEW --> BAR[集計バー<br/>sessions / live / sleeping /<br/>store サイズ / 孤立数]
+    VIEW --> TB[統一ツールバー<br/>再読込・スリープ一括削除・<br/>孤立掃除・VACUUM<br/>caps で非対応操作を隠す<br/>（ボタン体系は全エージェント共通）]
+    VIEW --> KAN[カンバン列<br/>実行中・報告済み・中断・終了・<br/>判定なし・完了<br/>列は turn の和集合から動的生成<br/>空列は半分幅で残す<br/>2件以上は件数比例で幅拡大]
+    KAN --> CARD[簡素カード（処理状況と同じ<br/>.bcol/.bcard 構造）<br/>title・ピル live・hidden・<br/>failedTools・badges・活動時刻のみ]
+    CARD --> API["GET /api/&lt;agent&gt;-sessions<br/>共通応答 shape"]
+    API --> SHAPE["sessions: id/title/workingDirectory/<br/>lastActivityAt/live/hidden/turn/<br/>lastNote/failedTools/badges/done<br/>counts/store(bytes)/caps"]
+    TB --> OPS["POST /api/&lt;agent&gt;-sessions/<br/>delete・cleanup・vacuum・<br/>done・undone（live 中は拒否）"]
+    CARD -->|クリック| CHAT["POST /api/&lt;agent&gt;-sessions/attach<br/>{id} → kasugai chat として開く<br/>（saved_session_id=外部 sid の<br/>chat を作成し boardOpen へ遷移。<br/>トランスクリプトは履歴に流し込み。<br/>既アタッチ chat は再利用。<br/>session cwd → repo はパス前方一致で解決、<br/>登録 repo 外なら repo=null=スコープ不問で表示。<br/>attach_src を記録し GET /api/chat 時に<br/>注入区間を外部トランスクリプトで再同期<br/>＝live 追従・再起動後の再注入。<br/>session/load 確立後は ACP replay が正本のため<br/>注入区間を除去し attach_src を解除）"]
+    CHAT --> ACP["本格 AI チャット（既存 chat UI）<br/>初回送信時に ACP session/load で<br/>実セッションへ接続 → そのまま会話継続<br/>ストリーミング・権限・モード・<br/>snapshot 等すべて既存機能のまま。<br/>loadSession 非対応なら新規扱い<br/>（履歴表示は残る）"]
+    KAN --> DONE2["完了マークはカード上の<br/>✓/↩ ボタン（caps.done のみ）"]
+    ENVWATCH[spawn_watchers の外部セッション監視<br/>5s 周期で各アダプタの一覧を<br/>id+lastActivityAt+title で diff。<br/>変化時に SSE envsessions → セッション<br/>画面が開いていれば自動再描画。<br/>attach 済み chat は対象 sid の<br/>lastActivityAt 変化時のみ sync_attach<br/>＝外部で進行中の会話も開いたまま追従。<br/>外部側のタイトル変更は chat ラベルへ反映<br/>（「[agent] title」形を維持している場合のみ<br/>＝ユーザーの手動改名は上書きしない）。<br/>一覧から sid が消失（＝外部削除）したら<br/>sys メッセージで通知し attach_src を解除<br/>＝注入履歴は残すが以後の同期は止める。<br/>一覧自体が空の周回は一時的な読み取り<br/>失敗とみなし削除伝播しない。<br/>同時編集検出: kasugai が session/load で<br/>保持中の sid が外部一覧にあり、chat が<br/>busy でないのに lastActivityAt が進んだら<br/>外部書き込み（自分の書き込みは busy 中<br/>のみ）→ sys 警告を chat ごとに1回。<br/>busy 解除後 60s は settle 期間で除外]
+    ENVWATCH --> ADEV
+    ENVWATCH --> ACOP
+    ENVWATCH -.->|SSE envsessions| VIEW
+    ENVWATCH -.->|SSE chat| CHAT
+    API --> ADEV[devinenv.rs<br/>Devin アダプタ<br/>→ devin-sessions.mmd]
+    API --> ACOP[copilotenv.rs<br/>Copilot アダプタ<br/>→ copilot-sessions.mmd]
+    API -.-> AEXT[将来のアダプタ<br/>同じ shape を返すだけで<br/>タブ・カンバン・操作を再利用]
+    KAN --> DONEF["&lt;agent&gt;-done.json<br/>完了台帳 → 完了列"]
+    OPS --> REF[応答後に GET で再描画<br/>状態と画面の乖離を残さない]
+    REF --> KAN

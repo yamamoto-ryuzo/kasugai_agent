@@ -1,0 +1,14 @@
+---
+title: AST 単位の構造的コンテキスト取得（codemap）
+---
+flowchart TD
+    RUN[dispatch prompt 組立<br/>runner.build_prompt_full] --> CM{codemap::context_section<br/>codeMap.enabled（既定 on）}
+    ISS[課題 title + body] --> TOK[トークン抽出<br/>識別子・パス片・3文字以上<br/>上限 40 個]
+    CM --> SCAN[repo 走査<br/>.git / target / node_modules /<br/>dist / build 等を除外<br/>maxFiles・maxFileBytes で打切り]
+    SCAN --> UN[構造単位の抽出<br/>言語別軽量パターン<br/>（外部パーサ無し・依存ゼロ）:<br/>rs = fn / impl / struct / enum / trait / mod<br/>py = def / class（インデント幅で終端）<br/>js・ts = function / class / const arrow<br/>ブレース深さで終端行を特定]
+    UN --> SC[関連スコア<br/>単位名一致 +3 /<br/>パス片一致 +2 /<br/>ファイル stem 一致 +1]
+    TOK --> SC
+    SC --> TOP[上位 maxUnits 件<br/>既定 12]
+    TOP --> SEC[## 関連コード構造（AST 単位）<br/>各単位: path:開始行-終了行 kind name<br/>+ 単位スニペット<br/>合計 maxBytes（既定 9000）で頭打ち]
+    SEC --> PRM[dispatch prompt へ注入<br/>run がファイル全体でなく<br/>構造単位の文脈を持つ]
+    CM -->|ヒット 0 件・無効化| SKIP[注入しない<br/>（従来どおりの prompt）]

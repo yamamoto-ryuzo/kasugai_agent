@@ -20,10 +20,11 @@ use tokio::process::{Child, ChildStdin, Command};
 use tokio::sync::{mpsc::UnboundedSender, oneshot, Mutex, RwLock};
 
 use super::{Core, CtrlEvt};
-use crate::claims::extract_paths;
 use crate::util::now_ms;
 
-// auth:'devin' は credentials.toml の windsurf_api_key で authenticate
+// auth 指定はホスト固有でなく汎用: "devin" は credentials.toml の
+// windsurf_api_key、"none" は authenticate 省略、
+// {methodId,tokenEnv|tokenSecret} は任意の ACP authenticate methodId
 fn devin_api_key() -> Option<String> {
     static RE: OnceLock<Regex> = OnceLock::new();
     let re = RE.get_or_init(|| {
@@ -54,7 +55,12 @@ pub struct AcpChat {
     pub cwd: Arc<RwLock<String>>,
     pub core: Arc<Mutex<Core>>,
     pub proc_slot: Arc<Mutex<Option<Arc<ProcShared>>>>,
+    /// ensure_proc の check-spawn-store を直列化する起動ロック。
+    /// （proc()==None の同時通過→二重 spawn→proc_slot 上書きで
+    /// 先に spawn した子が kill_on_drop される競合の防止）
+    pub init_lock: Arc<Mutex<()>>,
     pub api_key: Option<String>,
+    pub env: Vec<(String, String)>,
     pub stall_minutes: Arc<dyn Fn() -> f64 + Send + Sync>,
     pub get_options: Arc<dyn Fn() -> serde_json::Map<String, Value> + Send + Sync>,
     pub save_option: Arc<dyn Fn(String, Value) + Send + Sync>,
@@ -361,6 +367,10 @@ impl AcpChat {
         if self.proc().await.is_some() {
             return Ok(());
         }
+        let _init = self.init_lock.lock().await;
+        if self.proc().await.is_some() {
+            return Ok(());
+        }
         let exe = self.agent.get("exe").and_then(|v| v.as_str()).unwrap_or("");
         if exe.is_empty() {
             return Err("agent.exe 未設定".to_string());
@@ -382,9 +392,14 @@ impl AcpChat {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            // devin acp は WINDSURF_EXT_HOST_PID の pid を監視親として使うため除去
+            // WINDSURF_EXT_HOST_PID は devin acp が監視親として使うため除去
+            // （他ホストでは無害な防御）
             .env_remove("WINDSURF_EXT_HOST_PID")
             .kill_on_drop(true);
+        // agent 定義の env マップを子プロセスへ注入（secret:/env: は control 側で解決済み）
+        for (k, v) in &self.env {
+            cmd.env(k, v);
+        }
         // control が console 無しで動いていても実行体へ窓を出さない
         crate::util::hide_console_tokio(&mut cmd);
         let mut child = cmd.spawn().map_err(|e| format!("{}: {}", exe, e))?;
@@ -470,15 +485,28 @@ impl AcpChat {
     }
 
     async fn authenticate(&self) -> Result<(), String> {
-        if self.agent.get("auth").and_then(|v| v.as_str()) == Some("none") {
+        // methodId: "devin"→devin-browser、オブジェクトは methodId 指定、
+        // それ以外の文字列はそのまま methodId として解釈（ホスト汎用）
+        let method = match self.agent.get("auth") {
+            Some(Value::String(s)) if s == "none" => return Ok(()),
+            Some(Value::String(s)) if s == "devin" => "devin-browser".to_string(),
+            Some(Value::String(s)) => s.clone(),
+            Some(Value::Object(o)) => o
+                .get("methodId")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            _ => return Ok(()),
+        };
+        if method.is_empty() {
             return Ok(());
         }
         let Some(key) = &self.api_key else {
-            return Err("windsurf_api_key not found".to_string());
+            return Err(format!("api key not found (methodId={})", method));
         };
         self.rpc(
             "authenticate",
-            json!({"methodId": "devin-browser", "_meta": {"api_key": key}}),
+            json!({"methodId": method, "_meta": {"api_key": key}}),
         )
         .await
         .map(|_| ())
@@ -590,7 +618,7 @@ impl AcpChat {
     /// 永続化済みオプションのうち現在値と異なるものだけ適用
     async fn apply_persisted_options(&self) {
         for (oid, v) in (self.get_options)() {
-            let mut c = self.core.lock().await;
+            let c = self.core.lock().await;
             let sid = match c.session_id.clone() {
                 Some(s) => s,
                 None => return,

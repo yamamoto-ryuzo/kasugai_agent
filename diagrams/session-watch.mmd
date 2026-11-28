@@ -1,0 +1,14 @@
+---
+title: Devin セッション観測（session-watch detector）
+---
+flowchart TD
+    POLL[spawn_detector_poller<br/>kind=sessionWatch<br/>pollSeconds.sessionWatch<br/>既定300s・<=0 で無効] --> READ[devinenv::sessions_snapshot<br/>%APPDATA%/Devin/cli/sessions.db<br/>+ session_locks の live 判定<br/>環境ビューと同じ読取筋]
+    READ --> FILT{対象選別<br/>hidden=true は除外<br/>live セッションのみ監視}
+    FILT --> STALL{停滞判定<br/>now - lastActivityAt ><br/>sessionWatch.stallHours<br/>既定12h}
+    STALL -->|閾値内| OK[検出なし<br/>正常稼働]
+    STALL -->|停滞| ATTR[帰属ヒント収集<br/>workingDirectory と<br/>config.repos path の照合<br/>→ repo slug / 未登録]
+    ATTR --> EMIT[candidate emit<br/>source=session-watch<br/>kind=stalled-session<br/>symptomHash=stalled:<セッションid><br/>body=タイトル/cwd/最終活動/<br/>帰属 repo ヒント]
+    EMIT --> ING[detectors::ingest<br/>通常の intake 経路]
+    ING --> OBS[observing 窓で昇格後<br/>候補一覧へ<br/>人が 再開/却下/対応 を判断]
+    ING --> DD[セッションid で1課題に収束<br/>再 emit は lastSeen 更新のみ<br/>活動再開・終了で emit 停止]
+    note1[観測は読取のみ。<br/>セッションへの介入は行わない<br/>再開は人が Devin 側で行う]

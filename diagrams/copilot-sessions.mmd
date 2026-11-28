@@ -1,0 +1,21 @@
+---
+title: Copilot セッション管理（環境維持）
+---
+flowchart LR
+    NAV[セッションナビ → Copilot タブ] --> VIEW[中央ペイン<br/>Copilot セッションビュー<br/>共通テンプレ agent-sessions.mmd]
+    VIEW --> GET[GET /api/copilot-sessions]
+    GET --> DIR[("~/.copilot/<br/>session-state/&lt;uuid&gt;/")]
+    GET --> LK[.session-operation-locks/<br/>&lt;id&gt;.lock<br/>LockFile バイトロック試行<br/>= live 判定]
+    GET --> OS[open-sessions-state.json<br/>openedAt/refreshedAt/working<br/>= 開いている live セッション]
+    DIR --> EV[events.jsonl 解析<br/>head: session.start → cwd/model/<br/>startTime・最初の user.message → title<br/>tail: 末尾イベント → turn 判定]
+    EV --> TURN[turn 判定<br/>assistant.message 末尾 → answered<br/>session.shutdown 末尾 → closed<br/>user/tool 末尾 → working（live のみ）<br/>非 live の途中 → interrupted<br/>tool.execution_end 失敗数 → failedTools]
+    EV --> NOTE[lastNote = 最終 assistant.message<br/>の content または最初の<br/>toolRequests[].arguments.message]
+    VIEW --> DEL[POST /api/copilot-sessions/delete<br/>{ids} → session-state/&lt;id&gt; ごと削除<br/>live 中は拒否]
+    VIEW --> CLS[POST /api/copilot-sessions/cleanup<br/>dir 無しの孤立 lock /<br/>open-state エントリを除去]
+    VIEW --> DONEOP[POST .../done・/undone<br/>copilot-done.json 台帳]
+    VIEW --> NOVAC[VACUUM は非対応<br/>caps.vacuum=false<br/>（DB 台帳を持たず<br/>session-state dir が実体）]
+    VIEW --> ATT[POST /api/copilot-sessions/attach<br/>{id} → saved_session_id 付き<br/>kasugai chat を作成<br/>（トランスクリプトを履歴に流し込み）<br/>→ chatSelect で本格 AI チャット]
+    DEL --> REF[応答後に GET で再描画]
+    CLS --> REF
+    DONEOP --> REF
+    REF --> VIEW

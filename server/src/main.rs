@@ -22,11 +22,15 @@ mod assets;
 mod cases;
 mod chat;
 mod claims;
+mod codemap;
 mod conlog;
 mod config;
 mod consolidate;
 mod control;
 mod detector_health;
+mod devenvs;
+mod devinenv;
+mod copilotenv;
 mod detectors;
 mod evals;
 mod github;
@@ -38,19 +42,24 @@ mod launch;
 mod lessons;
 mod locks;
 mod pipeline;
+mod postpush;
 mod proposals;
+mod redact;
 mod registry;
 mod repomatch;
+mod risk;
 mod runner;
 mod snapshots;
 mod split;
 mod store;
+mod stuck;
 mod audit;
 mod metrics;
 mod trace;
 mod trajectory;
 mod util;
 mod verify;
+mod verifyenv;
 
 use serde_json::json;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -326,6 +335,10 @@ async fn main() {
                     mode: s.get("mode").and_then(|v| v.as_str()).map(String::from),
                     parent: s.get("parent").and_then(|v| v.as_i64()),
                     depth: s.get("depth").and_then(|v| v.as_u64()).unwrap_or(0),
+                    issue_key: s
+                        .get("issueKey")
+                        .and_then(|v| v.as_str())
+                        .map(String::from),
                     primed_for: Some(Primed::from_persisted(s.get("primedFor"))),
                     seen_splits,
                     pending_splits,
@@ -368,6 +381,10 @@ async fn main() {
                         .get("resumeOnRelease")
                         .and_then(|v| v.as_bool())
                         .unwrap_or(false),
+                    attach_src: s
+                        .get("attachSrc")
+                        .and_then(|v| v.as_str())
+                        .map(String::from),
                 })
                 .await;
             }
@@ -416,6 +433,12 @@ async fn main() {
             }
             for chat in todo {
                 if chat.has_proc().await {
+                    continue;
+                }
+                // 同時起動枠（maxConcurrentSessions）を超える分は
+                // resumable のまま残し、初回送信時に起動する
+                // （自動再開は idle proc を追い出さない）
+                if app2.acquire_proc_slot(chat.chat_id(), false).await.is_err() {
                     continue;
                 }
                 if let Err(e) = chat.ensure_session().await {

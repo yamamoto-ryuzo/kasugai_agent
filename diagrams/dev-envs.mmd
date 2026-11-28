@@ -1,0 +1,24 @@
+---
+title: 開発環境の起動管理（dev-envs）
+---
+flowchart TD
+    CFG[config.devEnvironments<br/>id/label/cwd/command/port/url を登録] --> LIST
+    VIEW[パネル「開発環境」ビュー] -->|GET /api/dev-envs| LIST[環境一覧<br/>port への TCP 接続で alive 判定<br/>logs/devenv-id.log の末尾を同梱]
+    LIST --> CARD[環境カード<br/>label + 状態 pill + port + command + url]
+    CARD -->|起動ボタン| LAUNCH[POST /api/dev-envs/launch id]
+    CARD -->|停止ボタン| STOP[POST /api/dev-envs/stop id]
+    CARD -->|開くボタン| OPEN[env.url を新規タブで開く]
+    LAUNCH --> UP{対象 port 応答?}
+    UP -->|yes| ALREADY[already=true<br/>二重起動しない]
+    UP -->|no| KILL[port 占有プロセスを<br/>netstat 列挙→taskkill /F /T<br/>dev.mjs と同じ解放手順]
+    KILL --> SPAWN[cmd /c &lt;command&gt; を detached spawn<br/>cwd=env.cwd・stdout/stderr→logs/devenv-id.log]
+    SPAWN --> SSE1[SSE devenvs push]
+    STOP --> KILL
+    STOP --> SSE2[SSE devenvs push]
+    SSE1 --> REFRESH[パネルは GET /api/dev-envs を再取得<br/>状態 pill を即時反映]
+    SSE2 --> REFRESH
+    subgraph NOTE[設計上の位置づけ]
+        N1[対象は Rust+Cargo 等のローカル dev 環境。<br/>command は cmd /c 経由で任意<br/>cargo run / npm run dev / python run.py 等]
+        N2[起動判定は port の TCP 応答のみ。<br/>url 未指定なら http://127.0.0.1:port/ を開く]
+        N3[env-launch.mmd の「環境起動」は kasugai-agent<br/>自身の prod 起動であり本機構とは別系統]
+    end

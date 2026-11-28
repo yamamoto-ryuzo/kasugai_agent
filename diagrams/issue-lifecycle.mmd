@@ -10,7 +10,7 @@ stateDiagram-v2
     assessed --> queued : 自律対象（対応待ち）
     gated --> queued : 人が承認
     gated --> rejected : 人が却下 or 分割起票<br/>（splitInto に子 key 群）
-    queued --> running : 一覧の対応ボタンで dispatch<br/>（自動起動しない）
+    queued --> running : 一覧の対応/一括対応ボタンで dispatch<br/>（自動起動しない。一括対応承認済みの<br/>autoDispatch 待機は drain が repo 解放時に dispatch。<br/>autoDispatchWhitelist 事前承認の低リスク kind も<br/>intake で autoDispatch フラグを立て同じ drain 経路で<br/>起動。issueExecMode=direct は runner パイプラインで<br/>直接実行（同一 repo 直列・maxConcurrentRuns<br/>クォーラム有効）、parallel=既定 は chat を<br/>起票して並列処理）
     queued --> planning : dispatch（planGate 課題は<br/>先に計画生成）
     queued --> rejected : 人が却下
     planning --> plan_review : 計画+critic 合格<br/>（autoApprovePlan=off）
@@ -19,10 +19,10 @@ stateDiagram-v2
     plan_review --> running : 人が計画承認<br/>or タイムアウト自動承認
     plan_review --> queued : 計画差し戻し
     plan_review --> rejected : 人が却下
+    running --> verifying : 実装完了
     running --> done : 課題処理方法=並列（chat 起票）時、<br/>委譲先 chat の終了区分=done<br/>（chat 側の検証を内包するため<br/>verifying を経由しない）
     running --> queued : cancel・run halt<br/>（stuck・予算・HIGHリスク。<br/>verifyBacks 不消費・run-control.mmd）<br/>並列モードの chat 終了区分<br/>unverified も queued 差し戻し
     verifying --> queued : cancel（再 trigger で<br/>旧 run を中断し queued へ）
-    running --> verifying : 実装完了
     verifying --> done : 検証合格
     verifying --> retry : NG (差し戻し)
     retry --> queued : 差し戻し（対応ボタンで<br/>再 dispatch）
@@ -37,7 +37,47 @@ stateDiagram-v2
         queued・failed）のみ表示し、各行の
         対応/却下ボタンで人が一括判断する。
         対応は起票/承認/再実行を兼ねた即時 dispatch
-        （未起票は rate-limit を人判断で bypass）
+        （未起票は rate-limit を人判断で bypass）。
+        ISSUES 一覧の「一括対応」は queued を一括 dispatch し、
+        同一 repo 競合・同時実行上限で起動できない課題は
+        autoDispatch フラグ付きで待機する。drain が repo 解放時に
+        同じ dispatch 経路で自動起動するが、フラグは起動時に消費する
+        （verify 差し戻し後は再び人判断を要する）。
+        candidates 一覧の「一括対応」も同じ経路で判断待ちの
+        全候補（未起票は即時起票）を一括 dispatch し、
+        起動できない課題は同様に autoDispatch で待機する。
+        autoDispatchWhitelist（config・既定無し=全課題人判断）:
+        [{kind, maxPriority}] のオプトイン式事前承認。
+        intake で kind 等値（"*"=任意）かつ priority<=maxPriority
+        （既定1）かつ queued 自律対象の課題に autoDispatch
+        フラグを立て、drain が一括対応と同じ経路で起動する
+        （フラグは起動時に消費、verify 差し戻し後は人判断）。
+        gated（external・大規模）は対象外、whitelist 未命中は
+        従来通り人ゲート必須。
+    end note
+    note right of running
+        課題の処理方法 issueExecMode（設定システムタブで
+        直接/並列を切替・既定=並列）:
+        直接 direct = 従来の runner パイプラインで直接実行
+        （can_dispatch 完全ガード: 同一 repo 直列・
+        maxConcurrentRuns・planGate・stuck/予算制御。
+        一括の競合分は autoDispatch 待機）。
+        並列 parallel（既定）= 課題を chat セッションとして
+        起票し、通常のチャット起票と同じ流れで並列処理する
+        （can_dispatch_base のみ: 同一 repo 直列・
+        maxConcurrentRuns は課さない）。
+        chat は課題 key を保持し、課題は chatId を保持する
+        （課題行に chat #N リンク）。
+        chat 終了区分の写像: done→課題 done（GitHub 課題は
+        完了理由のコメント投稿 → issue クローズ）/
+        unverified→課題 queued /
+        ng・差し戻し上限→課題 running のまま（chat の
+        差し戻し・要人対応で進め、課題側は cancel で queued）。
+        cancel は chat のターン中断＋課題 queued、
+        再 dispatch は新規 chat を起票する（旧委譲 chat の
+        issue_key リンクは解除し、後続完了の誤写像を防ぐ）。
+        chatId 付き running は drain の孤児 run
+        failed 化の対象外（housekeep.mmd）
     end note
     note right of rejected
         分割起票（manual-0577d650）: assess が閾値超
@@ -46,7 +86,7 @@ stateDiagram-v2
         子課題群（source=split・splitFrom=親key）を起票し、
         親は rejected へ。子は通常 intake で queued へ進む
     end note
-    done --> [*]
+    done --> [*] : drain の sweep で課題レコード削除<br/>（完了行はこの枠に残さない。削除前に<br/>case/eval 学習へ同期。postPush 監視中は<br/>監視終了まで残存。GitHub 由来は<br/>理由コメント投稿+issue クローズ後に削除）
     rejected --> [*]
     dropped --> [*]
     [*] --> done : GitHub closed Issue 取込<br/>（--import-github・COMPLETED）

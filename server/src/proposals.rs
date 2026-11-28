@@ -13,33 +13,16 @@ use crate::util::*;
 // knowledge/ は agent の生の知見ストア（正本ではない）だが、harmful レッスン
 // 削除 proposal（manual-bcf981dd）等が knowledge/lessons.json を対象にするため
 // path-allowlist に含める（採否は従来どおり人のゲート）
-const ALLOWED_PREFIXES: &[&str] = &["prompts/", "diagrams/", "skills/", ".devin/skills/", "knowledge/"];
+// skills 配置は registry::skills::SKILL_DIRS（agentskills 共通規格 +
+// ホスト別配置）を正本とし、静的 prefix と併せて許可する
+const ALLOWED_PREFIXES: &[&str] = &["prompts/", "diagrams/", "skills/", "knowledge/"];
 const ALLOWED_FILES: &[&str] = &["AGENTS.md", "README.md", "config.json"];
 
 const KINDS: &[&str] = &["skill", "prompt", "config", "doc", "other"];
 
-/// シークレット混入検査パターン（保守的に落とす）
-const SECRET_PATTERNS: &[&str] = &[
-    r"sk-[A-Za-z0-9_-]{20,}",
-    r"ghp_[A-Za-z0-9]{20,}",
-    r"github_pat_[A-Za-z0-9_]{20,}",
-    r"xox[baprs]-[A-Za-z0-9-]{10,}",
-    r"AKIA[0-9A-Z]{16}",
-    r"AIza[0-9A-Za-z_-]{35}",
-    r"-----BEGIN [A-Z ]*PRIVATE KEY-----",
-    r#"(?i)(api[_-]?key|secret|token|password)\s*[:=]\s*["'][^"'\s]{12,}"#,
-];
-
-fn secret_hit(content: &str) -> Option<String> {
-    for pat in SECRET_PATTERNS {
-        if let Ok(re) = regex::Regex::new(pat) {
-            if let Some(m) = re.find(content) {
-                return Some(format!("pattern {} matched at {}", pat, m.start()));
-            }
-        }
-    }
-    None
-}
+/// シークレット混入検査の検出面は redact.rs と同一正本を使う
+/// （生成段階マスク scrub と vet の事後検査で検出規則を共有。manual-a3a60c51）
+use crate::redact::secret_hit;
 
 /// ws_root 相対の安全なパスなら正規化結果を返す。絶対パス・..・~・NUL は拒否。
 fn safe_rel(p: &str) -> Option<String> {
@@ -142,7 +125,10 @@ pub fn vet(p: &Value, ws_root: &str) -> Value {
         // path-allowlist: 変更対象の許可
         let lower = rel.to_lowercase();
         let allowed = ALLOWED_PREFIXES.iter().any(|pre| lower.starts_with(pre))
-            || ALLOWED_FILES.iter().any(|f| rel == *f);
+            || ALLOWED_FILES.iter().any(|f| rel == *f)
+            || crate::registry::skills::SKILL_DIRS
+                .iter()
+                .any(|d| lower.starts_with(&format!("{}/", d.to_lowercase())));
         checks.push(chk(
             "path-allowlist",
             &rel,

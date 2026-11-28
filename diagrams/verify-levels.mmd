@@ -4,8 +4,9 @@ title: verify（L0〜L4）
 flowchart TD
     REPRO[L2+ は再現ファースト<br/>修正前に最小再現手順 repro.md<br/>症状の再現・ベースラインを記録] --> IMPL[実装完了<br/>ローカルコミット]
     IMPL --> VL{verifyLevel}
-    VL -->|L0/L1| STATIC[静的・単体チェック<br/>構文・lint・テスト・ビルド]
-    VL -->|L2以上| LAUNCH[実機で対象EXE自体を起動<br/>QGIS等・成果物バイナリ]
+    VL --> VENV[verify-env.toml<br/>repo 別の宣言的 verify 環境<br/>env・setup・checks・probe]
+    VENV -->|L0/L1| STATIC[静的・単体チェック<br/>構文・lint・テスト・ビルド<br/>checks 宣言で自動検出を上書き]
+    VENV -->|L2以上| LAUNCH[実機で対象EXE自体を起動<br/>probe or verifyExe・成果物バイナリ]
     LAUNCH --> DRIVE[実機駆動<br/>Playwright等でUI操作・応答確認]
     STATIC --> EVID[証跡採取<br/>shots/logs/応答・L2+ は repro.md<br/>→ evidence/]
     DRIVE --> EVID

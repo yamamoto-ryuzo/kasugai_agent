@@ -226,3 +226,50 @@ pub fn relative_path(from: &str, to: &str) -> Option<String> {
     }
     Some(parts.join("/"))
 }
+
+/// git 実行（60s timeout。control の git ナビ・detectors の双方で共有。
+/// 戻り値は (終了コード, stdout+stderr の結合)。起動失敗は -1）
+pub async fn run_git(cwd: &str, args: &[&str]) -> (i32, String) {
+    use tokio::io::AsyncReadExt;
+    let mut gcmd = tokio::process::Command::new("git");
+    gcmd.args(args)
+        .current_dir(cwd)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    hide_console_tokio(&mut gcmd);
+    let child = gcmd.spawn();
+    let mut child = match child {
+        Ok(c) => c,
+        Err(e) => return (-1, e.to_string()),
+    };
+    let mut so = child.stdout.take().unwrap();
+    let mut se = child.stderr.take().unwrap();
+    let ho = tokio::spawn(async move {
+        let mut v = Vec::new();
+        let _ = so.read_to_end(&mut v).await;
+        v
+    });
+    let he = tokio::spawn(async move {
+        let mut v = Vec::new();
+        let _ = se.read_to_end(&mut v).await;
+        v
+    });
+    let res = tokio::time::timeout(std::time::Duration::from_secs(60), child.wait()).await;
+    match res {
+        Ok(Ok(st)) => {
+            let o = ho.await.unwrap_or_default();
+            let e = he.await.unwrap_or_default();
+            (
+                st.code().unwrap_or(-1),
+                format!("{}{}", String::from_utf8_lossy(&o), String::from_utf8_lossy(&e))
+                    .trim()
+                    .to_string(),
+            )
+        }
+        Ok(Err(e)) => (-1, e.to_string()),
+        Err(_) => {
+            let _ = child.kill().await;
+            (-1, "timeout".to_string())
+        }
+    }
+}

@@ -42,3 +42,12 @@ control.log
 server/target-verify/
 *.tmp.json
 *.bak-preimport
+
+# 稼働状態（ローカルのみ・追加）
+copilot-done.json
+incidents.json
+
+# 作業用スクラッチ
+tools/_*
+target-verify/
+my-office-agent/

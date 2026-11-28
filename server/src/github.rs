@@ -69,3 +69,10 @@ pub async fn issue_comment(repo_dir: &Path, slug: &str, number: u64, body: &str)
     .await?;
     Ok(())
 }
+
+/// Issue をクローズ（完了報告後の締め。失敗は呼出側で conlog のみ）
+pub async fn issue_close(repo_dir: &Path, slug: &str, number: u64) -> Result<(), String> {
+    let n = number.to_string();
+    gh(&["issue", "close", &n, "--repo", slug], Some(repo_dir)).await?;
+    Ok(())
+}

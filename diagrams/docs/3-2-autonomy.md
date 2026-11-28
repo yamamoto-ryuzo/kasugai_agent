@@ -26,7 +26,7 @@ flowchart TB
     G -->|承認| R[dispatch<br/>runner = 接続AI]
     R --> V[verify L0〜L4<br/>実機検証・証跡・push]
     V -->|NG 差し戻し<br/>（保留 → 処理再開・再起動で再送）| R
-    V -->|合格| K[learn<br/>SKILL 蓄積 → .devin/skills/<br/>（draft・mermaid 図を必ず明示）]
+    V -->|合格| K[learn<br/>SKILL 蓄積 → .agents/skills/<br/>（draft・mermaid 図を必ず明示）]
     K --> P[proposals<br/>skills / prompts / config]
     P --> G
     G -->|採用| SELF[agent 自身を更新]
@@ -35,13 +35,13 @@ flowchart TB
 
 | 段階 | 内容 |
 |---|---|
-| detect | detector（github-issues / ci-failure / local-health / manual-chat）が課題候補を emit |
+| detect | detector（github-issues / ci-failure / local-health / spec-drift / session-watch / unattributed-work / manual-chat）が課題候補を emit |
 | normalize/dedupe | 統一 candidate 形式に正規化し `source+repo+symptomHash` で重複排除 |
 | assess | 課題の性質と検証深度（verifyLevel L0〜L4）を決定 |
 | gate | dispatch（対応）判断・external 起票承認・proposal 採否・push 可否など人だけが越えられる判定地点 |
 | dispatch | runner（接続AI 実行体）に実装を委譲。起動は ISSUES 一覧の「対応」ボタンによる人判断のみ（自動起動しない） |
 | verify | 実機起動・証跡採取・push 可否。NG なら差し戻し prompt を保留し、処理再開・再起動時の自動再処理で retry へ（上限到達は要人対応） |
-| learn | 結果・証跡を SKILL（draft・mermaid 図必須）として `.devin/skills/` へ蓄積し proposals を生成 |
+| learn | 結果・証跡を SKILL（draft・mermaid 図必須）として `.agents/skills/` へ蓄積し proposals を生成 |
 
 LOOP が「要」なのは、これが**自律性そのもの**だからです。
 
@@ -63,12 +63,12 @@ LOOP が「要」なのは、これが**自律性そのもの**だからです�
 title: detector 沈黙検知（meta 監視台帳）
 ---
 flowchart LR
-    POLL[spawn_detector_poller<br/>issues / ciFailure /<br/>specDrift / health<br/>pollSeconds.&lt;kind&gt; 周期] --> RUN[poll 実行<br/>返却 = 実行成功<br/>panic/タスク死は記録停止]
+    POLL[spawn_detector_poller<br/>issues / ciFailure / specDrift /<br/>health / sessionWatch /<br/>unattributedWork<br/>pollSeconds.&lt;kind&gt; 周期] --> RUN[poll 実行<br/>返却 = 実行成功<br/>panic/タスク死は記録停止]
     RUN --> LED[detector_health.rs 台帳<br/>detector-health.json<br/>lastRunAt = 毎回更新<br/>lastEmitAt = candidates 1件以上<br/>の時のみ更新<br/>firstSeenAt / runs / emits]
     RUN --> ING[detectors::ingest<br/>検出候補を intake へ]
     LED --> CHK{沈黙判定<br/>detectorSilentMinutes<br/>既定30・&lt;=0 で無効}
     CHK -->|lastRunAt が停滞<br/>= poller 死亡・クラッシュ<br/>・起動失敗| STOP[detector 停止として emit<br/>kind=detector-stopped<br/>hash=detector-stopped:&lt;kind&gt;]
-    CHK -->|lastRunAt は新しいが<br/>lastEmitAt が停滞<br/>= 実行継続・検出0件| SIL[detector 沈黙として emit<br/>kind=detector-silent<br/>hash=detector-silent:&lt;kind&gt;<br/>未 emit は firstSeenAt 起点]
+    CHK -->|lastRunAt は新しいが<br/>lastEmitAt が停滞<br/>= 実行継続・検出0件<br/>※watch 系（sessionWatch /<br/>unattributedWork）は emit 無しが<br/>正常状態のため沈黙判定を免除<br/>（stopped 判定は全 kind で有効）| SIL[detector 沈黙として emit<br/>kind=detector-silent<br/>hash=detector-silent:&lt;kind&gt;<br/>未 emit は firstSeenAt 起点]
     CHK -->|閾値内| OK[正常<br/>lastRunAt ≠ lastEmitAt で<br/>0件検出・正常 と<br/>detector 停止・異常 を区別]
     STOP --> META[source=local-health の<br/>meta candidate として ingest<br/>通常の intake 経路で起票]
     SIL --> META

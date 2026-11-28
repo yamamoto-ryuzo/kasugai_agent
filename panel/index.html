@@ -55,6 +55,10 @@
   .sec { margin-bottom: 14px; break-inside: avoid; }
   .sec h3 { margin: 0 0 6px; font-size: 12px; color: #6b7280; letter-spacing: .04em;
             text-transform: uppercase; }
+  .sec .sechead { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 6px; }
+  .sec .sechead h3 { margin: 0; }
+  .secact { font-size: 11px; padding: 1px 8px; }
+  .secact:disabled { opacity: .5; }
   .card { border: 1px solid #e5e7eb; border-radius: 8px; padding: 8px 10px; font-size: 12px; }
   .kv { display: flex; justify-content: space-between; gap: 10px; margin: 3px 0; }
   .kv span { color: #6b7280; }
@@ -83,6 +87,8 @@
   .pill.ctx { background: #e0f2fe; color: #075985; min-width: 0; }
   .pill.prio { background: #fee2e2; color: #b91c1c; min-width: 0; }
   .pill.def { background: #f1f5f9; color: #475569; min-width: 0; }
+  .pill.gh { background: #24292f; color: #fff; min-width: 0; text-decoration: none; }
+  a.pill.gh:hover { background: #1f2328; }
   /* ヘッダの親子リンク（子→親 / 親→子） */
   #plink a { color: #a21caf; font-size: 12px; margin-right: 8px; cursor: pointer; }
   /* ---- トレース waterfall（ISSUES 詳細。trace-waterfall.mmd） ---- */
@@ -164,6 +170,14 @@
   .rset input[type="text"] { font-size: 12px; padding: 3px 6px;
            border: 1px solid #d1d5db; border-radius: 6px; width: 8em; }
   .rset input.wide { width: 22em; }
+  /* ---- 開発環境ビューのログ末尾 ---- */
+  .devlog { margin: 8px 0 0; padding: 6px 8px; background: #f3f4f6;
+           border-radius: 6px; font-size: 11px; line-height: 1.4;
+           max-height: 160px; overflow-y: auto; overflow-x: hidden;
+           white-space: pre-wrap; overflow-wrap: anywhere; color: #374151; }
+  /* ---- エージェントセッションのカンバン（列・カードは処理状況の
+     .bcol/.bcard 構造を再利用） ---- */
+  .bcard.sel { border-color: #3b82f6; box-shadow: 0 0 0 1px #3b82f6; }
   /* ---- 設定ビューのグループタブ（接続AI / リポジトリ / システム） ---- */
   .stabs { display: flex; gap: 4px; margin-bottom: 12px;
            border-bottom: 1px solid #e5e7eb; max-width: 720px; }
@@ -365,13 +379,14 @@
       title="カレントリポジトリ（全ペインのスコープ）" data-i18n-attr="title:repo.current.tip"></select>
   </div>
   <div class="mnav">
-    <button id="nav-status" onclick="showStatus()" title="進行中のチャットを中央ペインで一覧" data-i18n="nav.status" data-i18n-attr="title:nav.status.tip">処理状況</button>
+    <button id="nav-sessions" onclick="showSessions()" title="Devin/Copilot セッションの状況と維持を中央ペインで開く" data-i18n="nav.sessions" data-i18n-attr="title:nav.sessions.tip">セッション</button>
+    <button id="nav-metrics" onclick="showMetrics()" title="KPI ダッシュボードを中央ペインで表示" data-i18n="nav.metrics" data-i18n-attr="title:nav.metrics.tip">メトリクス</button>
     <button id="nav-chats" onclick="sideView('chats')" title="ドキュメント/ツリー表示を閉じてチャットに戻る" data-i18n="nav.chats" data-i18n-attr="title:nav.chats.tip">AIチャット</button>
     <button id="nav-editor" onclick="sideView('editor')" title="カレント repo のフォルダツリーを右ペインで開く" data-i18n="nav.editor" data-i18n-attr="title:nav.editor.tip">エディター</button>
     <button id="nav-agents" onclick="sideView('agents')" title="agent定義・ルール文書を右ペインで開く" data-i18n="nav.agents" data-i18n-attr="title:nav.agents.tip">AGENTS</button>
     <button id="nav-skills" onclick="sideView('skills')" title="SKILL.md 一覧を右ペインで開く" data-i18n="nav.skills" data-i18n-attr="title:nav.skills.tip">SKILL</button>
     <button id="nav-manual" onclick="showManual()" title="docs/ のマニュアルサイトを中央ペインで開く" data-i18n="nav.manual" data-i18n-attr="title:nav.manual.tip">マニュアル</button>
-    <button id="nav-metrics" onclick="showMetrics()" title="KPI ダッシュボードを中央ペインで表示" data-i18n="nav.metrics" data-i18n-attr="title:nav.metrics.tip">メトリクス</button>
+    <button id="nav-dev" onclick="showDev()" title="登録した開発環境の起動・停止を中央ペインで管理" data-i18n="nav.devenv" data-i18n-attr="title:nav.devenv.tip">開発環境</button>
     <button id="nav-settings" onclick="showSettings()" title="監視リポジトリの設定を中央ペインで開く" data-i18n="nav.settings" data-i18n-attr="title:nav.settings.tip">設定</button>
     <hr class="nsep">
     <button id="nav-commit" onclick="gitCommit()" title="カレント repo の全変更をローカルコミット（git add -A && git commit）" data-i18n="nav.commit" data-i18n-attr="title:nav.commit.tip">コミット</button>
@@ -458,8 +473,8 @@
   <div id="treebox" style="display:none"></div>
   <div id="mgmtbox">
     <div class="sec"><h3 data-i18n="mgmt.loopState">loop state</h3><div id="mstate" class="card">...</div></div>
-    <div class="sec"><h3 data-i18n="mgmt.candidates" data-tip="detector が検出した課題候補（起票されると issue になる）" data-i18n-attr="data-tip:cand.sec.tip">candidates</h3><div id="mcands" class="card">...</div></div>
-    <div class="sec"><h3 data-i18n="mgmt.issues">issues</h3><div id="missues" class="card">...</div></div>
+    <div class="sec"><div class="sechead"><h3 data-i18n="mgmt.candidates" data-tip="detector が検出した課題候補（起票されると issue になる）" data-i18n-attr="data-tip:cand.sec.tip">candidates</h3><button id="cand-dispatch-all" class="secact" onclick="candDispatchAll()">一括対応</button></div><div id="mcands" class="card">...</div></div>
+    <div class="sec"><div class="sechead"><h3 data-i18n="mgmt.issues">issues</h3><button id="iss-dispatch-all" class="secact" onclick="issueDispatchAll()">一括対応</button></div><div id="missues" class="card">...</div></div>
     <div class="sec"><h3 data-i18n="mgmt.proposals">proposals</h3><div id="mprops" class="card">...</div></div>
   </div>
 </div>
@@ -728,7 +743,9 @@ const Viewer = {
 // ---------- カレントリポジトリ（左ペインの選択が全表示のスコープ） ----------
 let repoScope = localStorage.getItem('kasugai:repo') || '';   // '' は repos 未設定時のみ
 const repoSlugOf = (r) => typeof r === 'string' ? r : (r?.slug ?? r?.github ?? '');
-const matchRepo = (r) => !repoScope || repoSlugOf(r) === repoScope;
+// repo 未所属の chat（外部セッション attach で cwd が登録 repo 外）は
+// スコープ不問で表示する。絞りたければ所属 repo へ切替えて見る
+const matchRepo = (r) => !repoScope || !repoSlugOf(r) || repoSlugOf(r) === repoScope;
 const repoQuery = () => repoScope ? '?repo=' + encodeURIComponent(repoScope) : '';
 // slug → [owner, name]（'/' 無しは owner=''）。owner/repo の2セレクトで選択
 const splitSlug = (s) => {
@@ -1184,7 +1201,7 @@ async function chatRestore() {
 }
 
 // ---------- 中央ペインの表示モード（chat / doc / status / settings / manual / proposal / candidate / issue） ----------
-let centerMode = 'chat';            // 'chat' | 'doc' | 'status' | 'settings' | 'manual' | 'proposal' | 'candidate' | 'issue'
+let centerMode = 'chat';            // 'chat' | 'doc' | 'status' | 'metrics' | 'settings' | 'manual' | 'sessions' | 'proposal' | 'candidate' | 'issue'
 
 // ---------- 処理状況（中央ペイン: 状態別カンバン列） ----------
 // 列定義: [key, pill の色クラス, 表示名]。chat は現在地の列へカードとして置く。
@@ -1320,6 +1337,8 @@ async function showStatus() {
     const k = statusKey(s);
     return k === 'resume' || (k === 'idle' && s.agentType === 'acp');
   });
+  // スリープ中（resumable: acp・proc無・savedSessionId有）の件数
+  const sleeping = list.filter((s) => s.resumable && !s.busy && !s.waiting && !s.needsHuman);
   // 空列は .empty（半分幅）、2件以上は .many + 件数比例の flex-grow で
   // 広げ、カードを多段グリッドにする（幅不足時は auto-fill で1列に戻る）
   const col = ([k, pill, name]) => {
@@ -1339,6 +1358,9 @@ async function showStatus() {
     `<button onclick="boardResumeAll(${stopped.length})"${stopped.length ? '' : ' disabled'}` +
     ` title="${esc(t('board.resumeAll.tip'))}">${esc(t('board.resumeAll.btn'))}` +
     (stopped.length ? ` (${stopped.length})` : '') + `</button>` +
+    `<button onclick="boardStartSuspended(${sleeping.length})"${sleeping.length ? '' : ' disabled'}` +
+    ` title="${esc(t('board.startSusp.tip'))}">${esc(t('board.startSusp.btn'))}` +
+    (sleeping.length ? ` (${sleeping.length})` : '') + `</button>` +
     `<span class="muted">${esc(t('board.resumeAll.note'))}</span></div>` +
     `<div id="board">${STATUS_COLS.map(col).join('')}</div></div>`;
   document.getElementById('box').scrollTop = 0;
@@ -1350,6 +1372,7 @@ const scheduleStatus = () => {
   // 発火時にも status 表示中か確認（予約後に chat 画面等へ戻っていたら再描画しない）
   statT = setTimeout(() => { if (centerMode === 'status') showStatus(); }, 300);
 };
+
 // ---------- メトリクス（KPI ダッシュボード。metrics.mmd・README §5.12） ----------
 // /api/metrics の応答を描画する。成功=verify 通過・push 済みで厳密化済み
 // （server 側で集計。パネルは表示のみ・カレント repo 絞込はしない）
@@ -1441,6 +1464,17 @@ async function boardResumeAll(n) {
     verify: r.verify || 0, released: r.released || 0 }));
   if (centerMode === 'status') showStatus();
 }
+// ボード上部の「スリープ起動」: スリープ中セッションを一括起動
+// （POST /api/chat/start-suspended。session/load のみ・prompt 無し、
+// 同時起動枠の超過分はスリープのまま残る）
+async function boardStartSuspended(n) {
+  if (!n || !confirm(t('board.startSusp.confirm', { count: n }))) return;
+  const r = await J('POST', '/api/chat/start-suspended', {});
+  if (!r.ok) { alert(t('alert.resumeFail', { error: r.error || '' })); return; }
+  alert(t('board.startSusp.result', {
+    started: r.started || 0, skipped: r.skipped || 0, failed: r.failed || 0 }));
+  if (centerMode === 'status') showStatus();
+}
 // 検証列カードの「検証」で実機検証ターンを起動（POST /api/chat/verify）
 async function boardVerify(id) {
   const r = await J('POST', '/api/chat/verify', { id });
@@ -1477,8 +1511,8 @@ async function gitPush() {
 }
 
 // ---------- 設定（中央ペイン: 接続AI + 監視リポジトリ一覧・編集） ----------
-// GET /api/repos は config.repos 登録済み + IDEワークスペース直下の .git
-// ディレクトリ（IDE管理下）+ ユーザーリポジトリ（ワークスペース/repoScanDirs
+// GET /api/repos は config.repos 登録済み + ワークスペース直下の .git
+// ディレクトリ（ワークスペース管理下）+ ユーザーリポジトリ（ワークスペース/repoScanDirs
 // 直下の .git 無し dir・ユーザーディレクトリ/repoScanDirs 直下の .git dir。
 // GitHub 非依存）を返す。カレントrepo選択では絞らず全件表示する。
 // GET /api/chat-agents は config.chatAgents/chatAgent（ACP 実行体の台帳）を返す
@@ -1498,7 +1532,7 @@ let setTab = localStorage.getItem('kasugai:settab') || 'agents';  // agents|repo
 // リポジトリタブ内のサブタブ選択（GitHub owner / 'user' / 'local'）
 let repoTab = localStorage.getItem('kasugai:repotab') || '';
 // 一覧行のグループ key: slug に owner があればその owner、
-// 無ければ user 検出は 'user'、その他（IDE管理下等）は 'local'（owner なし）
+// 無ければ user 検出は 'user'、その他（ワークスペース管理下等）は 'local'（owner なし）
 const repoGroupKey = (e) =>
   splitSlug(e.slug || '')[0] || (e.user ? 'user' : 'local');
 const repoGroupLabel = (g) =>
@@ -1550,6 +1584,223 @@ function showManual() {
   box.innerHTML = '<iframe class="htmlprev" src="/docs/"' +
     ' sandbox="allow-scripts allow-same-origin allow-popups"></iframe>';
 }
+// ---------- エージェントセッション管理（共通テンプレ・カンバン。
+// agent-sessions.mmd・README §7） ----------
+// ナビは「セッション」1本。内情はエージェントタブ（Devin/Copilot）で詳細化し、
+// ボタン体系は統一（再読込・一括削除・掃除・VACUUM・完了・削除）。
+// 列は turn の和集合から動的生成（空列は出さない）。caps で非対応操作を隠す。
+const AGENT_ENVS = {
+  devin:   { api: '/api/devin-sessions',   label: 'Devin'   },
+  copilot: { api: '/api/copilot-sessions', label: 'Copilot' },
+};
+const KAN_COLS = [ // 表示順。key=turn 値
+  ['working', 'env.turn.working'], ['answered', 'env.turn.answered'],
+  ['interrupted', 'env.turn.interrupted'], ['closed', 'env.turn.closed'],
+  ['unknown', 'env.turn.unknown'],
+];
+let sessAgent = 'devin';   // 現在のエージェントタブ（セッション固定）
+async function showSessions() {
+  centerMode = 'sessions';
+  const agent = AGENT_ENVS[sessAgent] ? sessAgent : 'devin';
+  const cfg = AGENT_ENVS[agent];
+  const j = await J('GET', cfg.api);
+  if (centerMode !== 'sessions') return;
+  curDoc = null; curPropId = null; curItemKey = null;
+  document.getElementById('main').classList.add('doc');
+  document.getElementById('box').classList.remove('htmlview');
+  document.getElementById('viewsw').style.display = 'none';
+  renderSide();
+  document.getElementById('ctitle').textContent = t('nav.sessions');
+  const st = document.getElementById('status');
+  const tabs = Object.keys(AGENT_ENVS).map((a) =>
+    `<button class="stab${a === agent ? ' active' : ''}"` +
+    ` onclick="sessTab('${a}')">${esc(AGENT_ENVS[a].label)}</button>`
+  ).join('');
+  if (!j.ok || j.installed === false) {
+    st.textContent = '';
+    document.getElementById('box').innerHTML =
+      `<div id="boardwrap"><div class="btools">` +
+    `<span class="stabs sub" style="margin-bottom:0">${tabs}</span>` +
+    `</div>` +
+      `<div class="empty">${esc(j.error || t('env.notInstalled'))}</div></div>`;
+    return;
+  }
+  const caps = j.caps || { vacuum: j.db ? true : false, done: false };
+  const store = j.db || j.store || {};
+  const c = j.counts || {};
+  const sz = (b) => b >= 1 << 30 ? (b / (1 << 30)).toFixed(2) + ' GB'
+    : b >= 1 << 20 ? (b / (1 << 20)).toFixed(1) + ' MB'
+    : b >= 1024 ? (b / 1024).toFixed(0) + ' KB' : (b || 0) + ' B';
+  st.textContent =
+    `sessions ${c.sessions ?? 0} · live ${c.live ?? 0} · ` +
+    `${t('env.sleeping')} ${c.sleeping ?? 0} · ${sz(store.bytes)}`;
+  const rows = (j.sessions || []).sort((a, b) =>
+    String(b.lastActivityAt || '').localeCompare(String(a.lastActivityAt || '')));
+  const sleeping = rows.filter((s) => !s.live);
+  sessRows = rows;                 // 詳細描画用に保持
+  // 処理状況ボードと同じ簡素カード（クリックで詳細を右ペインへ）
+  const card = (s) =>
+    `<div class="bcard" data-sid="${esc(s.id)}"` +
+    ` onclick="sessPick('${esc(s.id)}')">` +
+    `<div><b>${esc(s.title || s.id)}</b>` +
+    (caps.done ? (s.done
+      ? ` <a onclick="event.stopPropagation();envUndone('${agent}','${esc(s.id)}')"` +
+        ` title="${esc(t('env.restore'))}" style="cursor:pointer">↩</a>`
+      : ` <a onclick="event.stopPropagation();envDone('${agent}','${esc(s.id)}')"` +
+        ` title="${esc(t('env.markDone'))}"${s.live ? ' style="display:none"' : ''}` +
+        ` style="cursor:pointer">✓</a>`) : '') +
+    `</div>` +
+    `<div>${s.live ? `<span class="pill live">${esc(t('env.live'))}</span>`
+      : `<span class="pill">${esc(t('env.sleeping'))}</span>`}` +
+    `${s.hidden ? ` <span class="pill wait">${esc(t('env.hidden'))}</span>` : ''}` +
+    `${(s.badges || []).map((b) => ` <span class="pill">${esc(b)}</span>`).join('')}` +
+    `${s.failedTools ? ` <span class="pill unres" title="${esc(t('env.turn.failed.tip'))}">` +
+      `${esc(t('env.turn.failed', { count: s.failedTools }))}</span>` : ''}</div>` +
+    `<div class="muted">${esc(fmtTs(s.lastActivityAt))}</div></div>`;
+  // 列: turn の和集合＋完了列（caps.done の時）。空列は半分幅で残す
+  const cols = KAN_COLS.map(([k, label]) => ({
+    key: k, label,
+    items: rows.filter((s) => !s.done && (s.turn || 'unknown') === k),
+  }));
+  if (caps.done) cols.push({
+    key: 'done', label: 'env.tab.done',
+    items: rows.filter((s) => s.done),
+  });
+  const colHtml = (col) => {
+    const n = col.items.length;
+    const cls = n === 0 ? ' empty' : n >= 2 ? ' many' : '';
+    const grow = n >= 2 ? ` style="flex-grow:${Math.min(n, 4)}"` : '';
+    return `<div class="bcol${cls}"${grow}>` +
+      `<div class="bhead"><span class="pill">${esc(t(col.label))}</span>` +
+      `<span class="n">${n}</span></div>` +
+      `<div class="bcards">${col.items.map(card).join('') || ''}</div></div>`;
+  };
+  const orphanN = (c.orphanLocks ?? 0) + (c.orphanSummaries ?? 0) +
+    (c.orphanStates ?? 0);
+  document.getElementById('box').innerHTML =
+    `<div id="boardwrap"><div class="btools">` +
+    `<span class="stabs sub" style="margin-bottom:0">${tabs}</span>` +
+    `<button onclick="showSessions()">${esc(t('mgmt.reload'))}</button>` +
+    `<button onclick="envDelAll('${agent}',${sleeping.length})"` +
+    `${sleeping.length ? '' : ' disabled'}` +
+    ` title="${esc(t('env.delSleeping.tip'))}">${esc(t('env.delSleeping'))}` +
+    (sleeping.length ? ` (${sleeping.length})` : '') + `</button>` +
+    `<button onclick="envCleanup('${agent}')">${esc(t('env.cleanup'))}` +
+    ` (${orphanN})</button>` +
+    (caps.vacuum ? `<button onclick="envVacuum('${agent}')"` +
+      ` title="${esc(t('env.vacuum.tip'))}">` +
+      `${esc(t('env.vacuum'))} (${sz(store.bytes)})</button>` : '') +
+    `<span class="muted">${esc(t('env.orphans'))}: ` +
+    `lock ${c.orphanLocks ?? 0}` +
+    (c.orphanSummaries != null ? ` / summary ${c.orphanSummaries}` : '') +
+    (c.orphanStates != null ? ` / state ${c.orphanStates}` : '') +
+    ` · ${esc(j.dir || '')}</span></div>` +
+    `<div id="board">${cols.map(colHtml).join('')}</div></div>`;
+  document.getElementById('box').scrollTop = 0;
+}
+function sessTab(a) { sessAgent = a; showSessions(); }
+let sessRows = [];
+// カードクリック = そのセッションを kasugai chat として開く
+// （/attach が saved_session_id 付き chat を作り、初回送信時に
+// ACP session/load で実セッションへ接続。トランスクリプトは履歴に流し込み済み）
+async function sessPick(id) {
+  const j = await J('POST', `${AGENT_ENVS[curEnvAgent()].api}/attach`, { id });
+  if (!j.ok) { alert(j.error || 'error'); return; }
+  boardOpen(j.id, j.repo);   // 所属 repo へスコープ切替してAIチャットビューへ
+}
+function curEnvAgent() { return sessAgent; }
+// スリープ中（live 以外）を一括削除。不可逆なので確認を挟む
+async function envDelAll(agent, n) {
+  if (!n || !confirm(t('env.delAll.confirm', { count: n }))) return;
+  const j = await J('GET', AGENT_ENVS[agent].api);
+  const ids = (j.sessions || []).filter((s) => !s.live).map((s) => s.id);
+  if (!ids.length) { if (centerMode === 'sessions') showSessions(); return; }
+  const r = await J('POST', `${AGENT_ENVS[agent].api}/delete`, { ids });
+  if (!r.ok) alert(r.error || 'error');
+  if (centerMode === 'sessions') showSessions();
+}
+async function envCleanup(agent) {
+  const j = await J('POST', `${AGENT_ENVS[agent].api}/cleanup`);
+  if (!j.ok) alert(j.error || 'error');
+  if (centerMode === 'sessions') showSessions();
+}
+async function envVacuum(agent) {
+  if (!confirm(t('env.vacuum.confirm'))) return;
+  const j = await J('POST', `${AGENT_ENVS[agent].api}/vacuum`);
+  if (!j.ok) alert(j.error || 'error');
+  if (centerMode === 'sessions') showSessions();
+}
+async function envDone(agent, id) {
+  const j = await J('POST', `${AGENT_ENVS[agent].api}/done`, { ids: [id] });
+  if (!j.ok) alert(j.error || 'error');
+  if (centerMode === 'sessions') showSessions();
+}
+async function envUndone(agent, id) {
+  const j = await J('POST', `${AGENT_ENVS[agent].api}/undone`, { ids: [id] });
+  if (!j.ok) alert(j.error || 'error');
+  if (centerMode === 'sessions') showSessions();
+}
+// ---------- 開発環境（dev-envs。dev-envs.mmd・README §8） ----------
+// config.devEnvironments の起動・停止・状態表示。起動は control が
+// detached spawn（出力は logs/devenv-<id>.log）し、状態は port の応答で判定
+async function showDev() {
+  centerMode = 'dev';
+  const j = await J('GET', '/api/dev-envs');
+  if (centerMode !== 'dev') return;
+  curDoc = null; curPropId = null; curItemKey = null;
+  document.getElementById('main').classList.add('doc');
+  document.getElementById('box').classList.remove('htmlview');
+  document.getElementById('viewsw').style.display = 'none';
+  renderSide();
+  document.getElementById('ctitle').textContent = t('nav.devenv');
+  const st = document.getElementById('status');
+  if (!j.ok) {
+    st.textContent = '';
+    document.getElementById('box').innerHTML =
+      `<div class="empty">${esc(j.error || 'error')}</div>`;
+    return;
+  }
+  const envs = j.envs || [];
+  st.textContent = `${envs.filter((e) => e.alive).length}/${envs.length} ${t('devenv.running')}`;
+  const card = (e) => {
+    const state = e.alive
+      ? `<span class="pill live">${esc(t('devenv.alive'))}</span>`
+      : `<span class="pill">${esc(t('devenv.stopped'))}</span>`;
+    const log = e.log
+      ? `<pre class="devlog">${esc(e.log)}</pre>` : '';
+    return `<div class="rcard">` +
+      `<div><b>${esc(e.label)}</b> ${state}` +
+      (e.port ? ` <span class="pill">:${e.port}</span>` : '') + `</div>` +
+      `<div class="muted">${esc(e.command)} · ${esc(e.cwd)}</div>` +
+      `<div class="rset">` +
+      `<button class="primary" onclick="devLaunch('${esc(e.id)}')"` +
+      `${e.alive ? ' disabled' : ''}>${esc(t('devenv.launch'))}</button>` +
+      `<button onclick="devStop('${esc(e.id)}')"` +
+      `${e.alive && e.port ? '' : ' disabled'}>${esc(t('devenv.stop'))}</button>` +
+      `<button onclick="window.open('${esc(e.url)}','_blank')">` +
+      `${esc(t('devenv.open'))}</button>` +
+      `</div>${log}</div>`;
+  };
+  document.getElementById('box').innerHTML =
+    `<div id="boardwrap"><div class="btools">` +
+    `<button onclick="showDev()">${esc(t('mgmt.reload'))}</button>` +
+    `</div>` +
+    (envs.map(card).join('') ||
+      `<div class="empty">${esc(t('devenv.empty'))}</div>`) +
+    `</div>`;
+  document.getElementById('box').scrollTop = 0;
+}
+async function devLaunch(id) {
+  const j = await J('POST', '/api/dev-envs/launch', { id });
+  if (!j.ok) alert(j.error || 'error');
+  if (centerMode === 'dev') showDev();
+}
+async function devStop(id) {
+  if (!confirm(t('devenv.stop.confirm', { id }))) return;
+  const j = await J('POST', '/api/dev-envs/stop', { id });
+  if (!j.ok) alert(j.error || 'error');
+  if (centerMode === 'dev') showDev();
+}
 // タブ切替は再取得せず保持済みの行データで描き直す（選択は永続化）
 function setSettingsTab(t) {
   setTab = t;
@@ -1566,7 +1817,7 @@ function renderSettings() {
   const base = (p) => String(p).replace(/\\/g, '/').replace(/\/+$/, '').split('/').pop();
   const card = (e, i) => {
     const badges =
-      (e.ide ? `<span class="pill live">${esc(t('repo.ide'))}</span>` : '') +
+      (e.ws ? `<span class="pill live">${esc(t('repo.ws'))}</span>` : '') +
       (e.user ? `<span class="pill">${esc(t('repo.user'))}</span>` : '') +
       (e.registered ? `<span class="pill">${esc(t('repo.registered'))}</span>`
                     : `<span class="pill wait">${esc(t('repo.unregistered'))}</span>`);
@@ -1577,7 +1828,7 @@ function renderSettings() {
         `<label><input type="checkbox" id="r-pa-${i}"${e.requirePushApproval ? ' checked' : ''}>requirePushApproval</label>` +
         `<button class="primary" onclick="saveRepo(${i})">${esc(t('common.save'))}</button>` +
         `<button onclick="removeRepo(${i})">${esc(t('repo.unregister'))}</button></div>`
-      : `<div class="rset"><button class="primary" onclick="regIdeRepo(${i})">${esc(t('repo.watch'))}</button></div>`;
+      : `<div class="rset"><button class="primary" onclick="regWsRepo(${i})">${esc(t('repo.watch'))}</button></div>`;
     return `<div class="rcard">` +
       `<div><b>${esc(e.slug ?? base(e.path))}</b> ${badges}${cur}</div>` +
       `<div class="muted">${esc(e.path)}</div>${body}</div>`;
@@ -1668,6 +1919,29 @@ function renderSettings() {
       : `<button class="primary" onclick="autostartSet(true)">${esc(t('autostart.install'))}</button>`) +
     `</div>` +
     `<div class="muted">${esc(t('autostart.note'))}</div></div>`;
+  // 課題の処理方法カード（issueExecMode・run-control.mmd）:
+  // parallel（既定）= 同一 repo の課題も通常 chat と同じく並列起動 /
+  // direct = 同一 repo の active 課題がある間 dispatch を止める直列。
+  // maxConcurrentRuns の全体クォーラムは両モードで有効
+  const iem = sysState.issueExecMode || 'parallel';
+  const issueModeCard =
+    `<div class="rcard"><b>${esc(t('issuemode.title'))}</b>` +
+    `<div class="rset"><select id="issue-mode">` +
+    `<option value="parallel"${iem === 'parallel' ? ' selected' : ''}>${esc(t('exmode.parallel'))}</option>` +
+    `<option value="direct"${iem === 'direct' ? ' selected' : ''}>${esc(t('exmode.direct'))}</option>` +
+    `</select>` +
+    `<button class="primary" onclick="saveIssueMode()">${esc(t('common.save'))}</button></div>` +
+    `<div class="muted">${esc(t('issuemode.note'))}</div></div>`;
+  // 同時起動セッション数カード（maxConcurrentSessions・chat-sequence.mmd）:
+  // ACP 実行体を保持する chat の同時数上限。0=無制限
+  const mcs = sysState.maxConcurrentSessions ?? 3;
+  const sessLimitCard =
+    `<div class="rcard"><b>${esc(t('sesslimit.title'))}</b>` +
+    `<div class="rset"><input type="number" id="sess-limit" min="0" max="64" step="1"` +
+    ` value="${esc(String(mcs))}" style="width:72px"` +
+    ` onkeydown="if(event.key==='Enter')saveSessLimit()">` +
+    `<button class="primary" onclick="saveSessLimit()">${esc(t('common.save'))}</button></div>` +
+    `<div class="muted">${esc(t('sesslimit.note'))}</div></div>`;
   // 時刻表示カード（IANA タイムゾーン名。空欄=ブラウザ既定）
   const tzCard =
     `<div class="rcard"><b>${esc(t('tz.title'))}</b>` +
@@ -1727,7 +2001,7 @@ function renderSettings() {
             .join('') + `</div>`
         : `<div class="empty">${esc(t('repo.none'))}</div>`)
     : setTab === 'system'
-      ? sysCard + autoCard + tzCard + assetCardHtml + silencesCard()
+      ? sysCard + autoCard + issueModeCard + sessLimitCard + tzCard + assetCardHtml + silencesCard()
       : agentReg + (agentRows.length
           ? agentRows.map(acard).join('') : `<div class="empty">${esc(t('agent.none'))}</div>`);
   document.getElementById('box').innerHTML = tabbar + body;
@@ -1834,6 +2108,23 @@ async function silRemove(id) {
   const r = await J('POST', '/api/silences/remove', { id });
   if (!r.ok) { alert(t('alert.fail', { error: r.error || '' })); return; }
   await silRefresh();
+}
+// 課題の処理方法（issueExecMode）の保存: POST /api/control/issue-mode
+async function saveIssueMode() {
+  const mode = document.getElementById('issue-mode')?.value || 'parallel';
+  const r = await J('POST', '/api/control/issue-mode', { mode });
+  if (!r.ok) { alert(t('alert.fail', { error: r.error || '' })); return; }
+  sysState.issueExecMode = r.issueExecMode;
+  if (centerMode === 'settings' && setTab === 'system') renderSettings();
+}
+// 同時起動セッション数（maxConcurrentSessions）の保存: POST /api/control/session-limit
+async function saveSessLimit() {
+  const v = document.getElementById('sess-limit')?.value;
+  const max = Math.max(0, parseInt(v || '5', 10) || 0);
+  const r = await J('POST', '/api/control/session-limit', { max });
+  if (!r.ok) { alert(t('alert.fail', { error: r.error || '' })); return; }
+  sysState.maxConcurrentSessions = r.maxConcurrentSessions;
+  if (centerMode === 'settings' && setTab === 'system') renderSettings();
 }
 async function assetsCheck() {
   const r = await J('POST', '/api/assets/check', {});
@@ -1971,7 +2262,7 @@ async function removeRepo(i) {
   if (!r.ok) { alert(t('alert.removeFail', { error: r.error || '' })); return; }
   showSettings();
 }
-async function regIdeRepo(i) {
+async function regWsRepo(i) {
   const e = repoRows[i];
   if (!e) return;
   const r = await J('POST', '/api/repos', { path: e.path });
@@ -2088,11 +2379,13 @@ function renderSide() {
   for (const m of ['chats', 'editor', 'agents', 'skills'])
     document.getElementById('nav-' + m).classList.toggle('active',
       sideMode === m && centerMode !== 'status' && centerMode !== 'settings'
-        && centerMode !== 'manual' && centerMode !== 'metrics');
-  document.getElementById('nav-status').classList.toggle('active', centerMode === 'status');
+        && centerMode !== 'manual' && centerMode !== 'metrics'
+        && centerMode !== 'sessions' && centerMode !== 'dev');
   document.getElementById('nav-settings').classList.toggle('active', centerMode === 'settings');
   document.getElementById('nav-manual').classList.toggle('active', centerMode === 'manual');
   document.getElementById('nav-metrics').classList.toggle('active', centerMode === 'metrics');
+  document.getElementById('nav-sessions').classList.toggle('active', centerMode === 'sessions');
+  document.getElementById('nav-dev').classList.toggle('active', centerMode === 'dev');
   // 右ペインは常時表示。doc browser / ツリーに出すものがない時（chats モード）は
   // 管理セクション（loop state / candidates / issues / proposals）を表示する
   // （chat の切替は処理状況ボード、新規はヘッダ/ボードの＋新規チャットで行う）
@@ -2109,6 +2402,8 @@ function renderSide() {
   // agents モードは参照行を doclist へ統合するため reflist は使わない
   document.getElementById('reflist').style.display =
     doc && sideMode !== 'agents' && sideMode !== 'editor' && refs.length ? '' : 'none';
+  document.getElementById('mgmthead').style.display =
+    doc ? 'none' : 'flex';
   document.getElementById('mgmtbox').style.display = doc ? 'none' : '';
   if (!doc) { evalTip(); return; }
   document.getElementById('doctitle').textContent =
@@ -2398,6 +2693,25 @@ const dfPill = (c) => {
 };
 // data-tip 用に長文を丸める（ホバーポップアップが巨大化しないよう打切り）
 const tipText = (s, n = 800) => { s = String(s || '').trim(); return s.length > n ? s.slice(0, n) + '…' : s; };
+// GitHub Issue 由来の行を明示するバッジ。issue.url がある時は GitHub への
+// リンクにする。dispatch 後は manual と同一パイプラインなので状態ピルは共通
+const ghPill = (it) => {
+  if ((it.source || '') !== 'github-issues') return '';
+  const label = `GitHub${it.number != null ? ` #${it.number}` : ''}`;
+  return it.url
+    ? `<a class="pill gh" href="${esc(it.url)}" target="_blank" rel="noopener noreferrer"` +
+      ` onclick="event.stopPropagation()">${esc(label)}</a>`
+    : `<span class="pill gh">${esc(label)}</span>`;
+};
+// 並列モード（issueExecMode=parallel）で委譲された課題の chat リンクバッジ。
+// 課題は chatId を持ち、クリックで処理状況ボードの委譲先 chat を開く
+const chatPill = (it) => {
+  if (it.chatId == null) return '';
+  const id = Number(it.chatId) || 0;
+  return `<a class="pill" onclick="event.stopPropagation();chatSelect(${id})"` +
+    ` title="chat #${id}">${esc(t('iss.chatLink', { id }))}</a>`;
+};
+// ISSUES 一覧行の run コスト集計（run-cost.mmd）: Σ経過時間・token・費用
 const runCostHtml = (i) => {
   let ms = 0, tok = 0, usd = 0;
   for (const r of i.runs || []) {
@@ -2407,8 +2721,6 @@ const runCostHtml = (i) => {
   return (ms ? ` · ⏱${esc(fmtDur(ms / 1000))}` : '') +
     (tok ? ` · ${tok}tok` : '') + (usd ? ` · $${usd.toFixed(3)}` : '');
 };
-
-
 
 // loop state の KPI 行（README §11）: 選択 repo スコープの課題から
 // オープン件数・done 率・MTTR（detectedAt→done の平均）を集計する
@@ -2487,9 +2799,9 @@ async function loadMgmt() {
       btns.push(`<button onclick="event.stopPropagation();candAct('${esc(c.key)}','reject')">${esc(t('iss.reject'))}</button>`);
     }
     return `<div class="item${c.key === curItemKey && centerMode === 'candidate' ? ' sel' : ''}"` +
-      ` onclick="openCand('${esc(c.key)}')" data-tip="${esc(tipText((c.title ? c.title + '\n\n' : '') + (c.body ? c.body + '\n\n' : '') + t('prop.open.tip')))}">` +
+      ` onclick="openCand('${esc(c.key)}')">` +
       `<div>${st ? `<span class="pill ${issuePill[st] || ''}">${esc(tx('iss.st.' + st, st))}</span>` : `<span class="pill wait">${esc(t('cand.unfiled'))}</span>`}` +
-      `${dfPill(c)}<b>${esc(c.title)}</b></div>` +
+      `${ghPill(c)}${dfPill(c)}<b>${esc(c.title)}</b></div>` +
       `<div class="muted">${esc(tx('src.' + (c.source || 'manual'), c.source || 'manual'))} · ${esc(fmtTs(c.detectedAt))}</div>` +
       (btns.length ? `<div class="pbtns">${btns.join('')}</div>` : '') + `</div>`;
   }).join('') : `<div class="empty">${esc(t('cand.none'))}</div>`;
@@ -2500,12 +2812,14 @@ async function loadMgmt() {
   const issueRow = (i, indent) => {
     const st = i.status || '';
     const lvl = i.verifyLevel != null ? ` · L${i.verifyLevel}` : '';
+    const mdl = i.modelTier ? ` · M${i.modelTier}` : '';
     const btns = [];
     if (st === 'gated') {
       btns.push(`<button onclick="event.stopPropagation();issueAct('${esc(i.key)}','approve')">${esc(t('iss.approve'))}</button>`);
       btns.push(`<button onclick="event.stopPropagation();issueAct('${esc(i.key)}','reject')">${esc(t('iss.reject'))}</button>`);
     } else if (st === 'queued') {
       btns.push(`<button onclick="event.stopPropagation();issueAct('${esc(i.key)}','dispatch')">${esc(t('iss.dispatch'))}</button>`);
+      btns.push(`<button onclick="event.stopPropagation();issueAct('${esc(i.key)}','reject')">${esc(t('iss.reject'))}</button>`);
       // HIGH リスク確認（manual-cf669d09）: riskHold の行動を人が採否
       if (i.riskHold) {
         btns.push(`<button onclick="event.stopPropagation();issueRiskAck('${esc(i.key)}','allow')">${esc(t('iss.riskAllow'))}</button>`);
@@ -2516,7 +2830,6 @@ async function loadMgmt() {
       if (i.budgetHold || i.cycleCapExtend != null) {
         btns.push(`<button onclick="event.stopPropagation();issueExtend('${esc(i.key)}')">${esc(t('iss.extend'))}</button>`);
       }
-      btns.push(`<button onclick="event.stopPropagation();issueAct('${esc(i.key)}','reject')">${esc(t('iss.reject'))}</button>`);
     } else if (st === 'failed') {
       btns.push(`<button onclick="event.stopPropagation();issueAct('${esc(i.key)}','requeue')">${esc(t('iss.requeue'))}</button>`);
     } else if (st === 'plan_review') {
@@ -2526,24 +2839,26 @@ async function loadMgmt() {
     } else if (st === 'verifying' && !i.pushApproved &&
                repoOfIssue(i)?.requirePushApproval) {
       btns.push(`<button onclick="event.stopPropagation();issueAct('${esc(i.key)}','push-approve')">${esc(t('iss.pushApprove'))}</button>`);
+    }
     // run 制御（manual-5dabae8b/-4929fc13）: 実行中 run の中断と方針注入
     if (st === 'running' || st === 'verifying') {
       btns.push(`<button onclick="event.stopPropagation();issueSteer('${esc(i.key)}')">${esc(t('iss.steer'))}</button>`);
       btns.push(`<button onclick="event.stopPropagation();issueAct('${esc(i.key)}','cancel')">${esc(t('iss.cancel'))}</button>`);
     }
-    }
     return `<div class="item${i.key === curItemKey && centerMode === 'issue' ? ' sel' : ''}"` +
       (indent ? ' style="margin-left:22px"' : '') +
-      ` onclick="openIssue('${esc(i.key)}')" data-tip="${esc(tipText((i.title ? i.title + '\n\n' : '') + (i.body ? i.body + '\n\n' : '') + t('prop.open.tip')))}"><div>` +
+      ` onclick="openIssue('${esc(i.key)}')"><div>` +
       `<span class="pill ${issuePill[st] || ''}">${esc(tx('iss.st.' + st, st))}</span>` +
+      `${ghPill(i)}${chatPill(i)}` +
+      `${i.retryAfter && new Date(i.retryAfter) > new Date() ? `<span class="pill def">${esc(t('iss.backoff'))}</span>` : ''}` +
       `${i.riskHold ? `<span class="pill def">${esc(t('iss.riskHold'))}</span>` : ''}` +
       `${i.budgetHold ? `<span class="pill def">${esc(t('iss.budgetHold'))}</span>` : ''}` +
       `${i.lastStuck ? `<span class="pill def">${esc(t('iss.stuck'))}</span>` : ''}` +
       `${i.lastBlocker ? `<span class="pill def">${esc(t('iss.lastBlocker'))}</span>` : ''}` +
       `${i.partial ? `<span class="pill">${esc(t('iss.partial'))}</span>` : ''}` +
-      `${i.retryAfter && new Date(i.retryAfter) > new Date() ? `<span class="pill def">${esc(t('iss.backoff'))}</span>` : ''}` +
+      `${i.postPush && i.postPush.state && i.postPush.state !== 'done' ? `<span class="pill def">${esc(t('iss.pp'))}:${esc(i.postPush.state)}</span>` : ''}` +
       `${(i.priority ?? 1) >= 2 ? `<span class="pill prio">P${i.priority}</span>` : ''}<b>${esc(i.title)}</b></div>` +
-      `<div class="muted">${esc(tx('src.' + (i.source || ''), i.source || ''))}${lvl} · ${esc(fmtTs(i.updatedAt))}${runCostHtml(i)}</div>` +
+      `<div class="muted">${esc(tx('src.' + (i.source || ''), i.source || ''))}${lvl}${mdl} · ${esc(fmtTs(i.updatedAt))}${runCostHtml(i)}</div>` +
       (btns.length ? `<div class="pbtns">${btns.join('')}</div>` : '') + `</div>`;
   };
   const incEmitted = new Set();
@@ -2556,7 +2871,7 @@ async function loadMgmt() {
     const members = issues.filter((x) => x.incident === inc.id);
     const nQueued = members.filter((x) => x.status === 'queued').length;
     // 事案ヘッダ行: タイトル・件数・一括 dispatch（queued メンバーがある時）
-    issueRows += `<div class="item" data-tip="${esc(tipText(members.map((m) => m.title).join('\n')))}">` +
+    issueRows += `<div class="item">` +
       `<div><span class="pill">${esc(t('iss.incident'))}</span><b>${esc(inc.title || inc.id)}</b>` +
       ` <span class="muted">${esc(t('iss.incMembers', { count: members.length }))}</span></div>` +
       (nQueued ? `<div class="pbtns"><button onclick="event.stopPropagation();incDispatch('${esc(inc.id)}')">${esc(t('iss.incDispatch'))}</button></div>` : '') +
@@ -2565,6 +2880,22 @@ async function loadMgmt() {
   }
   document.getElementById('missues').innerHTML =
     issueRows || `<div class="empty">${esc(t('iss.none'))}</div>`;
+  // 「一括対応」ボタン: queued 課題の件数表示 + 0件で無効化
+  const nQueuedAll = issues.filter((i) => i.status === 'queued').length;
+  const dall = document.getElementById('iss-dispatch-all');
+  if (dall) {
+    dall.disabled = !nQueuedAll;
+    dall.textContent = t('iss.dispatchAll') + (nQueuedAll ? ` (${nQueuedAll})` : '');
+  }
+  // candidates「一括対応」: 判断待ち（未起票・gated・queued・failed）の
+  // 件数表示 + 0件で無効化（対象条件は行の対応ボタンと同じ）
+  const nCandAll = candidates.filter((c) => c.key &&
+    ['', 'gated', 'queued', 'failed'].includes(c.issueStatus || '')).length;
+  const cdall = document.getElementById('cand-dispatch-all');
+  if (cdall) {
+    cdall.disabled = !nCandAll;
+    cdall.textContent = t('iss.dispatchAll') + (nCandAll ? ` (${nCandAll})` : '');
+  }
   propList = (prop.proposals || []).slice().reverse();
   document.getElementById('mprops').innerHTML = propList.length ? propList.map((pp) => {
     const fails = ((pp.vet && pp.vet.checks) || []).filter((x) => !x.ok).map((x) => x.name + ' ' + (x.path || ''));
@@ -2575,17 +2906,8 @@ async function loadMgmt() {
     const btns = pp.status === 'pending' ? '<div class="pbtns">' +
       '<button onclick="event.stopPropagation();propDecide(\'' + esc(pp.id) + '\',\'accept\')" ' + (pp.vet && pp.vet.ok ? '' : 'disabled') + '>' + esc(t('prop.accept')) + '</button>' +
       '<button onclick="event.stopPropagation();propDecide(\'' + esc(pp.id) + '\',\'decline\')">' + esc(t('prop.decline')) + '</button></div>' : '';
-    const chs = pp.changes || [];
-    const c0 = chs.length ? tipText(String(chs[0].content ?? ''), 600) : '';
-    const tip = (pp.title ? pp.title + '\n\n' : '') +
-      (pp.rationale ? pp.rationale + '\n\n' : '') +
-      (chs.length ? t('prop.changes') + ':\n' +
-        chs.map((c) => '- ' + String(c.path || '')).join('\n') +
-        (c0 ? '\n\n' + c0 : '') + '\n\n' : '') +
-      t('prop.open.tip');
     return '<div class="item' + (pp.id === curPropId && centerMode === 'proposal' ? ' sel' : '') + '"' +
-      ' onclick="openProposal(\'' + esc(pp.id) + '\')"' +
-      ' data-tip="' + esc(tipText(tip, 1600)) + '"><div><b>' + esc(pp.title) + '</b>' + badge + '</div>' +
+      ' onclick="openProposal(\'' + esc(pp.id) + '\')"><div><b>' + esc(pp.title) + '</b>' + badge + '</div>' +
       '<div class="muted">' + esc(tx('prop.kind.' + pp.kind, pp.kind || '')) + ' &middot; ' + esc(fmtTs(pp.createdAt)) + '</div>' + btns + '</div>';
   }).join('') : `<div class="empty">${esc(t('prop.none'))}</div>`;
   // 中央ペインに proposal 詳細を表示中なら最新の内容で描き直す
@@ -2627,6 +2949,7 @@ async function issueSteer(key) {
   const r = await J('POST', `/api/issues/${encodeURIComponent(key)}/steer`, { text });
   if (!r.ok) alert(r.error || 'error');
   loadMgmt();
+}
 // 上限延長（manual-94172864/-175e7229）: cycleCapExtend・budgetExtend を
 // 引き上げて即 dispatch する。延長幅は body で指定可（省略は server 既定）
 async function issueExtend(key) {
@@ -2642,7 +2965,6 @@ async function issueRiskAck(key, decision) {
     if (reason == null) return;
   } else if (!confirm(t('iss.riskAllowConfirm'))) return;
   await issueAct(key, 'risk-ack', { decision, reason });
-}
 }
 // follow-up 追記: 起票時 freeze の課題本文（intakeSnapshot）には混入せず
 // followUps へ記録し、次回 run の prompt で「フォローアップ入力」として渡す
@@ -2698,11 +3020,49 @@ async function incDispatch(id) {
     alert(r.errors.map((e) => `${e.key}: ${e.error}`).join('\n'));
   loadMgmt();
 }
+// 一括対応: ISSUES 一覧の queued 課題を一括 dispatch（人ゲートの一括操作。
+// POST /api/issues/dispatch-all が起動可能分を起動し、同一 repo 競合・
+// 同時実行上限の課題は autoDispatch で待機 → repo 解放時に drain が自動起動）
+async function issueDispatchAll() {
+  const keys = issueList.filter((i) => i.status === 'queued').map((i) => i.key);
+  if (!keys.length) return;
+  if (!confirm(t('iss.dispatchAllConfirm', { count: keys.length }))) return;
+  const r = await J('POST', '/api/issues/dispatch-all', { keys });
+  if (!r.ok) { alert(r.error || 'error'); }
+  else {
+    const msg = [t('iss.dispatchAllDone', {
+      dispatched: (r.dispatched || []).length,
+      waiting: (r.waiting || []).length })];
+    for (const e of r.errors || []) msg.push(`${e.key}: ${e.error}`);
+    alert(msg.join('\n'));
+  }
+  loadMgmt();
+}
 
 // ---------- candidates（判断待ち inbox の人ゲート操作。未起票は即時起票して判断） ----------
 async function candAct(key, action) {
   const r = await J('POST', `/api/candidates/${encodeURIComponent(key)}/${action}`);
   if (!r.ok) alert(r.error || 'error');
+  loadMgmt();
+}
+// candidates 一括対応: 表示中の判断待ち候補を一括 dispatch
+// （POST /api/candidates/dispatch-all。未起票は即時起票し、
+// 同一 repo 競合・同時実行上限の課題は autoDispatch で待機 →
+// repo 解放時に drain が自動起動。issues 一括対応と同じ扱い）
+async function candDispatchAll() {
+  const keys = candList.filter((c) => c.key &&
+    ['', 'gated', 'queued', 'failed'].includes(c.issueStatus || '')).map((c) => c.key);
+  if (!keys.length) return;
+  if (!confirm(t('iss.dispatchAllConfirm', { count: keys.length }))) return;
+  const r = await J('POST', '/api/candidates/dispatch-all', { keys });
+  if (!r.ok) { alert(r.error || 'error'); }
+  else {
+    const msg = [t('iss.dispatchAllDone', {
+      dispatched: (r.dispatched || []).length,
+      waiting: (r.waiting || []).length })];
+    for (const e of r.errors || []) msg.push(`${e.key}: ${e.error}`);
+    alert(msg.join('\n'));
+  }
   loadMgmt();
 }
 
@@ -2825,13 +3185,13 @@ function renderItemHead(it, isIssue) {
     btns.push(`<button onclick="issueAct('${esc(it.key)}','reject')">${esc(t('iss.reject'))}</button>`);
   } else if (st === 'queued') {
     btns.push(`<button onclick="issueAct('${esc(it.key)}','dispatch')">${esc(t('iss.dispatch'))}</button>`);
+    btns.push(`<button onclick="issueAct('${esc(it.key)}','reject')">${esc(t('iss.reject'))}</button>`);
     // HIGH リスク確認・上限延長（run-control.mmd）
     if (it.riskHold) {
       btns.push(`<button onclick="issueRiskAck('${esc(it.key)}','allow')">${esc(t('iss.riskAllow'))}</button>`);
       btns.push(`<button onclick="issueRiskAck('${esc(it.key)}','deny')">${esc(t('iss.riskDeny'))}</button>`);
     }
     btns.push(`<button onclick="issueExtend('${esc(it.key)}')">${esc(t('iss.extend'))}</button>`);
-    btns.push(`<button onclick="issueAct('${esc(it.key)}','reject')">${esc(t('iss.reject'))}</button>`);
   } else if (st === 'failed') {
     btns.push(`<button onclick="issueAct('${esc(it.key)}','requeue')">${esc(t('iss.requeue'))}</button>`);
   } else if (st === 'plan_review') {
@@ -2842,16 +3202,24 @@ function renderItemHead(it, isIssue) {
   if (isIssue && st === 'verifying' && !it.pushApproved &&
       repoOfIssue(it)?.requirePushApproval) {
     btns.push(`<button onclick="issueAct('${esc(it.key)}','push-approve')">${esc(t('iss.pushApprove'))}</button>`);
+  }
   // run 制御（manual-5dabae8b/-4929fc13）: 実行中 run の中断と方針注入
   if (isIssue && (st === 'running' || st === 'verifying')) {
     btns.push(`<button onclick="issueSteer('${esc(it.key)}')">${esc(t('iss.steer'))}</button>`);
     btns.push(`<button onclick="issueAct('${esc(it.key)}','cancel')">${esc(t('iss.cancel'))}</button>`);
   }
-  }
   // 分割提案（manual-0577d650）: 大規模課題は gated で splitProposal を持ち、
   // 人が「分割起票」で子課題群へ分ける（queued でも起票前なら可）
   if (isIssue && it.splitProposal && (st === 'gated' || st === 'queued')) {
     btns.push(`<button onclick="issueSplit('${esc(it.key)}')">${esc(t('iss.split'))}</button>`);
+  }
+  // push 後フォローアップループ（postpush-loop.mmd・manual-55878990）:
+  // 監視中（checking|waiting|fixing）は一時停止、paused は再開できる
+  const pps = it.postPush && it.postPush.state;
+  if (isIssue && (pps === 'checking' || pps === 'waiting' || pps === 'fixing')) {
+    btns.push(`<button onclick="issueAct('${esc(it.key)}','postpush-pause')">${esc(t('iss.ppPause'))}</button>`);
+  } else if (isIssue && pps === 'paused') {
+    btns.push(`<button onclick="issueAct('${esc(it.key)}','postpush-resume')">${esc(t('iss.ppResume'))}</button>`);
   }
   // 事案操作（incidents.mmd・manual-343b5d37）: merge は結合相手の課題 key
   // または事案 id を prompt 指定、unmerge は所属事案から外す
@@ -2868,17 +3236,23 @@ function renderItemHead(it, isIssue) {
     (!isIssue && !st ? `<span class="pill wait">${esc(t('cand.unfiled'))}</span>` : '') +
     (!isIssue ? dfPill(it) : '') +
     (isIssue && it.retryAfter && new Date(it.retryAfter) > new Date()
+      ? `<span class="pill def">${esc(t('iss.backoff'))}: ${esc(fmtTs(it.retryAfter))}</span>` : '') +
     (isIssue && it.riskHold ? `<span class="pill def">${esc(t('iss.riskHold'))}</span>` : '') +
     (isIssue && it.budgetHold ? `<span class="pill def">${esc(t('iss.budgetHold'))}</span>` : '') +
     (isIssue && it.lastStuck ? `<span class="pill def">${esc(t('iss.stuck'))}</span>` : '') +
     (isIssue && it.lastBlocker ? `<span class="pill def">${esc(t('iss.lastBlocker'))}</span>` : '') +
     (isIssue && it.partial ? `<span class="pill">${esc(t('iss.partial'))}</span>` : '') +
-      ? `<span class="pill def">${esc(t('iss.backoff'))}: ${esc(fmtTs(it.retryAfter))}</span>` : '') +
     `<span class="pill">${esc(tx('src.' + (it.source || ''), it.source || ''))}</span>` +
+    ghPill(it) +
+    chatPill(it) +
     (isIssue && it.verifyLevel != null ? `<span class="pill">L${it.verifyLevel}</span>` : '') +
     (isIssue && it.priority != null ? `<span class="pill">P${it.priority}</span>` : '') +
+    (isIssue && it.modelTier ? `<span class="pill">M${it.modelTier}</span>` : '') +
     (isIssue && it.splitProposal
       ? `<span class="pill def">${esc(t('iss.splitProp'))}${it.splitProposal.reason ? ': ' + esc(it.splitProposal.reason) : ''}</span>` : '') +
+    (isIssue && it.postPush && it.postPush.state
+      ? `<span class="pill def">${esc(t('iss.pp'))}:${esc(tx('iss.pp.st.' + it.postPush.state, it.postPush.state))}` +
+        (it.postPush.reason ? ` (${esc(it.postPush.reason)})` : '') + '</span>' : '') +
     (isIssue && it.splitFrom ? `<span class="pill">${esc(t('iss.splitFrom'))}</span>` : '') +
     (isIssue && it.splitInto ? `<span class="pill">${esc(t('iss.splitInto', { count: it.splitInto.length }))}</span>` : '') +
     (isIssue && it.incident ? `<span class="pill">${esc(t('iss.incident'))}</span>` : '') +
@@ -2909,6 +3283,7 @@ function renderIssue(i) {
       (i.acceptance ? `<div class="muted">${esc(t('iss.acceptance'))}: ${esc(i.acceptance)}</div>` : '') +
       (i.verifyNote ? `<div class="muted">${esc(t('iss.verifyNote'))}: ${esc(i.verifyNote)}</div>` : '') +
       (i.planNote ? `<div class="muted">${esc(t('iss.planNote'))}: ${esc(i.planNote)}</div>` : '') +
+      (i.remediation ? `<div class="muted">${esc(t('iss.remediation'))}: ${esc(i.remediation)} (#${(i.remediationStage ?? 0) + 1})</div>` : '') +
       // run 制御の構造化記録（run-control.mmd）: halt 理由・詰まり・
       // 保全先・リスク採否を表示する
       (i.lastStuck ? `<div class="muted">${esc(t('iss.stuck'))}: ${esc(i.lastStuck.pattern || '')} ${esc(i.lastStuck.detail || '')}</div>` : '') +
@@ -2917,7 +3292,6 @@ function renderIssue(i) {
       (i.riskHold ? `<div class="muted">${esc(t('iss.riskHold'))}: ${esc(i.riskHold.label || '')} ${esc(i.riskHold.line || '')}</div>` : '') +
       (i.riskRejected ? `<div class="muted">${esc(t('iss.riskRejected'))}: ${esc(i.riskRejected.reason || '')}</div>` : '') +
       (i.partial ? `<div class="muted">${esc(t('iss.partial'))}: ${esc(i.partial.branch || '')}</div>` : '') +
-      (i.remediation ? `<div class="muted">${esc(t('iss.remediation'))}: ${esc(i.remediation)} (#${(i.remediationStage ?? 0) + 1})</div>` : '') +
       `<div class="muted">retries: ${i.retries ?? 0} &middot; verifyBacks: ${i.verifyBacks ?? 0}</div>` +
       '</div>' : '';
   // 計画承認ゲート（manual-883d17ee）: 生成済み計画と critic 結果を表示
@@ -2970,6 +3344,25 @@ function renderIssue(i) {
           (r.usage.costUsd ? ` &middot; $${r.usage.costUsd}` : '') : '') +
         '</div>').join('') +
       '</div>' : '';
+  // push 後フォローアップループの監視状態（postpush-loop.mmd・
+  // manual-55878990）: 監視対象 sha/branch・checks・pause 理由・起票済み
+  // 修復課題を一覧する
+  const pp = i.postPush;
+  const ppCard = pp && pp.state
+    ? '<div class="rcard" style="max-width:none"><b>' + esc(t('iss.pp')) + '</b>' +
+      `<div class="muted">${esc(tx('iss.pp.st.' + pp.state, pp.state))}` +
+      (pp.reason ? ` — ${esc(t('iss.ppReason'))}: ${esc(pp.reason)}` : '') + '</div>' +
+      (pp.sha ? `<div class="muted">sha: ${esc(String(pp.sha).slice(0, 12))}` +
+        (pp.branch ? ` · ${esc(t('iss.ppBranch'))}: ${esc(pp.branch)}` : '') +
+        (pp.since ? ` · ${esc(fmtTs(pp.since))}` : '') + '</div>' : '') +
+      `<div class="muted">${esc(t('iss.ppChecks'))}: ${pp.checks ?? 0}` +
+      (pp.lastCheck ? ` &middot; ${esc(fmtTs(pp.lastCheck))}` : '') + '</div>' +
+      ((pp.repairs || []).length
+        ? `<div class="muted">${esc(t('iss.ppRepairs'))}:</div>` +
+          pp.repairs.map((r) =>
+            `<div class="muted"><a href="#" onclick="event.preventDefault();openIssue('${esc(r)}')">${esc(r)}</a></div>`).join('')
+        : '')
+      : '';
   // intake スナップショット + followUps（起票後の追記は本文に混入せず
   // 次回 run のフォローアップ入力として渡す。intake-snapshot.mmd）
   const fus = (i.followUps || []);
@@ -2985,7 +3378,7 @@ function renderIssue(i) {
     `<div class="pbtns"><input id="fu-text" placeholder="${esc(t('iss.fuPh'))}" style="flex:1">` +
     `<button onclick="issueFollowup('${esc(i.key)}')">${esc(t('iss.fuAdd'))}</button></div></div>`;
   const box = document.getElementById('box');
-  box.innerHTML = renderItemHead(i, true) + info + plan + members + incCard + runs + fuCard +
+  box.innerHTML = renderItemHead(i, true) + info + plan + drevCard + members + incCard + runs + ppCard + fuCard +
     '<div id="iobs"></div>' + renderItemBody(i.body);
   Viewer.drawMermaid(box);
   box.scrollTop = 0;
@@ -3068,7 +3461,6 @@ function wfSel(i) {
   d.style.display = 'block';
 }
 // 監査タイムライン: 時刻・actor(human/system)・action・run・detail 概要
-
 function auditRows(events) {
   if (!events.length) return `<div class="empty">${esc(t('iss.auditNone'))}</div>`;
   const det = (e) => Object.entries(e.detail || {})
@@ -3186,7 +3578,7 @@ async function boot() {
   const oc = await J('GET', '/api/chat/options');
   renderOpts(oc);
   await loadSessions();
-  if (!booted) { booted = true; showStatus(); }   // 初期表示は処理状況
+  if (!booted) { booted = true; showSessions(); } // 初期表示はセッション
   else renderEmpty();
   renderSide();
   loadMgmt();
@@ -3245,6 +3637,18 @@ es.addEventListener('assets', (e) => {   // CDN アセット更新の状態変�
 es.addEventListener('autostart', (e) => {  // 自動起動（タスク登録）の状態変化
   sysState.autostart = JSON.parse(e.data);
   if (centerMode === 'settings' && setTab === 'system') renderSettings();
+});
+es.addEventListener('config', (e) => {      // config 変更（issueExecMode 等）の即時反映
+  const d = JSON.parse(e.data);
+  if (d.issueExecMode) sysState.issueExecMode = d.issueExecMode;
+  if (d.maxConcurrentSessions != null) sysState.maxConcurrentSessions = d.maxConcurrentSessions;
+  if (centerMode === 'settings' && setTab === 'system') renderSettings();
+});
+es.addEventListener('devenvs', () => {     // 開発環境の起動/停止の状態変化
+  if (centerMode === 'dev') showDev();
+});
+es.addEventListener('envsessions', () => { // 外部(devin/copilot)セッション一覧の変化
+  if (centerMode === 'sessions') showSessions();
 });
 es.addEventListener('restart', (e) => {  // control 再起動の pending/restarting 表示
   const d = JSON.parse(e.data);

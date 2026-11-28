@@ -172,6 +172,8 @@ impl Core {
                 slug,
                 if reason.is_empty() { String::new() } else { format!("（{}）", reason) }
             )
+        } else if kind == "capacity" {
+            "[実行待機] 同時起動セッション数の上限のため待機します（枠が空き次第送信）".to_string()
         } else {
             format!(
                 "[実行待機] {} を {} が操作中のため待機します",

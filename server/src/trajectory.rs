@@ -91,7 +91,9 @@ impl Trajectory {
             .append(true)
             .open(&self.steps_path)
         {
-            let _ = writeln!(f, "{}", line);
+            // secret redaction（manual-a3a60c51）: step data は出力由来の
+            // 文字列を含み得るため書き込み点でもマスクする
+            let _ = writeln!(f, "{}", crate::redact::scrub(&line.to_string()));
         }
         self.n += 1;
     }
@@ -120,9 +122,13 @@ impl Trajectory {
         doc.insert("endReason".into(), end_reason);
         doc.insert("stepCount".into(), json!(steps.len()));
         doc.insert("steps".into(), json!(steps));
+        // secret redaction（manual-a3a60c51）: 出力由来の steps/meta を
+        // 束ねた最終形も書き込み点でマスクする
         let _ = std::fs::write(
             &out,
-            serde_json::to_string_pretty(&Value::Object(doc)).unwrap_or_default(),
+            crate::redact::scrub(
+                &serde_json::to_string_pretty(&Value::Object(doc)).unwrap_or_default(),
+            ),
         );
     }
 }

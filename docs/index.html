@@ -26,7 +26,7 @@
 <p>左ペインのナビから各ビューを開き、右ペインまたは中央ペインに表示します。<br>このマニュアルは「マニュアル」ナビで開いた <code>docs/</code> サイトそのものです。</p>
 <h3>自律ループ（課題ライフサイクル）</h3>
 <p>detector が課題候補（candidate）を emit し、入口で正規化・重複判定<br>（source+repo+symptomHash）して課題レコードを作ります。<code>external</code> ラベル付きは<br>人ゲート待ち、それ以外はキュー → runner 起動 → 実装 → verify（L0〜L4 の<br>実機検証）→ push まで自動で進みます。詳細は「3-1 統一モデル図」を参照。</p>
-<ul><li><strong>verify</strong>: L2 以上は対象 EXE を実機で起動して応答確認。証跡は <code>evidence/</code> へ</li><li><strong>learn</strong>: 実行結果・証跡は SKILL（draft・mermaid 図必須）として <code>.devin/skills/</code> へ蓄積し、agent 自身への反映は proposals 機構で人が採否する</li></ul>
+<ul><li><strong>verify</strong>: L2 以上は対象 EXE を実機で起動して応答確認。証跡は <code>evidence/</code> へ</li><li><strong>learn</strong>: 実行結果・証跡は SKILL（draft・mermaid 図必須）として <code>.agents/skills/</code> へ蓄積し、agent 自身への反映は proposals 機構で人が採否する</li></ul>
 <h3>関連ドキュメント</h3>
 <ul><li><code>README.md</code> — 統一モデル正本（設計の詳細はこちら）</li><li><code>AGENTS.md</code> — 開発規約（mermaid 正本・1ファイル1責務・SSE 即時反映 等）</li></ul>
     </main>

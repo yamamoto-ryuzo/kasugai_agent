@@ -19,7 +19,14 @@ use crate::config::{cfg_f64, load_j};
 use crate::util::{now_iso, now_ms};
 
 /// spawn_detector_poller が回す detector kind（pollSeconds のキー）
-pub const KINDS: [&str; 4] = ["issues", "ciFailure", "specDrift", "health"];
+pub const KINDS: [&str; 6] = [
+    "issues",
+    "ciFailure",
+    "specDrift",
+    "health",
+    "sessionWatch",
+    "unattributedWork",
+];
 
 const DEFAULT_SILENT_MINUTES: f64 = 30.0;
 
@@ -84,13 +91,24 @@ pub fn record_run(root: &Path, kind: &str, emitted: usize) {
     });
 }
 
+/// watch 系 detector（sessionWatch / unattributedWork）は emit 無しが正常状態
+/// （異常時のみ emit）のため沈黙判定を免除する。stopped 判定は全 kind で有効
+const SILENT_EXEMPT: [&str; 2] = ["sessionWatch", "unattributedWork"];
+
 /// entry の状態: "ok" / "stopped"（実行停滞）/ "silent"（実行継続・emit 停滞）
 /// 台帳未作成（初回 poll 前）は "ok" 扱い
 fn state_of(e: &Value, silent_ms: f64, now: i64) -> &'static str {
+    state_of_kind("", e, silent_ms, now)
+}
+
+fn state_of_kind(kind: &str, e: &Value, silent_ms: f64, now: i64) -> &'static str {
     let run_ms = e.get("lastRunMs").and_then(|v| v.as_i64());
     let Some(run_ms) = run_ms else { return "ok" };
     if (now - run_ms) as f64 > silent_ms {
         return "stopped";
+    }
+    if SILENT_EXEMPT.contains(&kind) {
+        return "ok";
     }
     let emit_ms = e
         .get("lastEmitMs")
@@ -117,7 +135,7 @@ pub fn check_silent(root: &Path, cfg: &Value) -> Vec<Value> {
         let mut out = Vec::new();
         for kind in KINDS {
             let Some(e) = l.get(kind) else { continue };
-            let (state, title, body) = match state_of(e, silent_ms, now) {
+            let (state, title, body) = match state_of_kind(kind, e, silent_ms, now) {
                 "stopped" => (
                     "detector-stopped",
                     format!("detector 停止: {}", kind),

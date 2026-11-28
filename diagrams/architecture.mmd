@@ -7,6 +7,8 @@ flowchart LR
         D2[ci-failure]
         D3[local-health]
         D4[spec-drift]
+        D5[session-watch<br/>Devin セッション観測]
+        D6[unattributed-work<br/>帰属不明 git 変更]
     end
 
     subgraph Core[コア server/src/]
@@ -25,7 +27,7 @@ flowchart LR
     end
 
     C[control.rs<br/>HTTP :8586 + SSE] --> P[panel/<br/>ブラウザUI]
-    D1 & D2 & D3 & D4 --> N --> A --> G --> R --> V --> K
+    D1 & D2 & D3 & D4 & D5 & D6 --> N --> A --> G --> R --> V --> K
     R --> DV
     A & R & V --> GH
     R & V --> RP

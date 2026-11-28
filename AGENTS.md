@@ -98,6 +98,19 @@
   intake で自動起票（queued）されるが、実行の開始は candidates /
   ISSUES 一覧の「対応」ボタンだけが行う。drain は補起票・中断 verify の
   再開・孤児 run の failed 化のみを担い、queued を自動起動しない
+  - **例外 = 一括対応（autoDispatch）**: ISSUES 一覧の「一括対応」ボタンは
+    人の一括承認として queued を一括 dispatch する。同一 repo 競合・
+    `maxConcurrentRuns` で起動できない課題は `autoDispatch: true` を
+    立てて待機し、drain が repo 解放時に同じ dispatch 経路で自動起動する
+    （フラグは起動時に消費。verify 差し戻し後は再び人判断を要する）
+  - **例外 = kind別段階的自律度（autoDispatchWhitelist）**: config の
+    `autoDispatchWhitelist: [{kind, maxPriority}]` はオプトイン式の
+    事前承認。intake で kind 等値（`"*"`=任意）かつ
+    `priority<=maxPriority`（既定1）かつ queued 自律対象の課題に
+    `autoDispatch: true` を立て、drain が一括対応と同じ経路で起動する
+    （フラグは起動時に消費、verify 差し戻し後は人判断）。gated
+    （external・大規模）は対象外、whitelist 未命中は人ゲート必須、
+    **未設定の既定は全課題人判断（現行維持）**
 - **candidates 一覧は判断待ち inbox**: 未起票・gated・queued・failed の
   み表示し、各行の「対応」「却下」で人が一括判断する。「対応」は
   起票・承認・再実行を兼ねた即時 dispatch（未起票は rate-limit を

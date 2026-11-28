@@ -23,6 +23,7 @@ use crate::claims::{extract_paths, find_conflicts, Conflict};
 use crate::conlog::{conlog, console_tail};
 use crate::config::*;
 use crate::registry::{agents::list_agent_docs, refs, skills::list_skill_docs};
+use crate::pipeline;
 use crate::proposals;
 use crate::repomatch::{repo_slug, suggest_repo};
 use crate::snapshots::SnapshotStore;
@@ -54,6 +55,9 @@ pub struct ChatEntry {
     pub done_kind: Option<String>,         // 終了区分: done|ng|unverified
     pub back_prompt: Option<String>,       // 検証NG差し戻しの保留 prompt（再送待ち）
     pub needs_human: bool,                 // 差し戻し上限到達（要人対応マーク）
+    pub issue_key: Option<String>,         // 委譲元課題 key（並列モードの chat 起票）
+    pub attach_src: Option<String>,        // 外部セッション attach 元: "devin"|"copilot"
+    pub attach_n: usize,                   // attach トランスクリプト注入済み件数（messages 先頭区間）
 }
 
 /// primedFor: NotYet=未付与 / Session(sid)=付与済み / Always(HTTP型は常に付与扱い)
@@ -173,7 +177,22 @@ impl App {
             "type": Self::agent_type(a),
             "exe": a.get("exe").and_then(|v| v.as_str()).unwrap_or(""),
             "args": a.get("args").and_then(|v| v.as_array()).cloned().unwrap_or_default(),
-            "auth": a.get("auth").and_then(|v| v.as_str()).unwrap_or("none"),
+            // auth は文字列（none/devin/その他 methodId）または
+            // {methodId,tokenEnv|tokenSecret} オブジェクト。表示は methodId に畳む
+            "auth": match a.get("auth") {
+                Some(Value::String(s)) => s.clone(),
+                Some(Value::Object(o)) => o
+                    .get("methodId")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("custom")
+                    .to_string(),
+                _ => "none".to_string(),
+            },
+            "envKeys": a
+                .get("env")
+                .and_then(|v| v.as_object())
+                .map(|m| m.keys().cloned().collect::<Vec<_>>())
+                .unwrap_or_default(),
             "endpoint": a.get("endpoint").and_then(|v| v.as_str()).unwrap_or(""),
             "provider": a.get("provider").and_then(|v| v.as_str()).unwrap_or(""),
             "model": a.get("model").and_then(|v| v.as_str()).unwrap_or(""),
@@ -234,9 +253,9 @@ impl App {
                 let p = r.get("path").and_then(|x| x.as_str()).unwrap_or("");
                 let mut v = Self::repo_pub(r);
                 v["registered"] = json!(true);
-                let ide = self.is_under_ws(p) && has_git(Path::new(p));
-                v["ide"] = json!(ide);
-                v["user"] = json!(!ide);
+                let ws = self.is_under_ws(p) && has_git(Path::new(p));
+                v["ws"] = json!(ws);
+                v["user"] = json!(!ws);
                 v
             })
             .collect();
@@ -245,7 +264,7 @@ impl App {
             .map(|r| norm_p(r.get("path").and_then(|v| v.as_str()).unwrap_or("")))
             .collect();
         // 自動検出の走査根（GitHub 非依存のユーザーリポジトリも対象）:
-        //   ws_root      — 全 dir。.git 付き=IDE管理下、無し=ユーザー
+        //   ws_root      — 全 dir。.git 付き=ワークスペース管理下、無し=ユーザー
         //   home         — .git 付きのみ（ユーザーのローカル repo）
         //   repoScanDirs — 全 dir（ユーザー指定の走査根）
         let mut scan_roots: Vec<(String, bool)> = vec![(self.ws_root.clone(), true)];
@@ -262,7 +281,7 @@ impl App {
             if !scanned.insert(norm_p(&root)) {
                 continue;
             }
-            let ide_root = norm_p(&root) == ws_n;
+            let ws_dir = norm_p(&root) == ws_n;
             if let Ok(rd) = std::fs::read_dir(&root) {
                 for e in rd.flatten() {
                     let p = e.path();
@@ -281,9 +300,9 @@ impl App {
                     if !seen.insert(norm_p(&ps)) {
                         continue;
                     }
-                    let ide = ide_root && git;
+                    let ws = ws_dir && git;
                     reg.push(json!({"slug": null, "path": ps,
-                        "registered": false, "ide": ide, "user": !ide}));
+                        "registered": false, "ws": ws, "user": !ws}));
                 }
             }
         }
@@ -358,19 +377,36 @@ impl App {
                 evt: self.evt_tx.clone(),
             }))
         } else {
-            let api_key = if spec.get("auth").and_then(|v| v.as_str()) == Some("devin") {
-                crate::chat::acp::devin_api_key_pub()
-            } else {
-                None
+            // auth 解決: "devin"=credentials.toml / "none"=authenticate 省略 /
+            // {methodId,tokenEnv?,tokenSecret?}=汎用（ACP authenticate へ任意 methodId）
+            let api_key = match spec.get("auth") {
+                Some(Value::String(s)) if s == "devin" => {
+                    crate::chat::acp::devin_api_key_pub()
+                }
+                Some(Value::Object(o)) => o
+                    .get("tokenEnv")
+                    .and_then(|v| v.as_str())
+                    .and_then(|n| std::env::var(n).ok())
+                    .or_else(|| {
+                        o.get("tokenSecret")
+                            .and_then(|v| v.as_str())
+                            .and_then(|k| crate::config::secrets_get(&root2, k))
+                    })
+                    .or_else(|| crate::config::secrets_token(&root2, &spec, "agent")),
+                _ => None,
             };
-            let _ = root2;
+            // env: {NAME: "literal" | "env:VAR" | "secret:key"} — spawn 時注入。
+            // トークン等の秘匿値は config.json へ直書きせず secret: で secrets.json を引く
+            let env = crate::config::agent_env(&root2, &spec);
             Chat::Acp(Arc::new(AcpChat {
                 id: 0,
                 agent: spec,
                 cwd,
                 core: Arc::new(Mutex::new(crate::chat::Core::default())),
                 proc_slot: Arc::new(Mutex::new(None)),
+                init_lock: Arc::new(Mutex::new(())),
                 api_key,
+                env,
                 stall_minutes: stall,
                 get_options,
                 save_option,
@@ -448,6 +484,9 @@ impl App {
             done_kind: o.done_kind,
             back_prompt: o.back_prompt,
             needs_human: o.needs_human,
+            issue_key: o.issue_key,
+            attach_src: o.attach_src,
+            attach_n: 0,
         };
         self.chats.lock().await.insert(id, entry);
         self.persist_chats().await;
@@ -524,6 +563,13 @@ impl App {
             );
             e.insert("needsHuman".into(), json!(s.needs_human));
             e.insert(
+                "issueKey".into(),
+                s.issue_key
+                    .clone()
+                    .map(Value::String)
+                    .unwrap_or(Value::Null),
+            );
+            e.insert(
                 "usage".into(),
                 serde_json::to_value(&c.usage).unwrap_or(Value::Null),
             );
@@ -542,6 +588,13 @@ impl App {
             );
             e.insert("heldPrompts".into(), json!(c.held_prompts));
             e.insert("resumeOnRelease".into(), json!(c.resume_on_release));
+            e.insert(
+                "attachSrc".into(),
+                s.attach_src
+                    .clone()
+                    .map(Value::String)
+                    .unwrap_or(Value::Null),
+            );
             drop(c);
             o.insert(id.to_string(), Value::Object(e));
         }
@@ -577,6 +630,7 @@ impl App {
                 "doneKind": s.done_kind,
                 "backPending": s.back_prompt.is_some(),
                 "needsHuman": s.needs_human,
+                "issueKey": s.issue_key,
                 "pendingSplits": s.pending_splits.iter()
                     .map(|p| json!({"title": p.title})).collect::<Vec<_>>(),
                 "waitInfo": c.waiting.as_ref().map(|w| json!({
@@ -638,6 +692,10 @@ impl App {
         for (id, s) in chats.iter() {
             let mut c = s.chat.core().lock().await;
             let Some(w) = c.waiting.as_mut() else { continue };
+            // capacity 待機は枠管理（drain_capacity）が解放する
+            if w.kind == "capacity" {
+                continue;
+            }
             if !w.blocked_by.contains(&blocker_id) {
                 continue;
             }
@@ -660,12 +718,92 @@ impl App {
             if let Some(s) = chats2.get(&id) {
                 let chat = s.chat.clone();
                 drop(chats2);
-                let _ = self.evt_tx.send(CtrlEvt::Changed { id });
-                if let Err(e) = chat.send(text, None).await {
-                    chat.push_sys(&format!("[再開失敗] {}", e)).await;
-                }
+                self.send_with_slot(id, &chat, text).await;
             }
         }
+        self.drain_capacity().await;
+    }
+
+    /// 解放済み prompt の送信前に同時起動枠を確保する共通経路。
+    /// proc 無し chat は枠が無ければ capacity 待機へ戻す
+    /// （leave_wait 済みなので user 行は再表示せず保留キューへ戻す）
+    async fn send_with_slot(self: &Arc<Self>, id: i64, chat: &Chat, text: String) {
+        if !chat.has_proc().await {
+            if let Err(blockers) = self.acquire_proc_slot(id, true).await {
+                {
+                    let mut c = chat.core().lock().await;
+                    c.held_prompts.push(text);
+                    c.enter_wait(Vec::new(), blockers, false, "capacity", None);
+                }
+                self.sse("chat", &json!({"id": id}));
+                return;
+            }
+        }
+        let _ = self.evt_tx.send(CtrlEvt::Changed { id });
+        if let Err(e) = chat.send(text, None).await {
+            chat.push_sys(&format!("[再開失敗] {}", e)).await;
+        } else {
+            clear_attach_transcript(self, id).await;
+        }
+    }
+
+    // ---------- 並列モード（処理状況ボード exec 列の「並列」ボタン） ----------
+    /// on=true で conflictWait=false を config 永続化（以後の send・FileTouch
+    /// 競合は find_chat_conflicts が空を返し待機しない）し、全ての実装待機
+    /// （kind!=repo）を blocker の busy に関わらず解放して即時送信する。
+    /// on=false は直列ガードへ復帰するだけ（実行中の chat は継続）。
+    /// repo 確認待ちは人ゲートのため対象外。
+    pub async fn set_parallel_exec(self: &Arc<Self>, on: bool) -> Value {
+        {
+            let mut cfg = self.cfg.write().await;
+            cfg["conflictWait"] = json!(!on);
+            persist_config(&self.root, &cfg);
+        }
+        self.sse("config", &json!({"chatParallel": on}));
+        let mut released = 0usize;
+        if on {
+            let mut work: Vec<(i64, String)> = Vec::new();
+            {
+                let chats = self.chats.lock().await;
+                for (id, s) in chats.iter() {
+                    let mut c = s.chat.core().lock().await;
+                    // capacity 待機は枠管理が解放する（並列モードでも枠は守る）
+                    match c.waiting.as_ref() {
+                        Some(w) if w.kind != "repo" && w.kind != "capacity" => {}
+                        _ => continue,
+                    }
+                    if let Some(text) = c.leave_wait() {
+                        let cwd = s.chat.cwd().read().await.clone();
+                        setup_claims_core(&mut c, &text, &cwd);
+                        work.push((*id, text));
+                    }
+                }
+            }
+            for (id, text) in work {
+                let chats = self.chats.lock().await;
+                if let Some(s) = chats.get(&id) {
+                    let chat = s.chat.clone();
+                    drop(chats);
+                    self.send_with_slot(id, &chat, text).await;
+                    released += 1;
+                }
+            }
+            self.drain_capacity().await;
+            conlog(
+                "control",
+                "sys",
+                &format!(
+                    "並列モードON: 実装待機 {} 件を解放し以後の競合待機を無効化",
+                    released
+                ),
+            );
+        } else {
+            conlog("control", "sys", "並列モードOFF: 直列ガードへ復帰");
+        }
+        // waiting/held_prompts を変更したため永続化
+        self.persist_chats().await;
+        self.sse("chats", &json!({}));
+        json!({"ok": true, "parallel": on, "released": released})
     }
 
     // ---------- busy 終了フック（onChatDone 移植） ----------
@@ -693,7 +831,7 @@ impl App {
         {
             let mut chats = self.chats.lock().await;
             if let Some(s) = chats.get_mut(&id) {
-                let mut c = s.chat.core().lock().await;
+                let c = s.chat.core().lock().await;
                 if s.verify.as_deref() == Some("running") {
                     let scan_start = s.verify_scan.min(c.messages.len());
                     let mut v = None;
@@ -864,6 +1002,167 @@ impl App {
         }
         if do_verify {
             self.start_verify(id).await;
+        }
+        // 課題委譲 chat（issueExecMode=parallel）の終了区分を課題状態へ
+        // 写像する（issue-lifecycle.mmd）:
+        //   done → 課題 done（chat 側検証を内包・GitHub Issue へ結果報告）
+        //   unverified → 課題 queued（検証未確認・人の再判断へ）
+        //   ng/未了（verify 差し戻し待ち等）は課題 running のまま継続
+        let issue_map = {
+            let chats = self.chats.lock().await;
+            chats.get(&id).and_then(|s| {
+                s.issue_key
+                    .clone()
+                    .and_then(|k| s.done_kind.clone().map(|d| (k, d)))
+            })
+        };
+        if let Some((ikey, dkind)) = issue_map {
+            // 委譲課題が running の時だけ写像する（chat が done を維持して
+            // 後続ターンを処理する場合の再写像や、人が既に判断した課題への
+            // 上書きを防ぐ）
+            let cur_running = crate::runner::find_issue(&self.root, &ikey)
+                .and_then(|it| {
+                    it.get("status").and_then(|v| v.as_str()).map(String::from)
+                })
+                .as_deref()
+                == Some(pipeline::ST_RUNNING);
+            match (dkind.as_str(), cur_running) {
+                ("done", true) => {
+                    match pipeline::request_transition(&self.root, &ikey, pipeline::ST_DONE) {
+                        Ok(_) => {
+                            conlog(
+                                "control",
+                                "sys",
+                                &format!("{}: 委譲 chat #{} の完了で課題 done", ikey, id),
+                            );
+                            let _ = pipeline::set_field(
+                                &self.root,
+                                &ikey,
+                                "finishedAt",
+                                json!(now_iso()),
+                            );
+                            if let Some(it) = crate::runner::find_issue(&self.root, &ikey) {
+                                let reason = format!(
+                                    "[kasugai-agent] 委譲 chat #{} による対応が完了しました",
+                                    id
+                                );
+                                crate::runner::report_issue(self, &it, &reason).await;
+                                // GitHub 由来の課題は完了理由を投稿した上で
+                                // issue をクローズする（issue-lifecycle.mmd）
+                                let cfg = self.cfg().await;
+                                if let Some(repo) = App::git_repo(
+                                    &cfg,
+                                    it.get("repo").and_then(|v| v.as_str()).unwrap_or(""),
+                                ) {
+                                    let slug = it
+                                        .get("slug")
+                                        .and_then(|v| v.as_str())
+                                        .map(String::from)
+                                        .or_else(|| repo_slug(Some(repo)))
+                                        .unwrap_or_default();
+                                    let num = it.get("number").and_then(|v| v.as_u64());
+                                    if !slug.is_empty() && num.is_some() {
+                                        let dir = std::path::Path::new(
+                                            repo.get("path")
+                                                .and_then(|v| v.as_str())
+                                                .unwrap_or(""),
+                                        );
+                                        if let Err(e) = crate::github::issue_close(
+                                            dir,
+                                            &slug,
+                                            num.unwrap(),
+                                        )
+                                        .await
+                                        {
+                                            conlog(
+                                                "control",
+                                                "err",
+                                                &format!(
+                                                    "issue #{} のクローズ失敗: {}",
+                                                    num.unwrap(),
+                                                    e
+                                                ),
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                            // 完了課題はこの枠に残さず、課題レコードを削除する
+                            // （完了表示は中央ペインの委譲 chat カードが担う。
+                            // 監査・証跡・知見は別系統に残る）。
+                            // postPush 監視中の課題は監視終了まで残し、
+                            // drain の sweep が終了後に削除する
+                            let pp_active = crate::runner::find_issue(&self.root, &ikey)
+                                .and_then(|it| {
+                                    it.get("postPush")
+                                        .and_then(|p| p.get("state"))
+                                        .and_then(|v| v.as_str())
+                                        .map(String::from)
+                                })
+                                .is_some_and(|s| {
+                                    matches!(s.as_str(), "checking" | "waiting" | "fixing")
+                                });
+                            if !pp_active {
+                                // 削除前に case/eval へ同期（学習データの
+                                // 取りこぼし防止）
+                                crate::cases::sync_cases(&self.root);
+                                crate::evals::sync_evals(&self.root);
+                                crate::audit::record(
+                                    &self.root,
+                                    &ikey,
+                                    "auto",
+                                    "complete-delete",
+                                    None,
+                                    Map::from_iter([("chat".into(), json!(id))]),
+                                );
+                            }
+                            if !pp_active && crate::store::delete_issue(&self.root, &ikey) {
+                                let mut chats = self.chats.lock().await;
+                                if let Some(s) = chats.get_mut(&id) {
+                                    s.issue_key = None;
+                                }
+                                drop(chats);
+                                self.persist_chats().await;
+                            }
+                        }
+                        Err(e) => conlog(
+                            "control",
+                            "err",
+                            &format!("{}: done 遷移失敗: {}", ikey, e),
+                        ),
+                    }
+                    self.sse("issues", &json!({}));
+                }
+                ("unverified", true) => {
+                    if let Err(e) =
+                        pipeline::request_transition(&self.root, &ikey, pipeline::ST_QUEUED)
+                    {
+                        conlog(
+                            "control",
+                            "err",
+                            &format!("{}: queued 差し戻し失敗: {}", ikey, e),
+                        );
+                    } else {
+                        // queued へ戻った課題は人の再 dispatch で新規 chat を
+                        // 起票するため、この chat の委譲リンクを外す
+                        // （旧 chat への後続送信で誤写像しない）
+                        let _ = pipeline::set_field(
+                            &self.root,
+                            &ikey,
+                            "chatId",
+                            Value::Null,
+                        );
+                        let mut chats = self.chats.lock().await;
+                        if let Some(s) = chats.get_mut(&id) {
+                            s.issue_key = None;
+                        }
+                        drop(chats);
+                        self.persist_chats().await;
+                    }
+                    self.sse("issues", &json!({}));
+                }
+                _ => {}
+            }
         }
     }
 
@@ -1037,11 +1336,17 @@ impl App {
                 Job::StartOnly => {
                     let chat = self.chats.lock().await.get(&id).map(|s| s.chat.clone());
                     if let Some(chat) = chat {
-                        match chat.ensure_session().await {
-                            Ok(()) => n_resumed += 1,
-                            Err(e) => {
-                                chat.push_sys(&format!("[処理再開失敗] {}", e)).await;
-                            }
+                        // 同時起動枠が無ければセッション起動を見送る
+                        // （ensure_session は proc spawn を伴うため。
+                        // 開始のみの再開は idle 追い出ししない）
+                        match self.acquire_proc_slot(id, false).await {
+                            Err(_) => {}
+                            Ok(()) => match chat.ensure_session().await {
+                                Ok(()) => n_resumed += 1,
+                                Err(e) => {
+                                    chat.push_sys(&format!("[処理再開失敗] {}", e)).await;
+                                }
+                            },
                         }
                     }
                 }
@@ -1065,7 +1370,8 @@ impl App {
                 let Some(s) = chats.get(id) else { continue };
                 let mut c = s.chat.core().lock().await;
                 let Some(wstate) = c.waiting.as_mut() else { continue };
-                if wstate.kind == "repo" {
+                // repo 確認待ちは人ゲート、capacity 待機は枠管理が解放する
+                if wstate.kind == "repo" || wstate.kind == "capacity" {
                     continue;
                 }
                 wstate.blocked_by.retain(|b| busy.contains(b));
@@ -1084,15 +1390,12 @@ impl App {
                 if let Some(s) = chats2.get(&id) {
                     let chat = s.chat.clone();
                     drop(chats2);
-                    let _ = self.evt_tx.send(CtrlEvt::Changed { id });
-                    if let Err(e) = chat.send(text, None).await {
-                        chat.push_sys(&format!("[再開失敗] {}", e)).await;
-                    } else {
-                        n_released += 1;
-                    }
+                    self.send_with_slot(id, &chat, text).await;
+                    n_released += 1;
                 }
             }
         }
+        self.drain_capacity().await;
         if n_rework + n_verify + n_resumed + n_released > 0 {
             conlog(
                 "control",
@@ -1108,6 +1411,69 @@ impl App {
         self.persist_chats().await;
         self.sse("chats", &json!({}));
         json!({"ok": true, "reworked": n_rework, "resumed": n_resumed, "verify": n_verify, "released": n_released})
+    }
+
+    /// スリープ中（resumable: acp・proc無・savedSessionId有）の chat を
+    /// 全件 ensure_session で起動する（panel-layout.mmd の「スリープ起動」）。
+    /// prompt は送らず session/load のみ → busy 化しない。同時起動枠は
+    /// evict_idle=false で確保し、枠超過分はスリープのまま残す
+    /// （次回送信時に lazy 再開）。busy・要人対応・待機中は対象外。
+    pub async fn start_suspended(self: &Arc<Self>, repo_f: Option<String>) -> Value {
+        let ids: Vec<i64> = {
+            let chats = self.chats.lock().await;
+            let mut out = Vec::new();
+            for (id, s) in chats.iter() {
+                if let Some(rf) = &repo_f {
+                    if repo_slug(s.repo.as_ref()).as_deref() != Some(rf.as_str()) {
+                        continue;
+                    }
+                }
+                let c = s.chat.core().lock().await;
+                if s.chat.transport() == "acp"
+                    && !s.chat.has_proc().await
+                    && c.saved_session_id.is_some()
+                    && !c.busy
+                    && c.waiting.is_none()
+                    && !s.needs_human
+                {
+                    out.push(*id);
+                }
+            }
+            out
+        };
+        let mut started = 0usize;
+        let mut skipped = 0usize;
+        let mut failed = 0usize;
+        for id in ids {
+            if self.acquire_proc_slot(id, false).await.is_err() {
+                skipped += 1;
+                continue;
+            }
+            let chat = self.chats.lock().await.get(&id).map(|s| s.chat.clone());
+            let Some(chat) = chat else { continue };
+            match chat.ensure_session().await {
+                Ok(()) => {
+                    clear_attach_transcript(self, id).await;
+                    started += 1;
+                }
+                Err(e) => {
+                    failed += 1;
+                    chat.push_sys(&format!("[起動失敗] {}", e)).await;
+                }
+            }
+        }
+        if started + skipped + failed > 0 {
+            conlog(
+                "control",
+                "sys",
+                &format!(
+                    "スリープ一括起動: 起動 {}・枠超過skip {}・失敗 {}",
+                    started, skipped, failed
+                ),
+            );
+        }
+        self.sse("chats", &json!({}));
+        json!({"ok": true, "started": started, "skipped": skipped, "failed": failed})
     }
 
     pub async fn spawn_splits(self: &Arc<Self>, id: i64) {
@@ -1292,7 +1658,7 @@ impl App {
     }
 
     /// 内部経路の送信（sendToChat 移植）: 待機 → 保留、パス競合 → 実装待機
-    async fn send_to_chat(
+    pub(crate) async fn send_to_chat(
         self: &Arc<Self>,
         id: i64,
         text: String,
@@ -1330,11 +1696,153 @@ impl App {
             let mut c = chat.core().lock().await;
             setup_claims_core(&mut c, &text, &cwd);
         }
-        chat.send(text, display).await
+        // 同時起動セッション枠（maxConcurrentSessions・既定3・0=無制限）:
+        // proc 未保有の chat が新規起動する前に枠を確保する。満杯なら
+        // 最も古い idle proc を suspend（savedSessionId 保持で自動再開可）
+        // して空け、全枠 busy なら capacity 待機へ
+        if !chat.has_proc().await {
+            if let Err(blockers) = self.acquire_proc_slot(id, true).await {
+                let mut c = chat.core().lock().await;
+                c.hold(&text, Vec::new(), blockers, "capacity", None, display.as_deref());
+                drop(c);
+                self.sse("chat", &json!({"id": id}));
+                return Ok(());
+            }
+        }
+        let r = chat.send(text, display).await;
+        if r.is_ok() {
+            clear_attach_transcript(self, id).await;
+        }
+        r
+    }
+
+    /// 同時起動セッション枠の確保: proc 保持 chat 数が
+    /// maxConcurrentSessions（0=無制限）未満なら Ok。満杯なら最も
+    /// 活動時刻の古い idle（busy でない）proc を suspend して枠を空け
+    /// Ok。全 proc が busy なら Err(その id 一覧) → caller は待機へ
+    /// 同時起動枠の確保。evict_idle=true（送信経路）のみ満杯時に
+    /// 最古の idle proc を suspend して枠を空ける。resume/開始のみの
+    /// 再開要求は evict_idle=false で呼び、枠が無ければ追い出さず Err
+    /// を返す（呼出側は savedSessionId を残したまま skip → 次回送信で
+    /// lazy 再開）。resume が idle proc を逐次追い出す spawn→kill
+    /// コンベアを防ぐための区別
+    pub async fn acquire_proc_slot(
+        self: &Arc<Self>,
+        self_id: i64,
+        evict_idle: bool,
+    ) -> Result<(), Vec<i64>> {
+        let max = cfg_f64(&self.cfg().await, "maxConcurrentSessions", 3.0);
+        if max <= 0.0 {
+            return Ok(());
+        }
+        let chats = self.chats.lock().await;
+        let mut n_live = 0i64;
+        let mut blockers = Vec::new();
+        let mut oldest_idle: Option<(i64, i64)> = None; // (last_activity, id)
+        for (id, s) in chats.iter() {
+            if *id == self_id || !s.chat.has_proc().await {
+                continue;
+            }
+            n_live += 1;
+            let c = s.chat.core().lock().await;
+            // busy または起動中（session 未確立=ready false）の proc は
+            // suspend 不可 — ハンドシェイク途中で kill すると
+            // 「initialize: session closed」で起動自体が失敗する
+            if c.busy || !c.ready {
+                blockers.push(*id);
+            } else if oldest_idle.map(|(t, _)| c.last_activity < t).unwrap_or(true) {
+                oldest_idle = Some((c.last_activity, *id));
+            }
+        }
+        if n_live < max as i64 {
+            return Ok(());
+        }
+        // idle proc を suspend（savedSessionId は残るので次回送信で自動再開）
+        // — 送信経路（evict_idle）のみ。resume 経路は追い出さない
+        if let Some((_, suspend_id)) = oldest_idle.filter(|_| evict_idle) {
+            if let Some(s) = chats.get(&suspend_id) {
+                s.chat
+                    .push_sys(
+                        "[一時停止] 同時起動セッション数の上限のため停止しました（次の送信で自動再開します）",
+                    )
+                    .await;
+                s.chat.kill_proc().await;
+                drop(chats);
+                let _ = self.evt_tx.send(CtrlEvt::Changed { id: suspend_id });
+                return Ok(());
+            }
+        }
+        Err(blockers)
+    }
+
+    /// capacity 待機の drain: 枠が空いた順に最古の待機 chat を解放して
+    /// 保留 prompt を再送する。release_waiters の末尾から呼ぶ
+    pub async fn drain_capacity(self: &Arc<Self>) {
+        loop {
+            let next = {
+                let chats = self.chats.lock().await;
+                let mut best: Option<(i64, String)> = None; // (id, since)
+                for (id, s) in chats.iter() {
+                    let c = s.chat.core().lock().await;
+                    let Some(w) = c.waiting.as_ref() else {
+                        continue;
+                    };
+                    if w.kind != "capacity" {
+                        continue;
+                    }
+                    if best.as_ref().map(|(_, t)| w.since < *t).unwrap_or(true) {
+                        best = Some((*id, w.since.clone()));
+                    }
+                }
+                best.map(|(id, _)| id)
+            };
+            let Some(id) = next else { break };
+            if self.acquire_proc_slot(id, true).await.is_err() {
+                break;
+            }
+            let send_job = {
+                let chats = self.chats.lock().await;
+                match chats.get(&id) {
+                    Some(s) => {
+                        let chat = s.chat.clone();
+                        let mut c = chat.core().lock().await;
+                        if c.waiting.as_ref().map(|w| w.kind.as_str()) != Some("capacity") {
+                            None
+                        } else {
+                            match c.leave_wait() {
+                                Some(text) => {
+                                    let cwd = s.chat.cwd().try_read().map(|r| r.clone()).unwrap_or_default();
+                                    setup_claims_core(&mut c, &text, &cwd);
+                                    drop(c);
+                                    Some((chat, text))
+                                }
+                                None => None,
+                            }
+                        }
+                    }
+                    None => None,
+                }
+            };
+            match send_job {
+                Some((chat, text)) => {
+                    let _ = self.evt_tx.send(CtrlEvt::Changed { id });
+                    if let Err(e) = chat.send(text, None).await {
+                        chat.push_sys(&format!("[再開失敗] {}", e)).await;
+                    }
+                }
+                None => continue,
+            }
+        }
     }
 
     /// claims.mjs findConflicts 相当: 他 busy chat のクレームとの衝突
     async fn find_chat_conflicts(&self, self_id: i64, paths: &[String]) -> Vec<Conflict> {
+        // 並列モード（conflictWait=false・POST /api/chat/parallel）:
+        // ファイル競合の直列化を無効化し、send 時の保留・FileTouch 時の
+        // 中断待機をいずれも抑止して全実行を並列に進める
+        if !cfg_bool_default_true(&self.cfg().await, "conflictWait") {
+            return Vec::new();
+        }
         let chats = self.chats.lock().await;
         let mut map = Vec::new();
         for (oid, s) in chats.iter() {
@@ -1353,9 +1861,25 @@ impl App {
         let s = self.chats.lock().await.remove(&id);
         let existed = s.is_some();
         let parent = s.as_ref().and_then(|s| s.parent);
+        let issue_key = s.as_ref().and_then(|s| s.issue_key.clone());
         if let Some(s) = s {
             let _ = s.chat.reset().await;
             let _ = std::fs::remove_dir_all(self.snaps.join(id.to_string()));
+        }
+        // 課題委譲 chat（issueExecMode=parallel）を消した場合、委譲元課題が
+        // running のまま滞留しないよう queued へ戻してリンクを外す
+        if let Some(ikey) = issue_key {
+            let _ = pipeline::set_field(&self.root, &ikey, "chatId", Value::Null);
+            if let Err(e) =
+                pipeline::request_transition(&self.root, &ikey, pipeline::ST_QUEUED)
+            {
+                conlog(
+                    "control",
+                    "warn",
+                    &format!("{}: 委譲 chat 削除時の queued 差し戻し: {}", ikey, e),
+                );
+            }
+            self.sse("issues", &json!({}));
         }
         self.busy_prev.lock().await.remove(&id);
         self.release_waiters(id).await;
@@ -1492,10 +2016,12 @@ pub struct NewChatOpts {
     pub done_kind: Option<String>,
     pub back_prompt: Option<String>,
     pub needs_human: bool,
+    pub issue_key: Option<String>,
     pub usage: Option<crate::chat::Usage>,
     pub waiting: Option<crate::chat::WaitState>,
     pub held_prompts: Vec<String>,
     pub resume_on_release: bool,
+    pub attach_src: Option<String>,
 }
 
 // detached spawn（respawner 用）
@@ -1602,6 +2128,9 @@ async fn api_state(State(app): State<Shared>) -> Response {
         "autostart": crate::launch::autostart_status(),
         "heartbeat": crate::heartbeat::status(),
         "detectorHealth": crate::detector_health::status(&app.root, &cfg),
+        "issueExecMode": cfg_str(&cfg, "issueExecMode").unwrap_or("parallel"),
+        "chatParallel": !cfg_bool_default_true(&cfg, "conflictWait"),
+        "maxConcurrentSessions": cfg_f64(&cfg, "maxConcurrentSessions", 3.0),
     }))
 }
 
@@ -1857,52 +2386,6 @@ async fn api_fs_file(State(app): State<Shared>, Query(q): Query<HashMap<String, 
     j(v)
 }
 
-// git 実行（60s timeout、出力を conlog へ）
-async fn run_git(cwd: &str, args: &[&str]) -> (i32, String) {
-    use tokio::io::AsyncReadExt;
-    let mut gcmd = tokio::process::Command::new("git");
-    gcmd.args(args)
-        .current_dir(cwd)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
-    crate::util::hide_console_tokio(&mut gcmd);
-    let child = gcmd.spawn();
-    let mut child = match child {
-        Ok(c) => c,
-        Err(e) => return (-1, e.to_string()),
-    };
-    let mut so = child.stdout.take().unwrap();
-    let mut se = child.stderr.take().unwrap();
-    let ho = tokio::spawn(async move {
-        let mut v = Vec::new();
-        let _ = so.read_to_end(&mut v).await;
-        v
-    });
-    let he = tokio::spawn(async move {
-        let mut v = Vec::new();
-        let _ = se.read_to_end(&mut v).await;
-        v
-    });
-    let res = tokio::time::timeout(std::time::Duration::from_secs(60), child.wait()).await;
-    match res {
-        Ok(Ok(st)) => {
-            let o = ho.await.unwrap_or_default();
-            let e = he.await.unwrap_or_default();
-            (
-                st.code().unwrap_or(-1),
-                format!("{}{}", String::from_utf8_lossy(&o), String::from_utf8_lossy(&e))
-                    .trim()
-                    .to_string(),
-            )
-        }
-        Ok(Err(e)) => (-1, e.to_string()),
-        Err(_) => {
-            let _ = child.kill().await;
-            (-1, "timeout".to_string())
-        }
-    }
-}
-
 fn git_log(slug: &str, code: i32, out: &str) {
     for l in out.split('\n').take(30).filter(|l| !l.trim().is_empty()) {
         conlog("git", if code != 0 { "err" } else { "out" }, &format!("[{}] {}", slug, l.trim_end()));
@@ -2050,6 +2533,68 @@ async fn api_launch(State(app): State<Shared>, b: Bytes) -> Response {
     }
 }
 
+// ---------- 開発環境の起動管理（dev-envs） ----------
+// 正本: diagrams/dev-envs.mmd → README §8「開発環境の起動管理」
+// config.devEnvironments[] を対象に、起動（detached spawn・出力は
+// logs/devenv-<id>.log）と停止（port 占有 PID の taskkill）を行う
+
+// GET /api/dev-envs — 登録環境の一覧（port 応答で alive 判定）
+async fn api_dev_envs(State(app): State<Shared>) -> Response {
+    let cfg = app.cfg().await;
+    let mut out = vec![];
+    for e in crate::devenvs::envs(&cfg) {
+        out.push(crate::devenvs::describe(&app.root, &e).await);
+    }
+    j(json!({"ok": true, "envs": out}))
+}
+
+// POST /api/dev-envs/launch — {id} を起動（既に応答中なら already:true）
+async fn api_dev_envs_launch(State(app): State<Shared>, b: Bytes) -> Response {
+    let a = body_json(b).await;
+    let id = a.get("id").and_then(|v| v.as_str()).unwrap_or_default();
+    let cfg = app.cfg().await;
+    let Some(e) = crate::devenvs::find(&cfg, id) else {
+        return err(StatusCode::NOT_FOUND, &format!("unknown env: {}", id));
+    };
+    match crate::devenvs::launch(&app.root, &e).await {
+        Ok(LaunchResult::Already) => {
+            j(json!({"ok": true, "already": true, "url": e.url_or_default()}))
+        }
+        Ok(LaunchResult::Launched) => {
+            conlog(
+                "control",
+                "sys",
+                &format!("開発環境を起動: {}（{} / :{}）", e.id, e.command, e.port),
+            );
+            app.sse("devenvs", &json!({"id": e.id}));
+            j(json!({"ok": true, "already": false, "url": e.url_or_default()}))
+        }
+        Err(e2) => err(StatusCode::INTERNAL_SERVER_ERROR, &e2),
+    }
+}
+
+// POST /api/dev-envs/stop — {id} の port 占有プロセスを taskkill
+async fn api_dev_envs_stop(State(app): State<Shared>, b: Bytes) -> Response {
+    let a = body_json(b).await;
+    let id = a.get("id").and_then(|v| v.as_str()).unwrap_or_default();
+    let cfg = app.cfg().await;
+    let Some(e) = crate::devenvs::find(&cfg, id) else {
+        return err(StatusCode::NOT_FOUND, &format!("unknown env: {}", id));
+    };
+    match crate::devenvs::stop(&e) {
+        Ok(killed) => {
+            conlog(
+                "control",
+                "sys",
+                &format!("開発環境を停止: {}（:{}, PID {:?}）", e.id, e.port, killed),
+            );
+            app.sse("devenvs", &json!({"id": e.id}));
+            j(json!({"ok": true, "killed": killed}))
+        }
+        Err(e2) => err(StatusCode::BAD_REQUEST, &e2),
+    }
+}
+
 // GET /api/control/autostart — 自動起動（HKCU Run キー）の登録状態
 // POST /api/control/autostart — {action:"install"|"uninstall"} で登録/解除
 async fn api_autostart_get() -> Response {
@@ -2080,6 +2625,56 @@ async fn api_autostart_post(State(app): State<Shared>, b: Bytes) -> Response {
         }
         Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, &e),
     }
+}
+
+// POST /api/control/issue-mode — 課題の処理方法 issueExecMode の切替
+// （run-control.mmd。{mode:"direct"|"parallel"}・既定 parallel）。
+// direct=runner パイプラインで直接実行（同一 repo の active 課題が
+// ある間 dispatch を止める直列・maxConcurrentRuns クォーラム有効）、
+// parallel=課題を chat 起票で委譲し通常のチャットと同じ流れで並列処理
+async fn api_issue_mode(State(app): State<Shared>, b: Bytes) -> Response {
+    let a = body_json(b).await;
+    let mode = a.get("mode").and_then(|v| v.as_str()).unwrap_or("");
+    if mode != "direct" && mode != "parallel" {
+        return err(StatusCode::BAD_REQUEST, "mode must be direct|parallel");
+    }
+    let mut cfg = app.cfg.write().await;
+    cfg["issueExecMode"] = json!(mode);
+    persist_config(&app.root, &cfg);
+    drop(cfg);
+    conlog(
+        "control",
+        "sys",
+        &format!("課題の処理方法を {} に切替", mode),
+    );
+    app.sse("config", &json!({"issueExecMode": mode}));
+    j(json!({"ok": true, "issueExecMode": mode}))
+}
+
+// POST /api/control/session-limit — 同時起動セッション数
+// maxConcurrentSessions の変更（chat-sequence.mmd。{max:number}・
+// 既定5・0=無制限）。ACP 実行体を保持する chat の同時数を制限し、
+// 超過起動は最古の idle proc suspend or capacity 待機で調停する
+async fn api_session_limit(State(app): State<Shared>, b: Bytes) -> Response {
+    let a = body_json(b).await;
+    let max = a.get("max").and_then(|v| v.as_f64()).unwrap_or(-1.0);
+    if !(0.0..=64.0).contains(&max) || max.fract() != 0.0 {
+        return err(StatusCode::BAD_REQUEST, "max must be integer 0..=64");
+    }
+    {
+        let mut cfg = app.cfg.write().await;
+        cfg["maxConcurrentSessions"] = json!(max);
+        persist_config(&app.root, &cfg);
+    }
+    conlog(
+        "control",
+        "sys",
+        &format!("同時起動セッション数を {} に設定", max),
+    );
+    app.sse("config", &json!({"maxConcurrentSessions": max}));
+    // 引上げ時に滞留した capacity 待機を即座に解放する
+    app.drain_capacity().await;
+    j(json!({"ok": true, "maxConcurrentSessions": max}))
 }
 
 async fn api_chat_agents_get(State(app): State<Shared>) -> Response {
@@ -2156,10 +2751,19 @@ async fn api_chat_agents_post(State(app): State<Shared>, b: Bytes) -> Response {
         };
         entry.insert("exe".into(), json!(exe));
         entry.insert("args".into(), json!(if args.is_empty() { vec![json!("acp")] } else { args }));
+        // auth は文字列（none/devin/任意 methodId）または
+        // {methodId,tokenEnv|tokenSecret} オブジェクトをそのまま保持
         entry.insert(
             "auth".into(),
-            json!(if a.get("auth").and_then(|v| v.as_str()) == Some("devin") { "devin" } else { "none" }),
+            match a.get("auth") {
+                Some(v @ Value::Object(_)) => v.clone(),
+                Some(v) => json!(v.as_str().unwrap_or("none")),
+                None => json!("none"),
+            },
         );
+        if let Some(env) = a.get("env").and_then(|v| v.as_object()) {
+            entry.insert("env".into(), Value::Object(env.clone()));
+        }
     } else {
         entry.insert("type".into(), json!(ty));
         entry.insert("endpoint".into(), json!(endpoint));
@@ -2211,7 +2815,10 @@ async fn api_chat_agents_update(State(app): State<Shared>, b: Bytes) -> Response
         ag["args"] = json!(args);
     }
     if let Some(v) = a.get("auth") {
-        ag["auth"] = json!(if v.as_str() == Some("devin") { "devin" } else { "none" });
+        ag["auth"] = if v.is_object() { v.clone() } else { json!(v.as_str().unwrap_or("none")) };
+    }
+    if let Some(v) = a.get("env") {
+        ag["env"] = v.clone();
     }
     for k in ["endpoint", "provider", "model", "project", "tokenKey"] {
         if let Some(v) = a.get(k) {
@@ -2279,6 +2886,256 @@ async fn api_chat_sessions(State(app): State<Shared>) -> Response {
     j(json!({"ok": true, "sessions": app.chat_list().await}))
 }
 
+// POST /api/<agent>-sessions/attach {id} — 外部エージェントのセッションを
+// kasugai chat として開く。saved_session_id に外部セッション id を立て、
+// 初回送信時に ACP session/load で実セッションへ接続する。
+// 既に同じセッションにアタッチ済みの chat があればそれを再利用する。
+// （共通テンプレ agent-sessions.mmd）
+/// attach_info の messages[] を Msg 列へ変換（注入・再同期の共通形）
+fn attach_msgs(info: &Value) -> Vec<crate::chat::Msg> {
+    info["messages"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .iter()
+        .map(|m| crate::chat::Msg {
+            role: m["role"].as_str().unwrap_or("sys").to_string(),
+            text: m["text"].as_str().unwrap_or("").to_string(),
+            ts: m["ts"].as_str().map(String::from).unwrap_or_else(now_iso),
+            done: true,
+            wire: None,
+        })
+        .collect()
+}
+
+/// attach chat のトランスクリプトを外部セッションと再同期する。
+/// messages 先頭 attach_n 件が注入区間なので最新版で splice 置換する
+///（セッション成長で追記・枝分かれ巻戻しで縮小の両方を吸収）。
+/// 再起動後は messages が空・attach_n=0 なので全件再注入になる。
+async fn sync_attach(app: &App, id: i64) {
+    let (src, sid) = {
+        let chats = app.chats.lock().await;
+        let Some(s) = chats.get(&id) else { return };
+        let Some(src) = s.attach_src.clone() else { return };
+        let c = s.chat.core().lock().await;
+        let sid = c
+            .saved_session_id
+            .clone()
+            .or(c.session_id.clone())
+            .unwrap_or_default();
+        (src, sid)
+    };
+    if sid.is_empty() {
+        return;
+    }
+    let info = match src.as_str() {
+        "devin" => crate::devinenv::attach_info(&sid),
+        "copilot" => crate::copilotenv::attach_info(&sid),
+        _ => None,
+    };
+    let Some(info) = info else { return };
+    let msgs = attach_msgs(&info);
+    let mut chats = app.chats.lock().await;
+    let Some(s) = chats.get_mut(&id) else { return };
+    let mut c = s.chat.core().lock().await;
+    let k = s.attach_n.min(c.messages.len());
+    let changed = c.messages[..k]
+        .iter()
+        .zip(msgs.iter())
+        .any(|(a, b)| a.role != b.role || a.text != b.text)
+        || k != msgs.len();
+    if !changed {
+        return;
+    }
+    c.messages.splice(0..k, msgs.iter().cloned());
+    s.attach_n = msgs.len();
+    drop(c);
+    drop(chats);
+    app.sse("chat", &json!({"id": id}));
+}
+
+/// session/load 成功後、注入済みトランスクリプト（messages 先頭 attach_n 件）を
+/// 除去する。ACP replay が正本となるため注入分は二重表示になる。
+/// attach_src も解除し以後の sync_attach 再注入を止める
+///（この時点で chat は実セッションと同一になる）。
+async fn clear_attach_transcript(app: &App, id: i64) {
+    let mut chats = app.chats.lock().await;
+    let Some(s) = chats.get_mut(&id) else { return };
+    if s.attach_n == 0 && s.attach_src.is_none() {
+        return;
+    }
+    let mut c = s.chat.core().lock().await;
+    // session/load 済み（session_id 確立）のときだけ除去する
+    if c.session_id.is_none() {
+        return;
+    }
+    let k = s.attach_n.min(c.messages.len());
+    c.messages.splice(0..k, std::iter::empty());
+    s.attach_n = 0;
+    s.attach_src = None;
+    drop(c);
+    drop(chats);
+    app.persist_chats().await;
+    app.sse("chat", &json!({"id": id}));
+}
+
+async fn agent_session_attach(
+    app: &App,
+    b: Bytes,
+    agent_keys: &[&str],
+    attach_info: fn(&str) -> Option<Value>,
+    fallback_agent: Option<(&str, Value)>,
+) -> Response {
+    let a = body_json(b).await;
+    let sid = a.get("id").and_then(|v| v.as_str()).unwrap_or("");
+    if sid.is_empty() {
+        return err(StatusCode::BAD_REQUEST, "id required");
+    }
+    let Some(info) = attach_info(sid) else {
+        return err(StatusCode::NOT_FOUND, "session not found");
+    };
+    // 既アタッチ chat の再利用（同一外部セッションへの重複 chat を防ぐ）
+    let reused = {
+        let chats = app.chats.lock().await;
+        let mut hit = None;
+        for (cid, s) in chats.iter() {
+            let c = s.chat.core().lock().await;
+            if c.session_id.as_deref() == Some(sid)
+                || c.saved_session_id.as_deref() == Some(sid)
+            {
+                hit = Some((*cid, repo_slug(s.repo.as_ref())));
+                break;
+            }
+        }
+        hit
+    };
+    if let Some((cid, repo)) = reused {
+        // 旧版で作成された attach chat は attach_src 未設定 → 既存
+        // トランスクリプトとの共通 prefix 長で注入件数を採用する。
+        // chats ガードは sync_attach（内部で再ロック）前に必ず解放する
+        {
+            let chats = app.chats.lock().await;
+            if let Some(s) = chats.get(&cid) {
+                if s.attach_src.is_none() {
+                    let fetched = attach_msgs(&info);
+                    let c = s.chat.core().lock().await;
+                    let mut k = 0usize;
+                    while k < fetched.len()
+                        && k < c.messages.len()
+                        && c.messages[k].role == fetched[k].role
+                        && c.messages[k].text == fetched[k].text
+                    {
+                        k += 1;
+                    }
+                    drop(c);
+                    drop(chats);
+                    let mut chats = app.chats.lock().await;
+                    if let Some(s) = chats.get_mut(&cid) {
+                        s.attach_src = Some(agent_keys[0].to_string());
+                        s.attach_n = k;
+                    }
+                }
+            }
+        }
+        app.persist_chats().await;
+        sync_attach(app, cid).await;
+        return j(json!({
+            "ok": true, "id": cid, "reused": true,
+            "repo": repo,
+        }));
+    }
+    let cwd = info["cwd"].as_str().unwrap_or("").to_string();
+    let cfg = app.cfg().await;
+    // セッション cwd から所属 repo を前方一致で解決（最長一致）。
+    // 登録 repo 外なら None（スコープ外 chat として全 repo で表示する）
+    let repo = {
+        let ncwd = norm_p(&cwd);
+        cfg_arr(&cfg, "repos")
+            .iter()
+            .filter(|r| {
+                let rp = norm_p(r.get("path").and_then(|v| v.as_str()).unwrap_or(""));
+                !rp.is_empty() && (ncwd == rp || ncwd.starts_with(&format!("{}/", rp)))
+            })
+            .max_by_key(|r| norm_p(r.get("path").and_then(|v| v.as_str()).unwrap_or("")).len())
+            .map(|r| (**r).clone())
+    };
+    // chatAgents の実キーを解決。無ければ ACP 直結の既定 spec を
+    // 自動登録する（hub-copilot 等 HTTP 型は session/load 不可のため
+    // attach には使わない）
+    let mut registered = false;
+    let agent = {
+        let mut cfgw = app.cfg.write().await;
+        let (_, agents) = App::chat_agents(&cfgw);
+        match agent_keys.iter().find(|k| agents.contains_key(**k)) {
+            Some(k) => Some(k.to_string()),
+            None => fallback_agent.map(|(id, spec)| {
+                let mut a2 = agents.clone();
+                a2.insert(id.to_string(), spec.clone());
+                cfgw["chatAgents"] = Value::Object(a2);
+                persist_config(&app.root, &cfgw);
+                registered = true;
+                id.to_string()
+            }),
+        }
+    };
+    if registered {
+        app.sse("chatAgents", &json!({}));
+    }
+    let label = format!(
+        "[{}] {}",
+        agent_keys[0],
+        info["title"].as_str().unwrap_or(sid)
+    );
+    let chat_id = app
+        .new_chat(NewChatOpts {
+            label: Some(label),
+            repo: repo.clone(),
+            agent,
+            session_id: Some(sid.to_string()),
+            ..Default::default()
+        })
+        .await;
+    // cwd・トランスクリプトを chat へ流し込む（履歴として表示し、
+    // 実セッションの継続は送信時の session/load が担う。
+    // attach_src/attach_n を記録し GET /api/chat 時の差分再同期に使う）
+    {
+        let msgs = attach_msgs(&info);
+        let n = msgs.len();
+        let mut chats = app.chats.lock().await;
+        if let Some(s) = chats.get_mut(&chat_id) {
+            if !cwd.is_empty() {
+                *s.chat.cwd().write().await = cwd.clone();
+            }
+            s.attach_src = Some(agent_keys[0].to_string());
+            s.attach_n = n;
+            let mut c = s.chat.core().lock().await;
+            c.messages.extend(msgs);
+        }
+    }
+    app.persist_chats().await;
+    app.sse("chat", &json!({"id": chat_id}));
+    j(json!({"ok": true, "id": chat_id, "repo": repo_slug(repo.as_ref())}))
+}
+
+async fn api_devin_attach(State(app): State<Shared>, b: Bytes) -> Response {
+    agent_session_attach(
+        &app, b, &["devin"], crate::devinenv::attach_info,
+        Some(("devin", json!({
+            "label": "Devin", "exe": "devin",
+            "args": ["acp"], "auth": "devin",
+        }))),
+    ).await
+}
+async fn api_copilot_attach(State(app): State<Shared>, b: Bytes) -> Response {
+    agent_session_attach(
+        &app, b, &["copilot"], crate::copilotenv::attach_info,
+        Some(("copilot", json!({
+            "label": "Copilot", "exe": "copilot",
+            "args": ["--acp"], "auth": "none",
+        }))),
+    ).await
+}
+
 async fn api_chat_options(State(app): State<Shared>) -> Response {
     let persisted = load_j(&app.opts_path(), json!({}));
     let chats = app.chats.lock().await;
@@ -2312,6 +3169,7 @@ async fn api_chat_options(State(app): State<Shared>) -> Response {
 
 async fn api_chat_get(State(app): State<Shared>, Query(q): Query<HashMap<String, String>>) -> Response {
     let id: i64 = q.get("id").and_then(|s| s.parse().ok()).unwrap_or(0);
+    sync_attach(&app, id).await;
     let persisted = load_j(&app.opts_path(), json!({}));
     let chats = app.chats.lock().await;
     let Some(s) = chats.get(&id) else {
@@ -2344,6 +3202,11 @@ async fn api_chat_get(State(app): State<Shared>, Query(q): Query<HashMap<String,
         .unwrap_or(Value::Null);
     snap["backPending"] = json!(s.back_prompt.is_some());
     snap["needsHuman"] = json!(s.needs_human);
+    snap["issueKey"] = s
+        .issue_key
+        .clone()
+        .map(Value::String)
+        .unwrap_or(Value::Null);
     snap["children"] = json!(children);
     j(snap)
 }
@@ -2525,6 +3388,7 @@ async fn api_chat_send(State(app): State<Shared>, b: Bytes) -> Response {
     }
     match chat.send(text, display.clone()).await {
         Ok(()) => {
+            clear_attach_transcript(&app, id).await;
             if display.is_some() {
                 mark_primed(&app, id).await;
             }
@@ -2783,8 +3647,18 @@ async fn api_chat_resume(State(app): State<Shared>, b: Bytes) -> Response {
         }
         (s.chat.clone(), std::mem::take(&mut c.held_prompts))
     };
+    // 同時起動枠（maxConcurrentSessions）が取れなければ再開しない
+    // （開始のみの再開は idle proc を追い出さない）
+    if let Err(_busy) = app.acquire_proc_slot(id, false).await {
+        chat.core().lock().await.held_prompts.extend(held);
+        return err(
+            StatusCode::CONFLICT,
+            "同時起動セッション数の上限に達しています（実行中のセッション終了後に再試行）",
+        );
+    }
     match chat.ensure_session().await {
         Ok(()) => {
+            clear_attach_transcript(&app, id).await;
             if !held.is_empty() {
                 if let Err(e) = app.send_to_chat(id, held.join("\n"), None).await {
                     chat.push_sys(&format!("[保留再送失敗] {}", e)).await;
@@ -2808,6 +3682,24 @@ async fn api_chat_resume_all(State(app): State<Shared>, b: Bytes) -> Response {
     let a = body_json(b).await;
     let repo_f = a.get("repo").and_then(|v| v.as_str()).map(String::from);
     j(app.resume_all(repo_f, true).await)
+}
+
+// POST /api/chat/start-suspended — ボード上部の「スリープ起動」ボタン。
+// スリープ中（resumable）セッションを prompt 無しで一括起動
+// （panel-layout.mmd の SUSP ノード）
+async fn api_chat_start_suspended(State(app): State<Shared>, b: Bytes) -> Response {
+    let a = body_json(b).await;
+    let repo_f = a.get("repo").and_then(|v| v.as_str()).map(String::from);
+    j(app.start_suspended(repo_f).await)
+}
+
+// POST /api/chat/parallel — ボード exec 列の「並列」ボタン。{on:bool}（既定
+// true）で並列モードを切替。on→conflictWait=false 永続化＋全ての実装待機を
+// 即時解放、off→直列ガードへ復帰（実処理は App::set_parallel_exec）
+async fn api_chat_parallel(State(app): State<Shared>, b: Bytes) -> Response {
+    let a = body_json(b).await;
+    let on = a.get("on").and_then(|v| v.as_bool()).unwrap_or(true);
+    j(app.set_parallel_exec(on).await)
 }
 
 async fn api_chat_verify(State(app): State<Shared>, b: Bytes) -> Response {
@@ -3226,9 +4118,24 @@ async fn issue_gate_action(app: &Shared, key: &str, action: &str) -> Result<Valu
     }
 }
 
+/// candidate 1件への人ゲート操作（個別・一括 dispatch の共用）。
+/// 課題が未起票なら人判断で即時起票（rate-limit は人判断を優先して
+/// bypass）してから issue_gate_action へ渡す
+async fn candidate_gate_action(app: &Shared, key: &str, action: &str) -> Result<Value, String> {
+    let cands = crate::store::load_candidates(&app.root);
+    let cand = cands
+        .iter()
+        .find(|c| c.get("key").and_then(|v| v.as_str()) == Some(key))
+        .cloned()
+        .ok_or_else(|| "candidate not found".to_string())?;
+    if issue_status(&app.root, key).is_none() {
+        crate::detectors::ingest_forced(&app.root, &cand);
+    }
+    issue_gate_action(app, key, action).await
+}
+
 // POST /api/candidates/{key}/{dispatch|reject} — 候補一覧（判断待ち inbox）の
-// 人ゲート。課題が未起票なら人判断で即時起票（rate-limit は人判断を優先して
-// bypass）してから、対応=即時 dispatch（gated/failed は承認/再実行を兼ねる）・
+// 人ゲート。対応=即時 dispatch（gated/failed は承認/再実行を兼ねる）・
 // 却下=rejected へ（detect-pipeline.mmd INBOX・issue-lifecycle.mmd）
 async fn api_candidates_action(
     State(app): State<Shared>,
@@ -3237,24 +4144,55 @@ async fn api_candidates_action(
     if action != "dispatch" && action != "reject" {
         return err(StatusCode::NOT_FOUND, "unknown action");
     }
-    let cands = crate::store::load_candidates(&app.root);
-    let Some(cand) = cands
-        .iter()
-        .find(|c| c.get("key").and_then(|v| v.as_str()) == Some(key.as_str()))
-    else {
-        return err(StatusCode::NOT_FOUND, "candidate not found");
-    };
-    if issue_status(&app.root, &key).is_none() {
-        crate::detectors::ingest_forced(&app.root, cand);
-    }
-    match issue_gate_action(&app, &key, &action).await {
+    match candidate_gate_action(&app, &key, &action).await {
         Ok(issue) => {
             app.sse("issues", &json!({}));
             app.sse("candidates", &json!({}));
             j(json!({"ok": true, "issue": issue}))
         }
+        Err(e) if e == "candidate not found" => err(StatusCode::NOT_FOUND, &e),
         Err(e) => err(StatusCode::CONFLICT, &e),
     }
+}
+
+// POST /api/candidates/dispatch-all — 候補一覧の「一括対応」
+// （detect-pipeline.mmd INBOX）。body {keys:[...]} の候補を順に
+// dispatch（未起票は即時起票）。同一 repo 競合・同時実行上限で
+// 起動できない課題は autoDispatch:true を立てて待機扱いにし、drain が
+// repo 解放時に自動 dispatch する（issues 一括対応と同じ扱い）
+async fn api_candidates_dispatch_all(State(app): State<Shared>, b: Bytes) -> Response {
+    let a = body_json(b).await;
+    let keys: Vec<String> = a
+        .get("keys")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|x| x.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    if keys.is_empty() {
+        return err(StatusCode::BAD_REQUEST, "keys required");
+    }
+    let mut dispatched = Vec::new();
+    let mut waiting = Vec::new();
+    let mut errors = Vec::new();
+    for k in keys {
+        match candidate_gate_action(&app, &k, "dispatch").await {
+            Ok(_) => dispatched.push(k),
+            Err(e)
+                if e.starts_with("blocked by") || e.starts_with("maxConcurrentRuns") =>
+            {
+                let _ =
+                    crate::pipeline::set_field(&app.root, &k, "autoDispatch", json!(true));
+                waiting.push(k);
+            }
+            Err(e) => errors.push(json!({"key": k, "error": e})),
+        }
+    }
+    app.sse("issues", &json!({}));
+    app.sse("candidates", &json!({}));
+    j(json!({"ok": true, "dispatched": dispatched, "waiting": waiting, "errors": errors}))
 }
 
 // POST /api/issues/{key}/{approve|reject|requeue|push-approve|dispatch|followup|split}
@@ -3300,6 +4238,25 @@ async fn api_issues_action(
             Err(e) => err(StatusCode::NOT_FOUND, &e),
         };
     }
+    // push 後フォローアップループの人操作（postpush-loop.mmd・manual-55878990）
+    // pause: checking|waiting|fixing → paused、resume: paused → checking
+    if action == "postpush-pause" || action == "postpush-resume" {
+        return match crate::postpush::manual(&app.root, &key, &action) {
+            Ok(issue) => {
+                crate::audit::record(
+                    &app.root,
+                    &key,
+                    "human",
+                    &action,
+                    None,
+                    Map::new(),
+                );
+                app.sse("issues", &json!({}));
+                j(json!({"ok": true, "issue": issue}))
+            }
+            Err(e) => err(StatusCode::CONFLICT, &e),
+        };
+    }
     // split は body {items:[{title,body}]} を受ける分割起票操作
     // （manual-0577d650。items 省略時は課題の splitProposal.items を使う）
     if action == "split" {
@@ -3312,6 +4269,7 @@ async fn api_issues_action(
             }
             Err(e) => err(StatusCode::CONFLICT, &e),
         };
+    }
     // cancel は running|verifying の run 中断（manual-5dabae8b。
     // RunCtl.cancel → child kill → queued 差し戻し。verifyBacks 不消費）
     if action == "cancel" {
@@ -3491,14 +4449,13 @@ async fn api_issues_action(
             _ => return err(StatusCode::BAD_REQUEST, "decision must be allow|deny"),
         }
     }
-    }
     let (from, to) = match action.as_str() {
         "approve" => (crate::pipeline::ST_GATED, crate::pipeline::ST_QUEUED),
         "reject" => ("", crate::pipeline::ST_REJECTED),
         "requeue" => (crate::pipeline::ST_FAILED, crate::pipeline::ST_QUEUED),
         "push-approve" => (crate::pipeline::ST_VERIFYING, ""),
-        "dispatch" => ("", ""),
         "plan-approve" | "plan-reject" => ("", ""),
+        "dispatch" => ("", ""),
         _ => return err(StatusCode::NOT_FOUND, "unknown action"),
     };
     let Some(cur) = issue_status(&app.root, &key) else {
@@ -3514,6 +4471,17 @@ async fn api_issues_action(
                 | crate::pipeline::ST_QUEUED
                 | crate::pipeline::ST_PLAN_REVIEW
                 | crate::pipeline::ST_FAILED
+        ),
+        // dispatch は課題キー単位並行制御（manual-5dabae8b）で
+        // running|verifying からの再 trigger も可（旧 run を cancel）
+        "dispatch" => matches!(
+            cur.as_str(),
+            crate::pipeline::ST_GATED
+                | crate::pipeline::ST_QUEUED
+                | crate::pipeline::ST_PLAN_REVIEW
+                | crate::pipeline::ST_FAILED
+                | crate::pipeline::ST_RUNNING
+                | crate::pipeline::ST_VERIFYING
         ),
         "plan-approve" | "plan-reject" => cur == crate::pipeline::ST_PLAN_REVIEW,
         _ => cur == from,
@@ -3635,6 +4603,44 @@ async fn api_incidents_action(
             j(json!({"ok": true, "dispatched": dispatched, "errors": errors}))
         }
     }
+}
+
+// POST /api/issues/dispatch-all — 一括対応（issue-lifecycle.mmd）。
+// body {keys:[...]} の課題を順に dispatch。同一 repo 競合・同時実行上限で
+// 起動できない課題は autoDispatch:true を立てて待機扱いにし、drain が
+// repo 解放時に自動 dispatch する（人の一括承認の延長。フラグは起動時に消費）
+async fn api_issues_dispatch_all(State(app): State<Shared>, b: Bytes) -> Response {
+    let a = body_json(b).await;
+    let keys: Vec<String> = a
+        .get("keys")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|x| x.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    if keys.is_empty() {
+        return err(StatusCode::BAD_REQUEST, "keys required");
+    }
+    let mut dispatched = Vec::new();
+    let mut waiting = Vec::new();
+    let mut errors = Vec::new();
+    for k in keys {
+        match issue_gate_action(&app, &k, "dispatch").await {
+            Ok(_) => dispatched.push(k),
+            Err(e)
+                if e.starts_with("blocked by") || e.starts_with("maxConcurrentRuns") =>
+            {
+                let _ =
+                    crate::pipeline::set_field(&app.root, &k, "autoDispatch", json!(true));
+                waiting.push(k);
+            }
+            Err(e) => errors.push(json!({"key": k, "error": e})),
+        }
+    }
+    app.sse("issues", &json!({}));
+    j(json!({"ok": true, "dispatched": dispatched, "waiting": waiting, "errors": errors}))
 }
 
 // ---------- silences（起票ミュート。matcher+期限・期限切れ自動解除） ----------
@@ -3992,11 +4998,16 @@ pub fn router(app: Shared) -> Router {
         .route("/api/git/push", post(api_git_push))
         .route("/api/control/restart", post(api_restart))
         .route("/api/control/launch", post(api_launch))
+        .route("/api/dev-envs", get(api_dev_envs))
+        .route("/api/dev-envs/launch", post(api_dev_envs_launch))
+        .route("/api/dev-envs/stop", post(api_dev_envs_stop))
         .route("/api/control/import-github", post(api_import_github))
         .route(
             "/api/control/autostart",
             get(api_autostart_get).post(api_autostart_post),
         )
+        .route("/api/control/issue-mode", post(api_issue_mode))
+        .route("/api/control/session-limit", post(api_session_limit))
         .route("/api/chat-agents", get(api_chat_agents_get).post(api_chat_agents_post))
         .route("/api/chat-agents/update", post(api_chat_agents_update))
         .route("/api/chat-agents/remove", post(api_chat_agents_remove))
@@ -4014,6 +5025,8 @@ pub fn router(app: Shared) -> Router {
         .route("/api/chat/reset", post(api_chat_reset))
         .route("/api/chat/resume", post(api_chat_resume))
         .route("/api/chat/resume-all", post(api_chat_resume_all))
+        .route("/api/chat/start-suspended", post(api_chat_start_suspended))
+        .route("/api/chat/parallel", post(api_chat_parallel))
         .route("/api/chat/verify", post(api_chat_verify))
         .route("/api/chat/rework", post(api_chat_rework))
         .route("/api/chat/close", post(api_chat_close))
@@ -4022,11 +5035,13 @@ pub fn router(app: Shared) -> Router {
         .route("/api/chat/option", post(api_chat_option))
         .route("/api/chat/attach", post(api_chat_attach))
         .route("/api/candidates", get(api_candidates_get).post(api_candidates_post))
+        .route("/api/candidates/dispatch-all", post(api_candidates_dispatch_all))
         .route("/api/candidates/{key}/{action}", post(api_candidates_action))
         .route("/api/issues", get(api_issues_get))
-        .route("/api/issues/{key}/{action}", post(api_issues_action))
+        .route("/api/issues/dispatch-all", post(api_issues_dispatch_all))
         .route("/api/issues/{key}/audit", get(api_issue_audit))
         .route("/api/issues/{key}/trace", get(api_issue_trace))
+        .route("/api/issues/{key}/{action}", post(api_issues_action))
         .route("/api/metrics", get(api_metrics))
         .route("/api/incidents", get(api_incidents_get))
         .route("/api/incidents/merge", post(api_incidents_merge))
@@ -4040,6 +5055,19 @@ pub fn router(app: Shared) -> Router {
         .route("/api/skills", get(api_skills))
         .route("/api/refs", get(api_refs))
         .route("/api/doc", get(api_doc))
+        .route("/api/devin-sessions", get(crate::devinenv::api_list))
+        .route("/api/devin-sessions/delete", post(crate::devinenv::api_delete))
+        .route("/api/devin-sessions/cleanup", post(crate::devinenv::api_cleanup))
+        .route("/api/devin-sessions/vacuum", post(crate::devinenv::api_vacuum))
+        .route("/api/devin-sessions/messages", post(crate::devinenv::api_messages))
+        .route("/api/devin-sessions/attach", post(api_devin_attach))
+        .route("/api/copilot-sessions", get(crate::copilotenv::api_list))
+        .route("/api/copilot-sessions/delete", post(crate::copilotenv::api_delete))
+        .route("/api/copilot-sessions/cleanup", post(crate::copilotenv::api_cleanup))
+        .route("/api/copilot-sessions/done", post(crate::copilotenv::api_done))
+        .route("/api/copilot-sessions/undone", post(crate::copilotenv::api_undone))
+        .route("/api/copilot-sessions/messages", post(crate::copilotenv::api_messages))
+        .route("/api/copilot-sessions/attach", post(api_copilot_attach))
         .route("/api/assets", get(crate::assets::api_get))
         .route("/api/assets/check", post(crate::assets::api_check))
         .route("/api/assets/apply", post(crate::assets::api_apply))
@@ -4194,6 +5222,181 @@ pub fn spawn_watchers(app: Shared) {
             }
         });
     }
+    // 外部セッション監視（5s 周期。agent-sessions.mmd の ENVWATCH ノード）
+    // - devin/copilot のセッション一覧を id+lastActivityAt で diff →
+    //   変化時に SSE 'envsessions'（パネルのセッション画面が自動再描画）
+    // - attach 済み chat は対象セッションの lastActivityAt 変化時のみ
+    //   sync_attach（外部で進行中の会話が開いたまま追従する）
+    {
+        let app = app.clone();
+        tokio::spawn(async move {
+            let mut iv = tokio::time::interval(std::time::Duration::from_secs(5));
+            let mut first = true;
+            // agent -> {sid -> (lastActivityAt, title)}
+            let mut prev: HashMap<String, HashMap<String, (String, String)>> = HashMap::new();
+            // chat_id -> 前回 sync_attach した lastActivityAt
+            let mut seen: HashMap<i64, String> = HashMap::new();
+            // 同時編集検出: chat_id -> (基準 lastActivityAt, busy 解除時刻ms)
+            // ・警告済み集合。proc 保持 chat が busy でないのに外部一覧上の
+            //   lastActivityAt が進んだら外部書き込みと判定（自分の書き込みは
+            //   busy 中のみ発生）。busy 解除後 60s は最終書き込みの settle
+            //   期間として除外し、警告は chat ごとに1回まで
+            let mut ext_base: HashMap<i64, (String, i64)> = HashMap::new();
+            let mut ext_warned: HashSet<i64> = HashSet::new();
+            loop {
+                iv.tick().await;
+                for (agent, list) in [
+                    ("devin", crate::devinenv::sessions_list()),
+                    ("copilot", crate::copilotenv::sessions_list()),
+                ] {
+                    let cur: HashMap<String, (String, String)> = list
+                        .iter()
+                        .filter_map(|s| {
+                            Some((
+                                s["id"].as_str()?.to_string(),
+                                (
+                                    s["lastActivityAt"].as_str().unwrap_or("").to_string(),
+                                    s["title"].as_str().unwrap_or("").to_string(),
+                                ),
+                            ))
+                        })
+                        .collect();
+                    let changed = prev.get(agent).map(|o| *o != cur).unwrap_or(true);
+                    if !first && changed {
+                        app.sse("envsessions", &json!({"agent": agent}));
+                    }
+                    prev.insert(agent.to_string(), cur);
+                }
+                // attach 済み chat の追従（lastActivityAt が変わったものだけ）
+                let targets: Vec<(i64, String, String)> = {
+                    let chats = app.chats.lock().await;
+                    let mut out = Vec::new();
+                    for (id, s) in chats.iter() {
+                        let Some(src) = s.attach_src.clone() else { continue };
+                        let c = s.chat.core().lock().await;
+                        let sid = c
+                            .saved_session_id
+                            .clone()
+                            .or(c.session_id.clone())
+                            .unwrap_or_default();
+                        if !sid.is_empty() {
+                            out.push((*id, src, sid));
+                        }
+                    }
+                    out
+                };
+                let live_ids: HashSet<i64> = targets.iter().map(|t| t.0).collect();
+                seen.retain(|id, _| live_ids.contains(id));
+                for (id, src, sid) in targets {
+                    let Some(sess) = prev.get(&src).and_then(|m| m.get(&sid)) else {
+                        // 一覧から消失 = 外部側で削除。一覧自体が空の周回は
+                        // 一時的な読み取り失敗とみなして伝播しない
+                        if prev.get(&src).map(|m| !m.is_empty()).unwrap_or(false) {
+                            seen.remove(&id);
+                            let mut chats = app.chats.lock().await;
+                            if let Some(s) = chats.get_mut(&id) {
+                                s.attach_src = None;
+                                // 外部削除済み sid への session/load 試行と
+                                // resumable 誤表示を防ぐため解除
+                                s.chat.core().lock().await.saved_session_id = None;
+                                drop(chats);
+                                let chat = {
+                                    let chats = app.chats.lock().await;
+                                    chats.get(&id).map(|s| s.chat.clone())
+                                };
+                                if let Some(chat) = chat {
+                                    chat.push_sys(
+                                        "[外部セッション削除] 元のセッションが削除されました（表示履歴は残ります）",
+                                    )
+                                    .await;
+                                }
+                                app.persist_chats().await;
+                                app.sse("chat", &json!({"id": id}));
+                            }
+                        }
+                        continue;
+                    };
+                    // 外部側のタイトル変更を chat ラベルへ反映
+                    // （「[agent] title」形のままの場合のみ = 手動改名は守る）
+                    let want = format!("[{}] {}", src, sess.1);
+                    {
+                        let mut chats = app.chats.lock().await;
+                        if let Some(s) = chats.get_mut(&id) {
+                            if !sess.1.is_empty()
+                                && s.label.starts_with(&format!("[{}] ", src))
+                                && s.label != want
+                            {
+                                s.label = want;
+                                drop(chats);
+                                app.persist_chats().await;
+                                app.sse("chats", &json!({}));
+                            }
+                        }
+                    }
+                    if seen.get(&id).map(|a| a == &sess.0).unwrap_or(false) {
+                        continue;
+                    }
+                    seen.insert(id, sess.0.clone());
+                    sync_attach(&app, id).await;
+                }
+                // 同時編集検出: proc 保持中（session/load 済み）の sid が
+                // 外部一覧にあり、非 busy のまま活動時刻が進んだら警告
+                let live_targets: Vec<(i64, String, bool)> = {
+                    let chats = app.chats.lock().await;
+                    let mut out = Vec::new();
+                    for (id, s) in chats.iter() {
+                        if !s.chat.has_proc().await {
+                            continue;
+                        }
+                        let c = s.chat.core().lock().await;
+                        if let Some(sid) = c.session_id.clone() {
+                            out.push((*id, sid, c.busy));
+                        }
+                    }
+                    out
+                };
+                let live2: HashSet<i64> = live_targets.iter().map(|t| t.0).collect();
+                ext_base.retain(|id, _| live2.contains(id));
+                ext_warned.retain(|id| live2.contains(id));
+                for (id, sid, busy) in live_targets {
+                    let Some((act, _)) =
+                        prev.values().find_map(|m| m.get(&sid)) else {
+                        continue;
+                    };
+                    let now = crate::util::now_ms();
+                    if busy {
+                        // 自身の書き込みが走る期間。基準を現在値へ
+                        ext_base.insert(id, (act.clone(), now));
+                        continue;
+                    }
+                    match ext_base.get(&id).cloned() {
+                        None => {
+                            ext_base.insert(id, (act.clone(), now));
+                        }
+                        Some((prev_act, t)) => {
+                            if prev_act != *act {
+                                ext_base.insert(id, (act.clone(), t));
+                                if now - t > 60_000 && ext_warned.insert(id) {
+                                    let chat = {
+                                        let chats = app.chats.lock().await;
+                                        chats.get(&id).map(|s| s.chat.clone())
+                                    };
+                                    if let Some(chat) = chat {
+                                        chat.push_sys(
+                                            "[警告] このセッションは外部（CLI/Desktop）からも変更されています。同時編集は last-writer-wins になるため注意してください",
+                                        )
+                                        .await;
+                                        app.sse("chat", &json!({"id": id}));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                first = false;
+            }
+        });
+    }
     // CDN アセット更新: 起動時に 1 回確認し、cdnCheckMinutes>0 なら定期化
     {
         let app = app.clone();
@@ -4316,6 +5519,31 @@ pub fn spawn_watchers(app: Shared) {
             }
         });
     }
+    // push 後フォローアップループ（postpush-loop.mmd・manual-55878990）:
+    // postPush サブ状態が checking|waiting|fixing の課題を監視し、CI失敗・
+    // レビュー指摘・コンフリクトの検出を修復課題として起票する。
+    // pollSeconds.postPush（既定300s、<=0 で無効）
+    {
+        let app = app.clone();
+        tokio::spawn(async move {
+            loop {
+                let touched = crate::postpush::poll(&app).await;
+                if touched > 0 {
+                    app.sse("issues", &json!({}));
+                    app.sse("candidates", &json!({}));
+                }
+                let cfg = app.cfg().await;
+                let secs = cfg_obj(&cfg, "pollSeconds")
+                    .and_then(|p| p.get("postPush"))
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(300.0);
+                if secs <= 0.0 {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_secs_f64(secs)).await;
+            }
+        });
+    }
     // 課題検出ポーリング（detect-pipeline.mmd: detector emit → ingest → intake）
     // pollSeconds.issues（既定120s）で github-issues、pollSeconds.health
     // （既定300s）で local-health。新規課題ができたら SSE で即時反映する。
@@ -4323,6 +5551,8 @@ pub fn spawn_watchers(app: Shared) {
     spawn_detector_poller(app.clone(), "ciFailure", 300.0);
     spawn_detector_poller(app.clone(), "specDrift", 300.0);
     spawn_detector_poller(app.clone(), "health", 300.0);
+    spawn_detector_poller(app.clone(), "sessionWatch", 300.0);
+    spawn_detector_poller(app.clone(), "unattributedWork", 600.0);
     // dead man's switch heartbeat（heartbeat.mmd・§11）: agent 自身の死の
     // 外部通知。監視対象パイプラインと別経路の独立タスク
     crate::heartbeat::spawn(app);
@@ -4339,6 +5569,10 @@ fn spawn_detector_poller(app: Shared, kind: &'static str, default_secs: f64) {
                 "health" => crate::detectors::local_health::poll(&cfg).await,
                 "ciFailure" => crate::detectors::ci_failure::poll(&cfg).await,
                 "specDrift" => crate::detectors::spec_drift::poll(&cfg, &app.root).await,
+                "sessionWatch" => crate::detectors::session_watch::poll(&cfg).await,
+                "unattributedWork" => {
+                    crate::detectors::unattributed_work::poll(&cfg, &app).await
+                }
                 _ => crate::detectors::github_issues::poll(&cfg).await,
             };
             // detector 沈黙検知（detector-health.mmd・§11）: 最終実行/最終 emit

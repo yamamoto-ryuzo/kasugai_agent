@@ -6,8 +6,9 @@ use std::path::{Path, PathBuf};
 
 use crate::util::{appdata, basename, home_dir};
 
-// プロジェクト内で走査する skills ディレクトリ（devin 規約 + 他ツール互換）
-const SKILL_DIRS: &[&str] = &[
+// プロジェクト内で走査する skills ディレクトリ（agentskills 共通規格
+// .agents/skills + devin/copilot/claude 等他ツール互換）
+pub const SKILL_DIRS: &[&str] = &[
     ".devin/skills",
     ".agents/skills",
     ".windsurf/skills",

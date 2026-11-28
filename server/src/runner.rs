@@ -24,9 +24,9 @@ use serde_json::{json, Map, Value};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 use tokio::io::AsyncWriteExt;
 use tokio::sync::watch;
-use std::time::{Duration, Instant};
 
 use crate::audit;
 use crate::cases;
@@ -38,9 +38,9 @@ use crate::knowledge;
 use crate::lessons;
 use crate::locks;
 use crate::pipeline;
+use crate::repomatch::repo_slug;
 use crate::risk;
 use crate::stuck;
-use crate::repomatch::repo_slug;
 use crate::store;
 use crate::trace::{self, Trace};
 use crate::trajectory::{self, Trajectory};
@@ -72,17 +72,24 @@ fn traj_existing(root: &Path, key: &str) -> Option<Trajectory> {
         .then(|| Trajectory::open(root, key, idx))
 }
 
-/// trajectory へ1ステップ追記（traj が無い旧形式 run は何もしない）
+/// trajectory へ1ステップ追記（traj が無い旧形式 run は何もしない）。
+/// secret redaction（manual-a3a60c51）: 証跡は生成段階でマスクして書く
 fn tstep(traj: &Option<SharedTraj>, kind: &str, name: &str, data: Value) {
     if let Some(t) = traj {
-        t.lock().unwrap().step(kind, name, data);
+        t.lock().unwrap().step(
+            kind,
+            &crate::redact::scrub(name),
+            crate::redact::scrub_value(&data),
+        );
     }
 }
 
-/// trajectory を終了理由で閉じる
+/// trajectory を終了理由で閉じる（detail もマスク済みにしてから書く）
 fn tfin(traj: &Option<SharedTraj>, kind: &str, detail: &str) {
     if let Some(t) = traj {
-        t.lock().unwrap().finish(trajectory::end_reason(kind, detail));
+        t.lock()
+            .unwrap()
+            .finish(trajectory::end_reason(kind, &crate::redact::scrub(detail)));
     }
 }
 
@@ -113,6 +120,7 @@ fn draining() -> &'static Mutex<HashSet<PathBuf>> {
 fn dispatching() -> &'static tokio::sync::Mutex<()> {
     DISPATCHING.get_or_init(|| tokio::sync::Mutex::new(()))
 }
+
 // ---------- run 制御（run-control.mmd） ----------
 // in-flight run への横入り操作を課題 key 単位で保持する。
 // cancel は run タスクが検出して child kill → queued 差し戻しを行い、
@@ -327,7 +335,6 @@ impl Monitor {
     }
 }
 
-
 fn key_of(issue: &Value) -> String {
     issue
         .get("key")
@@ -336,7 +343,7 @@ fn key_of(issue: &Value) -> String {
         .to_string()
 }
 
-fn find_issue(root: &Path, key: &str) -> Option<Value> {
+pub(crate) fn find_issue(root: &Path, key: &str) -> Option<Value> {
     store::load_issues(root)
         .into_iter()
         .find(|i| key_of(i) == key)
@@ -357,6 +364,9 @@ pub async fn drain(app: &Shared) {
 
 async fn drain_inner(app: &Shared) {
     let root = app.root.clone();
+    // secret redaction（manual-a3a60c51）: secrets.json 登録値のマスク辞書を
+    // 定期再読込する（起動後に追加・更新されたキーも潰せるように）
+    crate::redact::refresh(&root);
     // (0) 起票の reconcile（起票は自動が既定。detect-pipeline.mmd）:
     //     candidate に課題が無ければ intake で補起票する
     let (filed, deferred) = crate::detectors::backfill_issues(&root);
@@ -437,6 +447,7 @@ async fn drain_inner(app: &Shared) {
             Some(pipeline::ST_VERIFYING) => {
                 if !flight_add(&key) {
                     continue;
+                }
                 // drain 再開の verify も cancel 対象にする（manual-5dabae8b）
                 let (cancel_tx, _rx) = watch::channel(false);
                 ctl_register(
@@ -446,11 +457,10 @@ async fn drain_inner(app: &Shared) {
                         stdin: Arc::new(tokio::sync::Mutex::new(None)),
                     },
                 );
-                }
                 let app2 = app.clone();
                 tokio::spawn(async move {
-                    ctl_del(&key);
                     resume_verify(&app2, &key, Obs::default()).await;
+                    ctl_del(&key);
                     flight_del(&key);
                 });
             }
@@ -484,6 +494,28 @@ async fn drain_inner(app: &Shared) {
                 });
             }
             Some(pipeline::ST_RUNNING) => {
+                // chatId 付き running = 並列モードの chat 委譲課題で、
+                // run 追跡を持たないのが正常（housekeep.mmd）。終了区分の
+                // 写像・chat 削除時の queued 差し戻しが課題寿命を管理する
+                // ため drain は failed 化しない。リンク切れ（委譲 chat が
+                // 無い）だけ queued へ戻して滞留を防ぐ
+                if let Some(cid) = it.get("chatId").and_then(|v| v.as_i64()) {
+                    if app.chats.lock().await.contains_key(&cid) {
+                        continue;
+                    }
+                    let _ = pipeline::set_field(&root, &key, "chatId", Value::Null);
+                    if pipeline::request_transition(&root, &key, pipeline::ST_QUEUED)
+                        .is_ok()
+                    {
+                        conlog(
+                            "runner",
+                            "sys",
+                            &format!("{}: 委譲 chat 不在 → queued 差し戻し", key),
+                        );
+                        app.sse("issues", &json!({}));
+                    }
+                    continue;
+                }
                 // run 追跡を持たない running（再起動で子プロセスの待機を喪失）
                 // は失敗扱いにする。再実行は failed → queued で人が戻す
                 let _ = pipeline::set_field(
@@ -541,15 +573,139 @@ async fn drain_inner(app: &Shared) {
             );
         }
     }
-    // queued の起動はここでは行わない —— dispatch は人判断のみで、
+    // 一括対応の待機 dispatch（issue-lifecycle.mmd）: 一覧の「一括対応」は
+    // 人の一括承認であり、同一 repo 競合・maxConcurrentRuns で起動できな
+    // かった queued 課題に autoDispatch フラグが立つ。drain はフラグ付き
+    // queued を個別 dispatch と同じ can_dispatch 経路で起動し、競合が
+    // 解けるまで次回 drain で再試行する。フラグは dispatch 成功時に
+    // dispatch_issue が消費する
+    for it in store::load_issues(&root) {
+        let key = key_of(&it);
+        if key.is_empty() || flight_has(&key) {
+            continue;
+        }
+        let is_queued = it.get("status").and_then(|v| v.as_str())
+            == Some(pipeline::ST_QUEUED);
+        let flagged =
+            it.get("autoDispatch").and_then(|v| v.as_bool()) == Some(true);
+        if !is_queued || !flagged {
+            continue;
+        }
+        match dispatch_issue(app, &key).await {
+            Ok(_) => {
+                conlog(
+                    "runner",
+                    "sys",
+                    &format!("{}: autoDispatch で一括対応の待機課題を自動 dispatch", key),
+                );
+                app.sse("issues", &json!({}));
+            }
+            Err(e) => conlog(
+                "runner",
+                "warn",
+                &format!("{}: autoDispatch dispatch 抑止（{}）", key, e),
+            ),
+        }
+    }
+    // エージェント間ループの包括許可（manual-175e7229・run-control.mmd。
+    // 既定 OFF）: ON の間だけ verify NG 差し戻し（verifyBacks>0）の
+    // queued を drain が自動 dispatch する。runCycleCap・retryAfter の
+    // 制約は can_dispatch でそのまま効く。通常の queued（初回・人判断待ち）
+    // は対象外 —— dispatch は人判断のみの原則は変えない
+    if cfg_bool_default_false(&drain_cfg, "allowAutoLoop") {
+        for it in store::load_issues(&root) {
+            let key = key_of(&it);
+            if key.is_empty() || flight_has(&key) {
+                continue;
+            }
+            let is_queued = it.get("status").and_then(|v| v.as_str())
+                == Some(pipeline::ST_QUEUED);
+            let backs = it
+                .get("verifyBacks")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            if !is_queued || backs == 0 {
+                continue;
+            }
+            match dispatch_issue(app, &key).await {
+                Ok(_) => conlog(
+                    "runner",
+                    "sys",
+                    &format!("{}: allowAutoLoop で verify NG 差し戻しを自動 dispatch", key),
+                ),
+                Err(e) => conlog(
+                    "runner",
+                    "warn",
+                    &format!("{}: allowAutoLoop dispatch 抑止（{}）", key, e),
+                ),
+            }
+        }
+    }
+    // 完了課題の行削除（issue-lifecycle.mmd）: done 課題は ISSUES 枠に
+    // 残さず、委譲 chat カード・監査・事例学習に任せる。削除前に
+    // case/eval へ同期して学習データを取りこぼさない。GitHub 由来は
+    // issue をクローズする（冪等。完了コメントは完了時に report_issue で
+    // 投稿済み）。postPush 監視中（checking/waiting/fixing）の課題は
+    // 監視終了まで残し、終了後の次回 sweep で削除する
+    crate::cases::sync_cases(&root);
+    crate::evals::sync_evals(&root);
+    let mut swept = false;
+    for it in store::load_issues(&root) {
+        if it.get("status").and_then(|v| v.as_str()) != Some(pipeline::ST_DONE) {
+            continue;
+        }
+        let pp = it
+            .get("postPush")
+            .and_then(|p| p.get("state"))
+            .and_then(|v| v.as_str());
+        if matches!(pp, Some("checking") | Some("waiting") | Some("fixing")) {
+            continue;
+        }
+        let key = key_of(&it);
+        let slug = it.get("slug").and_then(|v| v.as_str()).unwrap_or("");
+        let num = it.get("number").and_then(|v| v.as_u64());
+        if !slug.is_empty() && num.is_some() {
+            if let Some(repo) = App::git_repo(
+                &drain_cfg,
+                it.get("repo").and_then(|v| v.as_str()).unwrap_or(""),
+            )
+            .cloned()
+            {
+                let dir = Path::new(
+                    repo.get("path").and_then(|v| v.as_str()).unwrap_or(""),
+                );
+                if let Err(e) = github::issue_close(dir, slug, num.unwrap()).await {
+                    conlog(
+                        "runner",
+                        "warn",
+                        &format!("{}: issue #{} クローズ失敗: {}", key, num.unwrap(), e),
+                    );
+                }
+            }
+        }
+        if store::delete_issue(&root, &key) {
+            swept = true;
+            conlog(
+                "runner",
+                "sys",
+                &format!("{}: done 課題のレコードを削除", key),
+            );
+        }
+    }
+    if swept {
+        app.sse("issues", &json!({}));
+    }
+    // フラグ無し queued の起動はここでは行わない —— dispatch は人判断のみで、
     // 一覧の対応ボタン（dispatch_issue）だけが課題を起動する
-    // （issue-lifecycle.mmd: queued → running は自動起動しない）
+    // （issue-lifecycle.mmd: queued → running は自動起動しない。
+    // 一括対応で人が承認済みの autoDispatch 待機は除く）
 }
 
 /// queued 課題を起動する唯一の経路（一覧の対応ボタン → dispatch API）。
 /// can_dispatch の論理競合規則を使い、同一 repo の running|verifying や
 /// 同時の dispatch 要求と競合しないよう lock する。
 pub async fn dispatch_issue(app: &Shared, key: &str) -> Result<Value, String> {
+    let _dispatch_guard = dispatching().lock().await;
     let mut issues = store::load_issues(&app.root);
     // 課題キー単位の並行制御（manual-5dabae8b・run-control.mmd）:
     // running|verifying の同一 key への再 dispatch（再 trigger）は
@@ -598,7 +754,6 @@ pub async fn dispatch_issue(app: &Shared, key: &str) -> Result<Value, String> {
             issues = store::load_issues(&app.root);
         }
     }
-    let _dispatch_guard = dispatching().lock().await;
     if flight_has(key) {
         return Err("already running".into());
     }
@@ -617,12 +772,19 @@ pub async fn dispatch_issue(app: &Shared, key: &str) -> Result<Value, String> {
         .into_iter()
         .find(|i| key_of(i) == key)
         .ok_or_else(|| "issue not found".to_string())?;
-    // 計画承認ゲート（manual-883d17ee）: planGate 課題は実装着手前に
-    // planning（計画生成 + planning critic）を経由する。承認済み
-    // （planApproved）は通常通り running へ
-    if issue.get("planGate").and_then(|v| v.as_bool()) == Some(true)
+    // 一括対応の自動起動枠（autoDispatch）を消費する。queued に戻った
+    // 場合は再び人判断を要する（verify 差し戻しで無限自動化しない）
+    if issue.get("autoDispatch").and_then(|v| v.as_bool()) == Some(true) {
+        let _ = pipeline::set_field(&app.root, key, "autoDispatch", json!(false));
+    }
+    if parallel {
+        start_issue_chat(app, issue).await?;
+    } else if issue.get("planGate").and_then(|v| v.as_bool()) == Some(true)
         && issue.get("planApproved").and_then(|v| v.as_bool()) != Some(true)
     {
+        // 計画承認ゲート（manual-883d17ee）: planGate 課題は実装着手前に
+        // planning（計画生成 + planning critic）を経由する。承認済み
+        // （planApproved）は通常通り running へ
         start_plan(app, issue).await?;
     } else {
         start_run(app, issue).await?;
@@ -630,14 +792,140 @@ pub async fn dispatch_issue(app: &Shared, key: &str) -> Result<Value, String> {
     find_issue(&app.root, key).ok_or_else(|| "issue not found".to_string())
 }
 
+/// 並列モード（issueExecMode=parallel）の dispatch: runner run の代わりに
+/// 課題を委譲した chat を起票し、通常のチャット起票と同じ流れで処理する
+/// （issue-lifecycle.mmd）。課題は running（chatId リンク付き）となり、
+/// chat 側の終了区分が課題状態へ写像される（control の完了検知）
+async fn start_issue_chat(app: &Shared, issue: Value) -> Result<(), String> {
+    let root = app.root.clone();
+    let key = key_of(&issue);
+    let title = issue
+        .get("title")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let cfg = app.cfg().await;
+    let repo = App::git_repo(
+        &cfg,
+        issue.get("repo").and_then(|v| v.as_str()).unwrap_or(""),
+    )
+    .cloned();
+    // 委譲セットアップ中（running だが chatId 未設定）を drain の孤児 run
+    // 検出から守るため、chatId 書込みが終わるまで in-flight 扱いにする
+    if !flight_add(&key) {
+        return Err("already running".into());
+    }
+    if let Err(e) = pipeline::request_transition(&root, &key, pipeline::ST_RUNNING) {
+        flight_del(&key);
+        let msg = format!("{}: running 遷移失敗: {}", key, e);
+        conlog("runner", "err", &msg);
+        return Err(msg);
+    }
+    app.sse("issues", &json!({}));
+    // 失効リンクの掃除: failed 化等で chatId が残ったまま再 dispatch された
+    // 場合、旧委譲 chat が後で done になったとき誤って課題へ写像する
+    // （done→課題 done）のを防ぐため、新規 chat 起票前に旧 chat の
+    // issue_key を外す（issue-lifecycle.mmd）
+    if let Some(old_cid) = issue.get("chatId").and_then(|v| v.as_i64()) {
+        let mut chats = app.chats.lock().await;
+        if let Some(s) = chats.get_mut(&old_cid) {
+            s.issue_key = None;
+        }
+        drop(chats);
+        app.persist_chats().await;
+    }
+    let cid = app
+        .new_chat(crate::control::NewChatOpts {
+            label: Some(if title.is_empty() {
+                key.clone()
+            } else {
+                title.clone()
+            }),
+            repo,
+            mode: Some("direct".to_string()),
+            issue_key: Some(key.clone()),
+            ..Default::default()
+        })
+        .await;
+    let _ = pipeline::set_field(&root, &key, "chatId", json!(cid));
+    app.sse("issues", &json!({}));
+    // dispatch prompt は runner run と同じ組立て（課題本文・受入条件・
+    // 知見・フォローアップ）をそのまま chat の初回プロンプトへ送る
+    let prompt = build_prompt_full(&root, &issue, None).0;
+    if let Err(e) = app
+        .send_to_chat(cid, prompt, Some(format!("[課題] {}", title)))
+        .await
+    {
+        // 起動失敗は queued へ戻してリンクを外す（running 滞留を防ぐ）
+        {
+            let mut chats = app.chats.lock().await;
+            if let Some(s) = chats.get_mut(&cid) {
+                s.issue_key = None;
+            }
+        }
+        app.persist_chats().await;
+        let _ = pipeline::set_field(&root, &key, "chatId", Value::Null);
+        let _ = pipeline::request_transition(&root, &key, pipeline::ST_QUEUED);
+        app.sse("issues", &json!({}));
+        app.sse("chats", &json!({}));
+        flight_del(&key);
+        return Err(format!("chat 起票失敗: {}", e));
+    }
+    flight_del(&key);
+    conlog(
+        "runner",
+        "sys",
+        &format!("{}: 並列モードで chat #{} を起票", key, cid),
+    );
+    Ok(())
+}
+
+/// chat 委譲課題（issueExecMode=parallel）の中断共通処理: 委譲先 chat を
+/// 停止し、課題を queued へ戻して chatId/issue_key の双方向リンクを外す。
+/// 戻り値は「課題が queued へ戻ったか」
+async fn cancel_issue_chat(app: &Shared, key: &str, chat_id: i64) -> bool {
+    let chat = {
+        let mut chats = app.chats.lock().await;
+        match chats.get_mut(&chat_id) {
+            Some(s) => {
+                s.issue_key = None;
+                Some(s.chat.clone())
+            }
+            None => None,
+        }
+    };
+    app.persist_chats().await;
+    if let Some(chat) = chat {
+        chat.cancel().await;
+    }
+    let _ = pipeline::set_field(&app.root, key, "chatId", Value::Null);
+    match pipeline::request_transition(&app.root, key, pipeline::ST_QUEUED) {
+        Ok(_) => {
+            app.sse("issues", &json!({}));
+            app.sse("chats", &json!({}));
+            true
+        }
+        Err(e) => {
+            conlog(
+                "runner",
+                "err",
+                &format!("{}: queued 差し戻し失敗: {}", key, e),
+            );
+            false
+        }
+    }
+}
+
 // ---------- run（実装実行） ----------
 
 /// 実行体の解決: chatAgents の active agent の exe。promptArgs（既定 ["-p"]）
 /// が非対話モードの引数で、最後に prompt を1引数として連結する。
+/// 戻り値は (exe, promptArgs, env)。env は agent 定義の env マップ解決済み
+/// （secret:/env: 参照は config.rs agent_env で引く）。
 /// active が exe を持たない場合は exe 持ちの agent を探す。
-fn resolve_agent(cfg: &Value) -> Option<(String, Vec<String>)> {
+fn resolve_agent(root: &Path, cfg: &Value) -> Option<(String, Vec<String>, Vec<(String, String)>)> {
     let (active, agents) = App::chat_agents(cfg);
-    let pick = |a: &Value| -> Option<(String, Vec<String>)> {
+    let pick = |a: &Value| -> Option<(String, Vec<String>, Vec<(String, String)>)> {
         let exe = a
             .get("exe")
             .and_then(|v| v.as_str())
@@ -653,12 +941,67 @@ fn resolve_agent(cfg: &Value) -> Option<(String, Vec<String>)> {
             })
             .filter(|arr: &Vec<String>| !arr.is_empty())
             .unwrap_or_else(|| vec!["-p".to_string()]);
-        Some((exe, args))
+        Some((exe, args, crate::config::agent_env(root, a)))
     };
     active
         .and_then(|id| agents.get(&id))
         .and_then(pick)
         .or_else(|| agents.values().find_map(pick))
+}
+
+/// 帯別実行体の解決（manual-73b96b24・model-routing.mmd）:
+/// modelRouting.agents.<tier> に指名した chatAgents キーの exe+promptArgs。
+/// 帯未設定・exe 無し・modelRouting 自体が無い場合は None を返し、
+/// 呼出側が resolve_agent（active 実行体）へフォールバックする。
+fn resolve_agent_tier(root: &Path, cfg: &Value, tier: &str) -> Option<(String, Vec<String>, Vec<(String, String)>)> {
+    let (_, agents) = App::chat_agents(cfg);
+    let id = cfg
+        .get("modelRouting")
+        .and_then(|r| r.get("agents"))
+        .and_then(|a| a.get(tier))
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())?;
+    let a = agents.get(id)?;
+    let exe = a
+        .get("exe")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())?
+        .to_string();
+    let args = a
+        .get("promptArgs")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|x| x.as_str().map(String::from))
+                .collect::<Vec<_>>()
+        })
+        .filter(|arr: &Vec<String>| !arr.is_empty())
+        .unwrap_or_else(|| vec!["-p".to_string()]);
+    Some((exe, args, crate::config::agent_env(root, a)))
+}
+
+/// 課題の modelTier（未設定は standard）を読む
+fn issue_model_tier(issue: &Value) -> &str {
+    issue
+        .get("modelTier")
+        .and_then(|v| v.as_str())
+        .filter(|t| matches!(*t, "light" | "standard" | "deep"))
+        .unwrap_or("standard")
+}
+
+/// 帯別解決 → なければ active 実行体（model-routing.mmd のフォールバック）
+fn resolve_agent_routed(root: &Path, cfg: &Value, tier: &str) -> Option<(String, Vec<String>, Vec<(String, String)>)> {
+    resolve_agent_tier(root, cfg, tier).or_else(|| resolve_agent(root, cfg))
+}
+
+/// 批評系パス（計画生成・planning critic・diff review）の帯を解決する。
+/// 既定 light（コスト抑制）。modelRouting.criticTier で帯を変更可。
+fn critic_tier(cfg: &Value) -> &str {
+    cfg.get("modelRouting")
+        .and_then(|r| r.get("criticTier"))
+        .and_then(|v| v.as_str())
+        .filter(|t| matches!(*t, "light" | "standard" | "deep"))
+        .unwrap_or("light")
 }
 
 async fn start_run(app: &Shared, issue: Value) -> Result<(), String> {
@@ -670,7 +1013,10 @@ async fn start_run(app: &Shared, issue: Value) -> Result<(), String> {
         .unwrap_or("")
         .to_string();
     let cfg = app.cfg().await;
-    let agent = resolve_agent(&cfg);
+    // モデルルーティング（manual-73b96b24）: 実装 run は課題の modelTier
+    // 帯の実行体へ。帯未設定は active 実行体へフォールバック（従来動作）
+    let tier = issue_model_tier(&issue).to_string();
+    let agent = resolve_agent_routed(&root, &cfg, &tier);
     let repo = App::git_repo(
         &cfg,
         issue.get("repo").and_then(|v| v.as_str()).unwrap_or(""),
@@ -696,10 +1042,18 @@ async fn start_run(app: &Shared, issue: Value) -> Result<(), String> {
         .and_then(|v| v.as_array())
         .cloned()
         .unwrap_or_default();
-    runs.push(json!({"startedAt": now_iso(), "sessionLog": log_rel}));
+    // runs[] には帯と実行体 exe も記録する（帯別の実行コスト母数。
+    // model-routing.mmd）
+    runs.push(json!({
+        "startedAt": now_iso(),
+        "sessionLog": log_rel,
+        "modelTier": tier,
+        "agentExe": agent.as_ref().map(|(e, _, _)| e.clone()),
+    }));
     let run_idx = runs.len() - 1;
     let _ = pipeline::set_field(&root, &key, "runs", json!(runs));
     conlog("runner", "sys", &format!("run 開始: {} {}", key, title));
+
     // run 制御ハンドル（run-control.mmd）: cancel・steer の横入りを受け付ける
     let (cancel_tx, _rx) = watch::channel(false);
     ctl_register(
@@ -710,11 +1064,10 @@ async fn start_run(app: &Shared, issue: Value) -> Result<(), String> {
         },
     );
 
-
     let app2 = app.clone();
     tokio::spawn(async move {
-        ctl_del(&key);
         run_and_verify(&app2, &key, &issue, agent, repo, &ev_dir, run_idx).await;
+        ctl_del(&key);
         flight_del(&key);
     });
     Ok(())
@@ -810,7 +1163,6 @@ const DEFAULT_DIFFREVIEW: &str = r#"以下は課題への対応として生成�
 
 5. この実行は非対話（-p）モード。確認を求めず批評を出力して終了する"#;
 
-
 /// ```kasugai-<tag> ブロックの内容を抽出（最後の1つ）
 fn extract_tag_block(text: &str, tag: &str) -> Option<String> {
     let open = format!("```{}", tag);
@@ -832,6 +1184,7 @@ fn extract_tag_block(text: &str, tag: &str) -> Option<String> {
 async fn spawn_capture(
     exe: &str,
     args: &[String],
+    env: &[(String, String)],
     cwd: &Path,
     prompt: &str,
     timeout: Duration,
@@ -839,6 +1192,7 @@ async fn spawn_capture(
     let mut cmd = tokio::process::Command::new(exe);
     cmd.args(args)
         .arg(prompt)
+        .envs(env.iter().cloned())
         .current_dir(cwd)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
@@ -918,7 +1272,6 @@ fn diff_review_prompt(root: &Path, issue: &Value, diff: &str) -> String {
     subst_fields(&tpl, issue, &[("diff", diff.to_string())])
 }
 
-
 /// 計画フェーズ起動: queued → planning で計画生成タスクを spawn
 async fn start_plan(app: &Shared, issue: Value) -> Result<(), String> {
     let root = app.root.clone();
@@ -950,7 +1303,9 @@ async fn run_plan_phase(app: &Shared, key: &str, issue: &Value) {
         let _ = pipeline::request_transition(root, key, pipeline::ST_QUEUED);
         conlog("runner", "err", &format!("{}: 計画差し戻し: {}", key, note));
     };
-    let Some((exe, args)) = resolve_agent(&cfg) else {
+    // モデルルーティング（manual-73b96b24）: 計画生成・planning critic の
+    // 単発批評パスは criticTier（既定 light）の軽量帯で実行する
+    let Some((exe, args, env)) = resolve_agent_routed(&root, &cfg, critic_tier(&cfg)) else {
         back("chatAgents に実行可能な exe がありません");
         return;
     };
@@ -991,7 +1346,7 @@ async fn run_plan_phase(app: &Shared, key: &str, issue: &Value) {
         Map::from_iter([("gen_ai.system".into(), json!(exe))]),
     );
     let ptimeout = Duration::from_secs_f64(cfg_f64(&cfg, "planTimeoutMinutes", 30.0) * 60.0);
-    let out = match spawn_capture(&exe, &args, &repo_path, &plan_prompt(root, issue), ptimeout).await {
+    let out = match spawn_capture(&exe, &args, &env, &repo_path, &plan_prompt(root, issue), ptimeout).await {
         Ok(o) => {
             plan_trace.end(&pspan, true, "", Map::new());
             o
@@ -999,7 +1354,6 @@ async fn run_plan_phase(app: &Shared, key: &str, issue: &Value) {
         Err(e) => {
             plan_trace.end(&pspan, false, &e.to_string(), Map::new());
             plan_trace.event("plan.back", Map::new());
-            back(&format!("計画生成に失敗: {}", e));
             audit::record_run(
                 root,
                 key,
@@ -1007,6 +1361,7 @@ async fn run_plan_phase(app: &Shared, key: &str, issue: &Value) {
                 "plan.back",
                 Map::from_iter([("reason".into(), json!(format!("計画生成に失敗: {}", e)))]),
             );
+            back(&format!("計画生成に失敗: {}", e));
             app.sse("issues", &json!({}));
             return;
         }
@@ -1037,7 +1392,7 @@ async fn run_plan_phase(app: &Shared, key: &str, issue: &Value) {
     let min_conf = cfg_f64(&cfg, "planCriticMinConfidence", 0.7);
     let mut critic_ok = false;
     let cspan = plan_trace.start("llm.plan.critic", trace::KIND_LLM, Map::new());
-    let critic_res = spawn_capture(&exe, &args, &repo_path, &critic_prompt(root, issue, &plan), ctimeout).await;
+    let critic_res = spawn_capture(&exe, &args, &env, &repo_path, &critic_prompt(root, issue, &plan), ctimeout).await;
     match critic_res {
         Ok(cout) => match crate::verify::extract_review(&cout) {
             Some(review) => {
@@ -1052,7 +1407,6 @@ async fn run_plan_phase(app: &Shared, key: &str, issue: &Value) {
                     let notes: Vec<String> = severe.iter().map(|f| f.note.clone()).collect();
                     plan_trace.end(&cspan, false, &notes.join(" / "), Map::new());
                     plan_trace.event("plan.back", Map::new());
-                    back(&format!("計画 critic で Severe 検出: {}", notes.join(" / ")));
                     audit::record_run(
                         root,
                         key,
@@ -1063,6 +1417,7 @@ async fn run_plan_phase(app: &Shared, key: &str, issue: &Value) {
                             ("findings".into(), json!(notes)),
                         ]),
                     );
+                    back(&format!("計画 critic で Severe 検出: {}", notes.join(" / ")));
                     app.sse("issues", &json!({}));
                     return;
                 }
@@ -1160,6 +1515,9 @@ async fn fail_run(
     reason: &str,
     obs: Obs,
 ) {
+    // secret redaction（manual-a3a60c51）: 失敗理由は stderr 由来で
+    // キー流出を含み得る。全書き込み経路で共通のため入口で一度マスクする
+    let reason = &crate::redact::scrub(reason);
     let mut extra = Map::new();
     extra.insert("endedAt".into(), json!(now_iso()));
     extra.insert("error".into(), json!(reason));
@@ -1190,6 +1548,7 @@ async fn fail_run(
         // ACE カウンタ（manual-bcf981dd）: この run に注入したレッスンは
         // 成果に結びつかなかったので harmful++
         lessons::record_outcome(&app.root, &it, false, &app.cfg().await);
+    }
     // 部分成果保全（manual-7df2ce2f）: 失敗 run の途中成果も
     // kasugai/partial-* branch へ保全し、詰まり内容を記録する
     if let Some(it) = find_issue(&app.root, key) {
@@ -1208,7 +1567,6 @@ async fn fail_run(
             preserve_partial(app, key, &it, &repo, run_idx, reason).await;
         }
     }
-    }
     if pipeline::request_transition(&app.root, key, pipeline::ST_FAILED).is_ok() {
         conlog("runner", "err", &format!("{}: run 失敗: {}", key, reason));
         if let Some(it) = find_issue(&app.root, key) {
@@ -1218,6 +1576,7 @@ async fn fail_run(
     }
     app.sse("issues", &json!({}));
 }
+
 /// run の halt・中断処理（run-control.mmd）: child kill 後に構造化理由を
 /// 課題フィールドへ記録（lastStuck/budgetHold/riskHold）し、部分成果を
 /// 保全して running → queued へ戻す。halt は verify NG ではないため
@@ -1425,12 +1784,11 @@ async fn preserve_partial(
     );
 }
 
-
 async fn run_and_verify(
     app: &Shared,
     key: &str,
     issue: &Value,
-    agent: Option<(String, Vec<String>)>,
+    agent: Option<(String, Vec<String>, Vec<(String, String)>)>,
     repo: Option<Value>,
     ev_dir: &Path,
     run_idx: usize,
@@ -1447,7 +1805,7 @@ async fn run_and_verify(
             "verifyLevel".into(),
             issue.get("verifyLevel").cloned().unwrap_or(json!(1)),
         );
-        if let Some((e, _)) = &agent {
+        if let Some((e, _, _)) = &agent {
             meta.insert("agent".into(), json!(e));
         }
         if let Some(r) = &repo {
@@ -1456,6 +1814,12 @@ async fn run_and_verify(
                 json!(r.get("path").and_then(|v| v.as_str()).unwrap_or("")),
             );
         }
+        // secret redaction（manual-a3a60c51）: meta の文字列リーフも
+        // 生成段階でマスク（issue title 等にキーが紛れ込む経路を塞ぐ）
+        let meta = match crate::redact::scrub_value(&Value::Object(meta)) {
+            Value::Object(m) => m,
+            _ => Map::new(),
+        };
         let t = Arc::new(Mutex::new(Trajectory::begin(
             trajectory::run_dir(ev_dir, run_idx),
             meta,
@@ -1468,8 +1832,9 @@ async fn run_and_verify(
         traj: traj.clone(),
         trace: Some(Trace::begin(trajectory::run_dir(ev_dir, run_idx))),
     };
-    let Some((exe, prompt_args)) = agent else {
-        fail_run(app, key, run_idx, "chatAgents に実行可能な exe がありません", obs).await;
+    let Some((exe, prompt_args, env)) = agent else {
+        fail_run(app, key, run_idx, "chatAgents に実行可能な exe がありません", obs)
+            .await;
         return;
     };
     let Some(repo_v) = repo else {
@@ -1487,8 +1852,8 @@ async fn run_and_verify(
         return;
     }
 
-    let (prompt, krefs) = build_prompt_full(root, issue);
-    // 参照した知見を run の記録へ紐付ける（manual-a8c93d14・case-search.mmd）
+    let (prompt, krefs) = build_prompt_full(root, issue, Some(&repo_path));
+    // 参照した知見を run 記録に紐付ける（manual-a8c93d14）
     {
         let mut extra = Map::new();
         extra.insert("knowledgeRefs".into(), krefs);
@@ -1510,14 +1875,17 @@ async fn run_and_verify(
             ("exe".into(), json!(exe)),
             ("args".into(), json!(prompt_args)),
             ("promptChars".into(), json!(prompt.len())),
+            // 帯別の実行コスト母数（model-routing.mmd）
+            ("modelTier".into(), json!(issue_model_tier(issue))),
         ]),
     );
     let log_path = ev_dir.join("run.log");
     let mut cmd = tokio::process::Command::new(&exe);
     cmd.args(&prompt_args)
         .arg(&prompt)
-        .stdin(std::process::Stdio::piped())
+        .envs(env.iter().cloned())
         .current_dir(&repo_path)
+        .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
     hide_console_tokio(&mut cmd);
@@ -1583,8 +1951,8 @@ async fn run_and_verify(
         let Some(pipe) = pipe else { continue };
         let src = src.clone();
         let buf = buf.clone();
-        let mon = mon.clone();
         let traj = traj.clone();
+        let mon = mon.clone();
         readers.push(tokio::spawn(async move {
             use tokio::io::AsyncBufReadExt;
             let mut lines = tokio::io::BufReader::new(pipe).lines();
@@ -1593,15 +1961,17 @@ async fn run_and_verify(
                 if let Some(t) = &traj {
                     // observation: 実行体出力を1行1ステップで逐次追記
                     // （中断しても過程が残る。長行は打ち切る）
+                    // secret redaction（manual-a3a60c51）: 生の実行体出力は
+                    // キー流出を含み得るため書き込み前にマスクする
                     t.lock().unwrap().step(
                         "observation",
-                        stream,
-                        json!({"line": l.chars().take(4000).collect::<String>()}),
+                        stream_s,
+                        json!({"line": crate::redact::scrub(&l.chars().take(4000).collect::<String>())}),
                     );
+                }
                 // 出力監視: stuck・risk・step 予算の発火を記録する。
                 // halt は wait ループ側が行単位の判定結果を見て行う
                 mon.lock().unwrap().feed(stream_s, &l);
-                }
                 let mut b = buf.lock().unwrap();
                 b.push_str(&l);
                 b.push('\n');
@@ -1681,7 +2051,9 @@ async fn run_and_verify(
         let _ = r.await;
     }
     let out_text = buf.lock().unwrap().clone();
-    let _ = std::fs::write(&log_path, out_text.as_str());
+    // secret redaction（manual-a3a60c51）: 証跡は生成段階でマスクして書く。
+    // usage 抽出・conlog への生テキストは別系統なので書込み分のみ潰す
+    let _ = std::fs::write(&log_path, crate::redact::scrub(&out_text).as_str());
     // run コスト（run-cost.mmd）: 経過時間・入出力は常時記録、
     // トークン/費用は出力末尾の usage JSON を検出できた実行体のみ
     let usage = {
@@ -1697,8 +2069,8 @@ async fn run_and_verify(
     };
     {
         let mut extra = Map::new();
-        extra.insert("usage".into(), Value::Object(usage.clone()));
         extra.insert("endedAt".into(), json!(now_iso()));
+        extra.insert("usage".into(), Value::Object(usage.clone()));
         if let Some(c) = code {
             extra.insert("exitCode".into(), json!(c));
         }
@@ -1750,6 +2122,7 @@ async fn run_and_verify(
             if timed_out { " timeout" } else { "" },
             wait_err.map(|e| format!(" err={}", e)).unwrap_or_default()
         ),
+    );
     // run halt・中断（run-control.mmd）: 監視発火（stuck・step 上限・
     // HIGH リスク）・壁時計上限・cancel は検証へ進めず、構造化理由を
     // 記録して部分成果を保全した上で queued へ戻す（verifyBacks 不消費）
@@ -1769,7 +2142,6 @@ async fn run_and_verify(
             return;
         }
     }
-    );
     // 終了コードに関わらず検証へ進める（コミット済み成果の評価は verify の責務）
     if let Err(e) = pipeline::request_transition(root, key, pipeline::ST_VERIFYING) {
         tstep(
@@ -1777,19 +2149,19 @@ async fn run_and_verify(
             "thought",
             "transition.error",
             json!({"note": format!("verifying 遷移失敗: {}", e)}),
+        );
         conlog(
             "runner",
             "err",
             &format!("{}: verifying 遷移失敗: {}", key, e),
-        );
         );
         return;
     }
     tstep(&traj, "state", "verifying", json!({}));
     if let Some(t) = &obs.trace {
         t.event("state.verifying", Map::new());
-    app.sse("issues", &json!({}));
     }
+    app.sse("issues", &json!({}));
     resume_verify(app, key, obs).await;
 }
 
@@ -1865,7 +2237,9 @@ const DEFAULT_DISPATCH: &str = r#"以下の課題に対応してください。
 6. この実行は非対話（-p）モード。確認を求めず、最後に
    完了またはブロックの報告を出力して終了すること"#;
 
-fn build_prompt_full(root: &Path, issue: &Value) -> (String, Value) {
+/// prompt 本体と、注入した知見の参照（runs[].knowledgeRefs へ記録する
+/// 「どの知見を使ったか」の追跡メタ。manual-a8c93d14）
+pub(crate) fn build_prompt_full(root: &Path, issue: &Value, repo_path: Option<&Path>) -> (String, Value) {
     let get = |k: &str| {
         issue
             .get(k)
@@ -1911,18 +2285,20 @@ fn build_prompt_full(root: &Path, issue: &Value) -> (String, Value) {
         out
     };
     let mut p = subst(tpl);
+    let kslug = knowledge::key_slug(&key);
+    let mut injected_runbook: Option<String> = None;
+    let mut injected_knowledge = false;
     // runbook（kind 別対処手順。runbook.mmd・README §5.4）:
     // prompts/runbook/ を <source>-<kind> → <kind> → <source> の順に探す
-    let mut injected_runbook: Option<String> = None;
     if let Some((name, rb)) = knowledge::load_runbook(root, &get("source"), &get("kind")) {
         let rb: String = subst(rb.chars().take(4000).collect());
         p.push_str(&format!("\n\n## 対処手順（runbook: {}）\n\n{}", name, rb));
         injected_runbook = Some(name);
     }
     // knowledge/<slug>.md の知見を注入（課題 key 単位の蓄積）
-    let kslug = knowledge::key_slug(&key);
-    let mut injected_knowledge = false;
-    let kfile = root.join("knowledge").join(format!("{}.md", kslug));
+    let kfile = root
+        .join("knowledge")
+        .join(format!("{}.md", kslug));
     if let Ok(kn) = std::fs::read_to_string(&kfile) {
         let kn: String = kn.chars().take(4000).collect();
         if !kn.trim().is_empty() {
@@ -1940,7 +2316,8 @@ fn build_prompt_full(root: &Path, issue: &Value) -> (String, Value) {
     }
     // 失敗レッスン（lesson-loop.mmd・manual-29799d3e）: 同一課題の直近
     // レッスンと類似課題のレッスンを注入し、同種の失敗を繰り返さない
-    let (lsec, lesson_ids) = lessons::inject_section(root, issue, &load_config(root));
+    let (lsec, lesson_ids) =
+        lessons::inject_section(root, issue, &load_config(root));
     if !lsec.is_empty() {
         p.push_str("\n\n## 失敗レッスン（同種の失敗を繰り返さない）\n\n");
         p.push_str(&lsec);
@@ -1970,6 +2347,7 @@ fn build_prompt_full(root: &Path, issue: &Value) -> (String, Value) {
             let at = f.get("at").and_then(|v| v.as_str()).unwrap_or("");
             p.push_str(&format!("- [{}] {} （{}）\n", kind, text, at));
         }
+    }
     // run 制御差し戻しの注入（run-control.mmd）: 前回 run の halt・
     // スタック・詰まり・却下の構造化情報を prompt へ入れ、同じ失敗や
     // 拒否された方針を繰り返さない
@@ -2010,7 +2388,6 @@ fn build_prompt_full(root: &Path, issue: &Value) -> (String, Value) {
             br
         ));
     }
-    }
     // 事案（incidents.mmd・manual-343b5d37）: 所属事案のメンバー課題を
     // コンテキストとして注入し、関連症状を一体の事案として扱わせる
     if let Some(inc_id) = issue.get("incident").and_then(|v| v.as_str()) {
@@ -2048,6 +2425,16 @@ fn build_prompt_full(root: &Path, issue: &Value) -> (String, Value) {
         p.push_str("\n\n## 承認済み実装計画（この計画に従って実装する）\n\n");
         p.push_str(plan);
     }
+    // AST 単位の構造的コンテキスト（codemap.mmd・manual-38bbe09e）:
+    // 課題本文のトークンと repo の構造単位（関数/impl/class の行範囲）を
+    // 照合し、関連単位のスニペットを注入する。ヒット無し・無効化は付けない
+    if let Some(rp) = repo_path {
+        let cfg = load_config(root);
+        if let Some(sec) = crate::codemap::context_section(rp, issue, &cfg) {
+            p.push_str("\n\n");
+            p.push_str(&sec);
+        }
+    }
     // 再現ファースト検証（manual-612ec7e1・verify-levels.mmd）: L2+ は
     // 実装着手前に症状を再現する最小手順を evidence/<slug>/repro.md へ
     // 記録するよう prompt に指示する（verify が証跡を必須チェックする）
@@ -2069,6 +2456,29 @@ fn build_prompt_full(root: &Path, issue: &Value) -> (String, Value) {
             root.join("evidence").join(&kslug).join("repro.md").display()
         ));
     }
+    // repo 別 verify 環境（manual-04c35958・verify-levels.mmd）: repo 内の
+    // verify-env.toml で宣言された環境定義を prompt に載せ、実装を
+    // 宣言（setup・checks・probe）と整合させる
+    {
+        let cfg = load_config(root);
+        if let Some(repo) = App::git_repo(
+            &cfg,
+            issue.get("repo").and_then(|v| v.as_str()).unwrap_or(""),
+        ) {
+            let rp = PathBuf::from(
+                repo.get("path").and_then(|v| v.as_str()).unwrap_or(""),
+            );
+            if let Ok(s) = std::fs::read_to_string(rp.join("verify-env.toml")) {
+                p.push_str("\n\n## verify 環境（verify-env.toml で宣言済み）\n\n");
+                p.push_str(
+                    "この repo は verify-env.toml で verify 環境を宣言している。\
+                     実装は宣言（setup・checks・probe）と整合させること:\n\n```toml\n",
+                );
+                p.push_str(&crate::redact::scrub(&s));
+                p.push_str("\n```\n");
+            }
+        }
+    }
     // 参照した知見を run の記録に残す（どの知見を使ったか追跡可能に）
     let refs = json!({
         "knowledge": if injected_knowledge { json!(kslug) } else { Value::Null },
@@ -2081,16 +2491,17 @@ fn build_prompt_full(root: &Path, issue: &Value) -> (String, Value) {
 
 #[cfg(test)]
 fn build_prompt(root: &Path, issue: &Value) -> String {
-    build_prompt_full(root, issue).0
+    build_prompt_full(root, issue, None).0
 }
 
 // ---------- verify（L0〜L4） + push ----------
 
 /// verifying の再開: verifyOk 未記録なら検証を（再）実行、記録済みなら
 /// push 段階（帰属整理 → 承認判定 → push）へ進む。
+/// traj は run 側で開いた trajectory（drain 再開経路は None → 既存分を開く）
 /// RunCtl が登録済みなら cancel を受け付け、中断は verifying → queued へ
 /// （manual-5dabae8b。verifyBacks 不消費）
-/// traj は run 側で開いた trajectory（drain 再開経路は None → 既存分を開く）
+async fn resume_verify(app: &Shared, key: &str, obs: Obs) {
     let mut cancel_rx = ctl_get(key).map(|(c, _)| c.subscribe());
     tokio::select! {
         _ = async {
@@ -2136,7 +2547,6 @@ fn build_prompt(root: &Path, issue: &Value) -> String {
 }
 
 async fn resume_verify_inner(app: &Shared, key: &str, obs: Obs) {
-async fn resume_verify(app: &Shared, key: &str, obs: Obs) {
     let root = &app.root;
     let Some(issue) = find_issue(root, key) else {
         return;
@@ -2232,8 +2642,12 @@ async fn resume_verify(app: &Shared, key: &str, obs: Obs) {
 /// NG 差し戻し: verifying → retry（verifyBacks++）→ queued or failed
 /// （verifyBackLimit 超過で failed）
 async fn send_back(app: &Shared, key: &str, reason: &str, obs: Obs) {
-    let traj = &obs.traj;
     let root = &app.root;
+    let traj = &obs.traj;
+    // secret redaction（manual-a3a60c51）: verify NG の理由は verify 出力
+    // 由来。verifyNote/lessons/audit/trace/trajectory の全書き込み経路で
+    // 共通のため入口で一度マスクする
+    let reason = &crate::redact::scrub(reason);
     let _ = pipeline::set_field(root, key, "verifyNote", json!(reason));
     if pipeline::request_transition(root, key, pipeline::ST_RETRY).is_err() {
         return;
@@ -2405,7 +2819,6 @@ async fn send_back(app: &Shared, key: &str, reason: &str, obs: Obs) {
         return;
     }
     if backs > limit {
-        let _ = pipeline::request_transition(root, key, pipeline::ST_FAILED);
         tstep(traj, "state", "failed", json!({"verifyBacks": backs}));
         tfin(
             traj,
@@ -2415,6 +2828,7 @@ async fn send_back(app: &Shared, key: &str, reason: &str, obs: Obs) {
         if let Some(t) = &obs.trace {
             t.finish_root(false, "verify 差し戻し上限超過");
         }
+        let _ = pipeline::request_transition(root, key, pipeline::ST_FAILED);
         conlog(
             "runner",
             "err",
@@ -2430,7 +2844,6 @@ async fn send_back(app: &Shared, key: &str, reason: &str, obs: Obs) {
         )
         .await;
     } else {
-        let _ = pipeline::request_transition(root, key, pipeline::ST_QUEUED);
         tstep(
             traj,
             "state",
@@ -2441,6 +2854,7 @@ async fn send_back(app: &Shared, key: &str, reason: &str, obs: Obs) {
         if let Some(t) = &obs.trace {
             t.finish_root(false, reason);
         }
+        let _ = pipeline::request_transition(root, key, pipeline::ST_QUEUED);
         // 指数バックオフ（manual-6c3ed946）: verify NG の再試行は
         // verifyBackoffMinutes × 2^(backs-1)（上限 verifyBackoffMaxMinutes）
         // だけ待機させる。retryAfter 経過前の再 dispatch は can_dispatch が止める
@@ -2477,8 +2891,8 @@ async fn finalize(
     repo: &Value,
     obs: Obs,
 ) {
-    let traj = &obs.traj;
     let root = &app.root;
+    let traj = &obs.traj;
     // ACE カウンタ（manual-bcf981dd）: verify 合格まで到達した run に
     // 注入されたレッスンは helpful++（finalize は verify 合格後のみ呼ばれる）
     lessons::record_outcome(root, issue, true, &app.cfg().await);
@@ -2492,13 +2906,6 @@ async fn finalize(
     let clean_res = clean_unpushed(&repo_path, key).await;
     match &clean_res {
         Ok(removed) => {
-            for s in removed {
-                conlog(
-                    "runner",
-                    "sys",
-                    &format!("{}: 混入コミットを revert 除去: {}", key, s),
-                );
-            }
             if let (Some(t), Some(s)) = (&obs.trace, &cspan) {
                 t.end(s, true, "", Map::new());
             }
@@ -2537,11 +2944,6 @@ async fn finalize(
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
     if need_approval && !approved {
-        conlog(
-            "runner",
-            "sys",
-            &format!("{}: verify 合格。push は承認待ち（requirePushApproval）", key),
-        );
         tstep(traj, "state", "push_pending", json!({}));
         if let Some(t) = &obs.trace {
             t.event("push_pending", Map::new());
@@ -2553,6 +2955,11 @@ async fn finalize(
             "push_pending",
             trajectory::latest_run_idx(issue),
             Map::from_iter([("reason".into(), json!("requirePushApproval"))]),
+        );
+        conlog(
+            "runner",
+            "sys",
+            &format!("{}: verify 合格。push は承認待ち（requirePushApproval）", key),
         );
         return; // drain が pushApproved を拾って再開する
     }
@@ -2575,6 +2982,14 @@ async fn finalize(
                 Map::from_iter([("ok".into(), json!(true))]),
             );
             let _ = pipeline::set_field(root, key, "pushedAt", json!(now_iso()));
+            // push 後フォローアップループ（postpush-loop.mmd・manual-55878990）:
+            // push した sha/branch を監視対象として postPush=checking を開始
+            // する。監視・修復起票は postpush.rs の poller が担う
+            {
+                let (_, sha) = git(&repo_path, &["rev-parse", "HEAD"]).await;
+                let (_, br) = git(&repo_path, &["rev-parse", "--abbrev-ref", "HEAD"]).await;
+                crate::postpush::arm(root, key, sha.trim(), br.trim());
+            }
             if pipeline::request_transition(root, key, pipeline::ST_DONE).is_ok() {
                 tstep(traj, "state", "done", json!({}));
                 tfin(traj, "success", "verify 合格・push 済み");
@@ -2604,7 +3019,6 @@ async fn finalize(
             }
         }
         Err(e) => {
-            conlog("runner", "err", &format!("{}: push 失敗: {}", key, e));
             if let (Some(t), Some(s)) = (&obs.trace, &pspan) {
                 t.end(s, false, &e, Map::new());
             }
@@ -2625,6 +3039,7 @@ async fn finalize(
                     ("error".into(), json!(e)),
                 ]),
             );
+            conlog("runner", "err", &format!("{}: push 失敗: {}", key, e));
             let _ = pipeline::set_field(
                 root,
                 key,
@@ -2638,7 +3053,7 @@ async fn finalize(
 }
 
 /// gh issue への結果報告（slug+number がある課題のみ。失敗は conlog のみ）
-async fn report_issue(app: &Shared, issue: &Value, body: &str) {
+pub(crate) async fn report_issue(app: &Shared, issue: &Value, body: &str) {
     let cfg = app.cfg().await;
     let Some(repo) = App::git_repo(
         &cfg,
@@ -2695,14 +3110,20 @@ async fn git(dir: &Path, args: &[&str]) -> (i32, String) {
     }
 }
 
-/// 任意コマンド実行（build/test 試行用。600s timeout）
-async fn run_cmd(dir: &Path, argv: &[String], timeout_secs: u64) -> (i32, String) {
+/// 任意コマンド実行（build/test 試行用。env は verify-env.toml [env] 注入）
+async fn run_cmd(
+    dir: &Path,
+    argv: &[String],
+    timeout_secs: u64,
+    env: &[(String, String)],
+) -> (i32, String) {
     let Some((prog, args)) = argv.split_first() else {
         return (-1, "empty command".into());
     };
     let mut c = tokio::process::Command::new(prog);
     c.args(args)
         .current_dir(dir)
+        .envs(env.iter().cloned())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
     hide_console_tokio(&mut c);
@@ -2753,7 +3174,9 @@ async fn diff_review(app: &Shared, key: &str, issue: &Value, repo: &Value) -> Re
     if c != 0 || diff.trim().is_empty() {
         return Ok(());
     }
-    let Some((exe, args)) = resolve_agent(&cfg) else {
+    // モデルルーティング（manual-73b96b24）: diff review の単発批評パスも
+    // criticTier（既定 light）の軽量帯で実行する
+    let Some((exe, args, env)) = resolve_agent_routed(&root, &cfg, critic_tier(&cfg)) else {
         conlog("runner", "sys", &format!("{}: diff レビュー実行体無し（skip）", key));
         return Ok(());
     };
@@ -2762,7 +3185,7 @@ async fn diff_review(app: &Shared, key: &str, issue: &Value, repo: &Value) -> Re
     let diff: String = diff.chars().take(30000).collect();
     let prompt = diff_review_prompt(root, issue, &diff);
     let timeout = Duration::from_secs_f64(cfg_f64(&cfg, "diffReviewTimeoutMinutes", 15.0) * 60.0);
-    let review = match spawn_capture(&exe, &args, &repo_path, &prompt, timeout).await {
+    let review = match spawn_capture(&exe, &args, &env, &repo_path, &prompt, timeout).await {
         Ok(out) => crate::verify::extract_review(&out),
         Err(e) => {
             conlog("runner", "err", &format!("{}: diff レビュー実行失敗: {}", key, e));
@@ -2967,6 +3390,7 @@ async fn rollback_issue_commits(app: &Shared, key: &str, it: &Value) {
         &format!("{}: rollback 完了（{} 件の帰属コミットを除去）", key, removed),
     );
 }
+
 /// 帰属整理: `Issue: <key>` トレーラを持たない未pushコミットを
 /// git revert で除去する（reset 禁止。新しい順に revert し、
 /// 除去コミット自体にも本課題のトレーラを付ける）。
@@ -3137,7 +3561,7 @@ async fn run_checks(app: &Shared, issue: &Value, repo: &Value, ev_dir: &Path) ->
     let (_, status_out) = git(&repo_path, &["status", "--porcelain"]).await;
     let _ = std::fs::write(
         ev_dir.join("status.txt"),
-        format!("{}\n", status_out),
+        crate::redact::scrub(&format!("{}\n", status_out)),
     );
     if !unpushed.iter().any(|c| c.issue.as_deref() == Some(key.as_str())) {
         ok = false;
@@ -3146,20 +3570,50 @@ async fn run_checks(app: &Shared, issue: &Value, repo: &Value, ev_dir: &Path) ->
     }
 
     // ---- L1: build/test 試行 ----
+    // verify-env.toml（manual-04c35958）: setup を先に実行し、
+    // checks 非空なら自動検出を上書き、[env] は全コマンドへ注入する
+    let venv = crate::verifyenv::load(&repo_path);
+    let venv_env = venv
+        .as_ref()
+        .map(crate::verifyenv::env_vars)
+        .unwrap_or_default();
     let mut ran_checks: Vec<Vec<String>> = vec![];
     if ok && level >= 1 {
-        let checks = detect_checks(repo, &repo_path);
-        if checks.is_empty() {
-            log.push_str("== L1: 自動検出チェックなし\n");
-        }
-        for argv in checks {
-            ran_checks.push(argv.clone());
-            let (code, out) = run_cmd(&repo_path, &argv, 600).await;
-            log.push_str(&format!("\n== L1 {}\n{}\n", argv.join(" "), out));
+        let venv_setup = venv
+            .as_ref()
+            .map(crate::verifyenv::setup)
+            .unwrap_or_default();
+        for argv in &venv_setup {
+            let (code, out) = run_cmd(&repo_path, argv, 600, &venv_env).await;
+            log.push_str(&format!("\n== L1 setup {}\n{}\n", argv.join(" "), out));
             if code != 0 {
                 ok = false;
-                note = format!("チェック失敗: {}", argv.join(" "));
+                note = format!("setup 失敗: {}", argv.join(" "));
                 break;
+            }
+        }
+        if ok {
+            let venv_checks = venv
+                .as_ref()
+                .map(crate::verifyenv::checks)
+                .unwrap_or_default();
+            let checks = if !venv_checks.is_empty() {
+                venv_checks
+            } else {
+                detect_checks(repo, &repo_path)
+            };
+            if checks.is_empty() {
+                log.push_str("== L1: 自動検出チェックなし\n");
+            }
+            for argv in checks {
+                ran_checks.push(argv.clone());
+                let (code, out) = run_cmd(&repo_path, &argv, 600, &venv_env).await;
+                log.push_str(&format!("\n== L1 {}\n{}\n", argv.join(" "), out));
+                if code != 0 {
+                    ok = false;
+                    note = format!("チェック失敗: {}", argv.join(" "));
+                    break;
+                }
             }
         }
     }
@@ -3186,7 +3640,7 @@ async fn run_checks(app: &Shared, issue: &Value, repo: &Value, ev_dir: &Path) ->
         if !got {
             log.push_str("== L2: machine ロック取得断念（他 run が保持中）→ 排他なしで続行\n");
         }
-        let r = launch_probe(repo, &repo_path, &mut log).await;
+        let r = launch_probe(repo, &repo_path, &mut log, venv.as_ref(), &venv_env).await;
         if got {
             locks::release(root, "machine");
         }
@@ -3196,7 +3650,8 @@ async fn run_checks(app: &Shared, issue: &Value, repo: &Value, ev_dir: &Path) ->
         }
     }
 
-    let _ = std::fs::write(ev_dir.join("verify.log"), &log);
+    // secret redaction（manual-a3a60c51）: verify 証跡も生成段階でマスク
+    let _ = std::fs::write(ev_dir.join("verify.log"), crate::redact::scrub(&log));
     let _ = std::fs::write(
         ev_dir.join("verdict.json"),
         serde_json::to_string_pretty(&json!({
@@ -3224,8 +3679,21 @@ async fn run_checks(app: &Shared, issue: &Value, repo: &Value, ev_dir: &Path) ->
 /// L2+ の実機起動確認（最小実装）: repo.verifyExe を起動し、
 /// verifyPort 指定なら TCP 応答を、無指定なら生存を確認して kill する。
 /// verifyExe 未設定なら L1 チェック結果で代用（画面駆動は後続課題）。
-async fn launch_probe(repo: &Value, repo_path: &Path, log: &mut String) -> bool {
-    let exe_s = repo.get("verifyExe").and_then(|v| v.as_str()).unwrap_or("");
+async fn launch_probe(
+    repo: &Value,
+    repo_path: &Path,
+    log: &mut String,
+    venv: Option<&Value>,
+    venv_env: &[(String, String)],
+) -> bool {
+    // verify-env.toml [probe]（manual-04c35958）があれば config の
+    // verifyExe/verifyArgs/verifyPort/verifyWaitSec より優先する
+    let probe = venv.and_then(crate::verifyenv::probe);
+    let probe_get = |k: &str| probe.and_then(|p| p.get(k));
+    let exe_s = probe_get("exe")
+        .and_then(|v| v.as_str())
+        .or_else(|| repo.get("verifyExe").and_then(|v| v.as_str()))
+        .unwrap_or("");
     if exe_s.is_empty() {
         log.push_str("== L2: verifyExe 未設定 — 実機起動はスキップ（L1 で代用）\n");
         return true;
@@ -3235,13 +3703,14 @@ async fn launch_probe(repo: &Value, repo_path: &Path, log: &mut String) -> bool 
         log.push_str(&format!("== L2 NG: verifyExe が存在しない: {}\n", exe));
         return false;
     }
-    let args: Vec<String> = repo
-        .get("verifyArgs")
+    let args: Vec<String> = probe_get("args")
         .and_then(|v| v.as_array())
+        .or_else(|| repo.get("verifyArgs").and_then(|v| v.as_array()))
         .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
         .unwrap_or_default();
     let mut c = tokio::process::Command::new(&exe);
     c.args(&args)
+        .envs(venv_env.iter().cloned())
         .current_dir(repo_path)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
@@ -3254,13 +3723,13 @@ async fn launch_probe(repo: &Value, repo_path: &Path, log: &mut String) -> bool 
         }
     };
     log.push_str(&format!("== L2: {} を起動\n", exe));
-    let port = repo
-        .get("verifyPort")
+    let port = probe_get("port")
         .and_then(|v| v.as_u64())
+        .or_else(|| repo.get("verifyPort").and_then(|v| v.as_u64()))
         .map(|v| v as u16);
-    let wait_secs = repo
-        .get("verifyWaitSec")
+    let wait_secs = probe_get("timeoutSecs")
         .and_then(|v| v.as_u64())
+        .or_else(|| repo.get("verifyWaitSec").and_then(|v| v.as_u64()))
         .unwrap_or(10)
         .max(1);
     let alive = match port {
@@ -3417,6 +3886,9 @@ mod tests {
                 "t": {"label": "t", "exe": exe, "promptArgs": prompt_args}
             },
             "verifyBackLimit": 3,
+            // runner パイプラインを試すテストなので直接モードを明示
+            // （issueExecMode 既定 parallel は chat 起票経路）
+            "issueExecMode": "direct",
             "repos": [{
                 "slug": "t/r", "path": repo.to_string_lossy().replace('\\', "/"),
                 "requirePushApproval": approval,
@@ -3601,7 +4073,7 @@ mod tests {
             {"at": now_iso(), "kind": "manual", "text": "old note",
              "consumedAt": now_iso()},
         ]);
-        let p = build_prompt_full(&root, &issue).0;
+        let p = build_prompt_full(&root, &issue, None).0;
         assert!(p.contains("frozen title"), "prompt: {}", p);
         assert!(p.contains("frozen body"));
         assert!(!p.contains("live title"));
@@ -3610,7 +4082,7 @@ mod tests {
         assert!(!p.contains("old note"), "consumed は注入しない");
         // スナップショット無しの課題は live 値を使う（後方互換）
         let issue2 = queued_issue("manual:t/r:snap2", "t/r", 1);
-        let p2 = build_prompt_full(&root, &issue2).0;
+        let p2 = build_prompt_full(&root, &issue2, None).0;
         assert!(p2.contains("テスト課題"));
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -3639,6 +4111,45 @@ mod tests {
         let issues = store::load_issues(&root);
         let e = pipeline::can_dispatch(&json!({}), &issues, key).unwrap_err();
         assert!(e.contains("backoff"), "got: {}", e);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn resolve_agent_tier_routes_and_falls_back() {
+        // model-routing.mmd: modelRouting.agents.<tier> の指名実行体へ。
+        // 帯未設定・modelRouting 無しは active 実行体へフォールバック
+        let root = temp_root("route");
+        let repo = make_repo(&root, "repo", true);
+        let mut cfg = cfg_for(&repo, "active.exe", json!(["-p"]), false);
+        cfg["chatAgents"]["light-x"] = json!({"label": "l", "exe": "light.exe", "promptArgs": ["-q"]});
+        cfg["chatAgents"]["deep-x"] = json!({"label": "d", "exe": "deep.exe"});
+        cfg["modelRouting"] = json!({
+            "agents": {"light": "light-x", "deep": "deep-x"},
+            "criticTier": "light",
+        });
+        // 帯指名の agent が使われる
+        let (e, a, _) = resolve_agent_routed(&root, &cfg, "light").unwrap();
+        assert_eq!(e, "light.exe");
+        assert_eq!(a, vec!["-q".to_string()]);
+        let (e, _, _) = resolve_agent_routed(&root, &cfg, "deep").unwrap();
+        assert_eq!(e, "deep.exe");
+        // 帯未設定（standard）は active へフォールバック
+        let (e, _, _) = resolve_agent_routed(&root, &cfg, "standard").unwrap();
+        assert_eq!(e, "active.exe");
+        // criticTier は light 帯を返す
+        assert_eq!(critic_tier(&cfg), "light");
+        // modelRouting 無しは常に active
+        let cfg2 = cfg_for(&repo, "active.exe", json!(["-p"]), false);
+        let (e, _, _) = resolve_agent_routed(&root, &cfg2, "deep").unwrap();
+        assert_eq!(e, "active.exe");
+        assert_eq!(critic_tier(&cfg2), "light");
+        // issue の modelTier 読み出し（未設定=standard・不正値=standard）
+        let mut it = json!({});
+        assert_eq!(issue_model_tier(&it), "standard");
+        it["modelTier"] = json!("deep");
+        assert_eq!(issue_model_tier(&it), "deep");
+        it["modelTier"] = json!("bogus");
+        assert_eq!(issue_model_tier(&it), "standard");
         let _ = std::fs::remove_dir_all(&root);
     }
 }

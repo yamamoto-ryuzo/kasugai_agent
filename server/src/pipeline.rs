@@ -48,10 +48,9 @@ pub const STATUSES: &[&str] = &[
     ST_DROPPED,
 ];
 
+/// 許可される遷移（detected/deduped は intake 内部で畳み込む）
 /// planning/plan_review は計画承認ゲート（manual-883d17ee）: planGate 課題は
 /// dispatch で実装前の計画生成 → critic 批評 → 人 or 自動承認後に running へ。
-
-/// 許可される遷移（detected/deduped は intake 内部で畳み込む）
 fn allowed(from: &str, to: &str) -> bool {
     matches!(
         (from, to),
@@ -71,12 +70,16 @@ fn allowed(from: &str, to: &str) -> bool {
             | (ST_PLAN_REVIEW, ST_REJECTED)
             | (ST_PLAN_REVIEW, ST_FAILED)
             | (ST_RUNNING, ST_VERIFYING)
+            // 並列モード（issueExecMode=parallel）: 課題を chat 起票で
+            // 委譲した場合、chat 側の検証を内包して running→done へ直接遷移
+            // する（issue-lifecycle.mmd）
+            | (ST_RUNNING, ST_DONE)
+            | (ST_RUNNING, ST_FAILED)
             // run 制御差し戻し（run-control.mmd・manual-5dabae8b）:
             // cancel・run halt（stuck・予算・HIGHリスク）は verifyBacks を
             // 消費せず queued へ戻る（verify NG の retry 経路ではない）
             | (ST_RUNNING, ST_QUEUED)
             | (ST_VERIFYING, ST_QUEUED)
-            | (ST_RUNNING, ST_FAILED)
             | (ST_VERIFYING, ST_DONE)
             | (ST_VERIFYING, ST_RETRY)
             | (ST_RETRY, ST_QUEUED)
@@ -400,6 +403,29 @@ fn blast_radius(issue: &Value) -> bool {
     t.contains("secrets.json") || t.contains("force-push") || t.contains("rm -rf")
 }
 
+/// modelTier（light/standard/deep）のルール判定（manual-73b96b24・
+/// model-routing.mmd）: 課題の深度から実装 run のモデル帯を決める。
+/// 起票時に modelTier を明示指定すればそれに従う。
+fn rule_model_tier(issue: &Value, level: u64, priority: u64) -> String {
+    if let Some(t) = issue.get("modelTier").and_then(|v| v.as_str()) {
+        if matches!(t, "light" | "standard" | "deep") {
+            return t.to_string();
+        }
+    }
+    let body_len = issue
+        .get("body")
+        .and_then(|v| v.as_str())
+        .map(|s| s.len())
+        .unwrap_or(0);
+    if level >= 3 || priority >= 3 || body_len >= 4000 {
+        "deep".into()
+    } else if level <= 1 && priority <= 1 && body_len < 400 {
+        "light".into()
+    } else {
+        "standard".into()
+    }
+}
+
 /// 計画承認ゲート要否（manual-883d17ee）のルール判定。verifyLevel と同様に
 /// 一律には要求しない: 検証深度・優先度の高い課題（L2+ または P2+）のみ
 /// 実装前の計画レビューを経由させる。
@@ -522,10 +548,11 @@ fn split_items(body: &str) -> Vec<Value> {
 /// assess: verifyLevel・受入条件・自律可否を決め、assessed → gated|queued へ遷移。
 /// external は評価にも進めない（候補一覧表示のみ。README §5.3）。
 /// 閾値超の大規模課題は splitProposal 付きで gated へ（manual-0577d650）。
+/// issues は既存課題群（assess 時の知見参照: issue.related へ類似事例を
+/// 付記する。case-search.mmd・manual-a8c93d14）
 fn assess(cfg: &Value, issues: &[Value], issue: &mut Value) {
     // assess 時の知見参照: related[] に類似事例（前回の fix / reject /
     // run 成否）を付記し、dispatch prompt の「類似過去事例」へ繋げる
-    // （case-search.mmd・manual-a8c93d14）
     let related = cases::attach_related(issues, issue);
     let priority = rule_priority(issue);
     let autonomous = if has_label(issue, "external") {
@@ -568,12 +595,16 @@ fn assess(cfg: &Value, issues: &[Value], issue: &mut Value) {
     // 計画承認ゲート要否（manual-883d17ee）。planGate=true なら dispatch は
     // 実装の前に planning（計画生成+critic）→ plan_review（承認）を経由する
     let plan_gate = rule_plan_gate(issue, level, priority);
+    // モデル帯（manual-73b96b24・model-routing.mmd）: 実装 run の実行体選択
+    // に使う。起票時の明示指定は rule_model_tier が尊重する（o 借用前に判定）
+    let model_tier = rule_model_tier(issue, level, priority);
     // 大規模課題の検出（manual-0577d650。o 借用前に判定する）
     let split_prop = oversized(cfg, issue);
     let o = issue.as_object_mut().unwrap();
     o.insert("autonomous".into(), json!(autonomous));
     o.insert("priority".into(), json!(priority));
     o.insert("verifyLevel".into(), json!(level));
+    o.insert("modelTier".into(), json!(model_tier));
     // 課題単位の実行予算（manual-94172864・run-control.mmd）: step（出力行）/
     // wall-time/cost の上限。0=その上限は無効。上限到達は失敗ではなく
     // budgetHold で人の延長判断を要求し、extend で budgetExtend を加算する
@@ -585,10 +616,10 @@ fn assess(cfg: &Value, issues: &[Value], issue: &mut Value) {
             "maxCostUsd": cfg_f64(&cfg, "budgetMaxCostUsd", 0.0),
         }),
     );
-    o.insert("planGate".into(), json!(plan_gate));
     if !basis.is_null() {
         o.insert("verifyLevelBasis".into(), basis);
     }
+    o.insert("planGate".into(), json!(plan_gate));
     o.insert(
         "acceptance".into(),
         json!(format!("{} が期待どおり動作することを実機で確認する", title)),
@@ -602,11 +633,51 @@ fn assess(cfg: &Value, issues: &[Value], issue: &mut Value) {
         return;
     }
     transition(issue, ST_QUEUED);
+    // autoDispatchWhitelist（manual-861cf91b・issue-lifecycle.mmd）:
+    // kind+severity のオプトイン式事前承認。命中した queued 課題は
+    // autoDispatch フラグを立て、drain が一括対応承認済みと同じ
+    // dispatch 経路で起動する（フラグは起動時に消費、verify
+    // 差し戻し後は人判断へ戻る）。未設定・未命中は人ゲート維持
+    if whitelist_dispatch(cfg, issue) {
+        let o = issue.as_object_mut().unwrap();
+        o.insert("autoDispatch".into(), json!(true));
+        o.insert("autoDispatchFrom".into(), json!("whitelist"));
+    }
+}
+
+/// autoDispatchWhitelist の判定: config `[{"kind":"x","maxPriority":1}]`。
+/// kind 等値（"*"=任意 kind。kind 未指定の課題にも "*" は命中する）かつ
+/// priority<=maxPriority（既定1）なら命中。external・blast_radius・
+/// 大規模は gated でここに到達しない。未設定・空配列は不命中
+/// （全課題人判断の現行維持）
+fn whitelist_dispatch(cfg: &Value, issue: &Value) -> bool {
+    let Some(list) = cfg
+        .get("autoDispatchWhitelist")
+        .and_then(|v| v.as_array())
+    else {
+        return false;
+    };
+    let kind = issue.get("kind").and_then(|v| v.as_str());
+    let prio = issue
+        .get("priority")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(u64::MAX);
+    list.iter().any(|e| {
+        let ek = e.get("kind").and_then(|v| v.as_str()).unwrap_or("");
+        if ek.is_empty() {
+            return false;
+        }
+        let max_p = e
+            .get("maxPriority")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(1);
+        (ek == "*" || Some(ek) == kind) && prio <= max_p
+    })
 }
 
 /// assess 回帰評価用のプレビュー（eval-set.mmd・manual-a2de7417）:
 /// 課題 spec の複製へ assess を適用し、判定結果
-/// （verifyLevel/priority/autonomous/planGate）だけを返す。
+/// （verifyLevel/priority/autonomous/planGate/modelTier）だけを返す。
 /// 状態遷移・保存は行わない（複製への評価のみ）。
 pub fn assess_preview(issues: &[Value], issue: &Value) -> Value {
     let mut clone = issue.clone();
@@ -617,6 +688,7 @@ pub fn assess_preview(issues: &[Value], issue: &Value) -> Value {
         "priority": clone.get("priority").cloned().unwrap_or(Value::Null),
         "autonomous": clone.get("autonomous").cloned().unwrap_or(Value::Null),
         "planGate": clone.get("planGate").cloned().unwrap_or(Value::Null),
+        "modelTier": clone.get("modelTier").cloned().unwrap_or(Value::Null),
     })
 }
 
@@ -1153,10 +1225,16 @@ fn intake_inner(root: &Path, cand: &Value, force: bool) -> IntakeOutcome {
         "title": title,
         "body": body,
         "kind": cand.get("kind").cloned().unwrap_or(Value::Null),
+        "planGate": cand.get("planGate").cloned().unwrap_or(Value::Null),
+        // 修復元課題リンク（manual-55878990・postpush-loop.mmd）:
+        // post-push detector が修復対象の親課題 key を repairFor で emit する
+        "repairFor": cand.get("repairFor").cloned().unwrap_or(Value::Null),
+        // modelTier の明示指定（manual-73b96b24）: candidate 由来の
+        // 起票指定を課題へ引き継ぎ、assess のルール判定を上書きする
+        "modelTier": cand.get("modelTier").cloned().unwrap_or(Value::Null),
         "labels": cand.get("labels").cloned().unwrap_or(json!([])),
         "ghState": cand.get("ghState").cloned().unwrap_or(Value::Null),
         "ghStateReason": cand.get("ghStateReason").cloned().unwrap_or(Value::Null),
-        "planGate": cand.get("planGate").cloned().unwrap_or(Value::Null),
         "symptomHash": sh,
         "status": ST_ASSESSED,
         // intake スナップショット（intake-snapshot.mmd・manual-15667606）:
@@ -1239,9 +1317,11 @@ fn intake_inner(root: &Path, cand: &Value, force: bool) -> IntakeOutcome {
 /// Err(ブロック中の key)。実機リソースの排他は locks.rs の責務。
 /// verify NG 差し戻しの指数バックオフ（retryAfter）中も Err を返す
 /// （verify NG ループを構造的に空転させない。manual-6c3ed946）。
-/// config.maxConcurrentRuns（既定4・0=無制限）超の同時 running|verifying
-/// でも Err（ブラスト半径上限。manual-a7e8d412）。
-pub fn can_dispatch(cfg: &Value, issues: &[Value], key: &str) -> Result<(), String> {
+/// dispatch 可否の基本ガード（status=queued・retryAfter・runCycleCap・
+/// 費用予算）。並列モード（issueExecMode=parallel）の chat 起票経路は
+/// これだけを使い、同時実行上限・同一 repo 直列は課さない
+/// （通常の chat 起票と同じ流れ。issue-lifecycle.mmd）
+pub fn can_dispatch_base(cfg: &Value, issues: &[Value], key: &str) -> Result<(), String> {
     let Some(issue) = issues
         .iter()
         .find(|x| x.get("key").and_then(|v| v.as_str()) == Some(key))
@@ -1258,6 +1338,7 @@ pub fn can_dispatch(cfg: &Value, issues: &[Value], key: &str) -> Result<(), Stri
         {
             return Err(format!("retry backoff until {}", ra));
         }
+    }
     // 課題あたりの run サイクル上限（manual-175e7229・run-control.mmd）:
     // 自身の起票・生成物への反復処理サイクルが runCycleCap（既定3・
     // 0=無制限）+ cycleCapExtend を超えたら人へのエスカレーション。
@@ -1328,10 +1409,9 @@ pub fn can_dispatch(cfg: &Value, issues: &[Value], key: &str) -> Result<(), Stri
         .iter()
         .find(|x| x.get("key").and_then(|v| v.as_str()) == Some(key))
         .unwrap();
-    }
     // 同時実行上限（medik8s maxUnhealthy 相当のクォーラム）。
-    // planning（計画生成中）は dispatch 枠を占有する（plan_review は
-    // 実行リソースを使わない待機のため数えない）
+    // planning（計画生成・critic の実行体が動いている）もアクティブ扱い。
+    // plan_review は承認待ちの滞留状態で実行系を占有しないため数えない
     let max_runs = cfg_f64(cfg, "maxConcurrentRuns", 4.0) as i64;
     if max_runs > 0 {
         let active = issues
@@ -1347,6 +1427,8 @@ pub fn can_dispatch(cfg: &Value, issues: &[Value], key: &str) -> Result<(), Stri
             return Err(format!("maxConcurrentRuns {} reached", max_runs));
         }
     }
+    // 同一 repo 排他（direct モードの直列規則。issueExecMode=parallel は
+    // can_dispatch_base のみ使い、このガード自体を通らない）
     let repo = issue.get("repo").and_then(|v| v.as_str()).unwrap_or("");
     if let Some(b) = issues.iter().find(|x| {
         x.get("key").and_then(|v| v.as_str()) != Some(key)
@@ -1966,6 +2048,45 @@ mod tests {
         // 既定 = P1
         let (i, _) = intake_v(&root, &cand("add feature x", "b"));
         assert_eq!(i["priority"], json!(1));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn assess_sets_model_tier() {
+        let root = temp_root("mtier");
+        // deep: verifyLevel>=3（画面系）
+        let (i, _) = intake_v(&root, &cand("playwright で画面を検証する", "b"));
+        assert_eq!(i["modelTier"], json!("deep"));
+        // deep: 大きな本文（>=4000B）
+        let (i, _) = intake_v(&root, &cand("big", &"x".repeat(4100)));
+        assert_eq!(i["modelTier"], json!("deep"));
+        // light: L<=1・P<=1・本文 <400B（documentation label → L0/P0）
+        let mut c = cand("readme typo", "b");
+        c["labels"] = json!(["documentation"]);
+        let (i, _) = intake_v(&root, &c);
+        assert_eq!(i["modelTier"], json!("light"));
+        // standard: 中間（bug label → P2, L1）
+        let mut c = cand("crash on save", "b");
+        c["labels"] = json!(["bug"]);
+        let (i, _) = intake_v(&root, &c);
+        assert_eq!(i["modelTier"], json!("standard"));
+        // 明示指定はルールを上書き
+        let mut c = cand("tiny fix", "b");
+        c["modelTier"] = json!("deep");
+        let (i, _) = intake_v(&root, &c);
+        assert_eq!(i["modelTier"], json!("deep"));
+        // 不正値の明示指定はルール判定へフォールバック。
+        // intake_forced で storm 集約（同 source+repo の集中起票）を
+        // bypass する —— このテストが見るのは modelTier の判定であり
+        // ストーム挙動ではない
+        let mut c = cand("tiny fix2", "b");
+        c["modelTier"] = json!("bogus");
+        c["labels"] = json!(["documentation"]);
+        let i = match intake_forced(&root, &c) {
+            IntakeOutcome::Created(i) => i,
+            _ => panic!("expected Created"),
+        };
+        assert_eq!(i["modelTier"], json!("light"));
         let _ = std::fs::remove_dir_all(&root);
     }
 

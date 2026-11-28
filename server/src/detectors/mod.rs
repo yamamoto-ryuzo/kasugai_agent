@@ -10,7 +10,9 @@
 pub mod ci_failure;
 pub mod github_issues;
 pub mod local_health;
+pub mod session_watch;
 pub mod spec_drift;
+pub mod unattributed_work;
 
 use serde_json::{json, Value};
 use std::path::Path;

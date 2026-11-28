@@ -35,7 +35,7 @@ stateDiagram-v2
     assessed --&gt; queued : 自律対象（対応待ち）
     gated --&gt; queued : 人が承認
     gated --&gt; rejected : 人が却下 or 分割起票&lt;br/&gt;（splitInto に子 key 群）
-    queued --&gt; running : 一覧の対応ボタンで dispatch&lt;br/&gt;（自動起動しない）
+    queued --&gt; running : 一覧の対応/一括対応ボタンで dispatch&lt;br/&gt;（自動起動しない。一括対応承認済みの&lt;br/&gt;autoDispatch 待機は drain が repo 解放時に dispatch。&lt;br/&gt;autoDispatchWhitelist 事前承認の低リスク kind も&lt;br/&gt;intake で autoDispatch フラグを立て同じ drain 経路で&lt;br/&gt;起動。issueExecMode=direct は runner パイプラインで&lt;br/&gt;直接実行（同一 repo 直列・maxConcurrentRuns&lt;br/&gt;クォーラム有効）、parallel=既定 は chat を&lt;br/&gt;起票して並列処理）
     queued --&gt; planning : dispatch（planGate 課題は&lt;br/&gt;先に計画生成）
     queued --&gt; rejected : 人が却下
     planning --&gt; plan_review : 計画+critic 合格&lt;br/&gt;（autoApprovePlan=off）
@@ -44,10 +44,10 @@ stateDiagram-v2
     plan_review --&gt; running : 人が計画承認&lt;br/&gt;or タイムアウト自動承認
     plan_review --&gt; queued : 計画差し戻し
     plan_review --&gt; rejected : 人が却下
+    running --&gt; verifying : 実装完了
     running --&gt; done : 課題処理方法=並列（chat 起票）時、&lt;br/&gt;委譲先 chat の終了区分=done&lt;br/&gt;（chat 側の検証を内包するため&lt;br/&gt;verifying を経由しない）
     running --&gt; queued : cancel・run halt&lt;br/&gt;（stuck・予算・HIGHリスク。&lt;br/&gt;verifyBacks 不消費・run-control.mmd）&lt;br/&gt;並列モードの chat 終了区分&lt;br/&gt;unverified も queued 差し戻し
     verifying --&gt; queued : cancel（再 trigger で&lt;br/&gt;旧 run を中断し queued へ）
-    running --&gt; verifying : 実装完了
     verifying --&gt; done : 検証合格
     verifying --&gt; retry : NG (差し戻し)
     retry --&gt; queued : 差し戻し（対応ボタンで&lt;br/&gt;再 dispatch）
@@ -62,7 +62,47 @@ stateDiagram-v2
         queued・failed）のみ表示し、各行の
         対応/却下ボタンで人が一括判断する。
         対応は起票/承認/再実行を兼ねた即時 dispatch
-        （未起票は rate-limit を人判断で bypass）
+        （未起票は rate-limit を人判断で bypass）。
+        ISSUES 一覧の「一括対応」は queued を一括 dispatch し、
+        同一 repo 競合・同時実行上限で起動できない課題は
+        autoDispatch フラグ付きで待機する。drain が repo 解放時に
+        同じ dispatch 経路で自動起動するが、フラグは起動時に消費する
+        （verify 差し戻し後は再び人判断を要する）。
+        candidates 一覧の「一括対応」も同じ経路で判断待ちの
+        全候補（未起票は即時起票）を一括 dispatch し、
+        起動できない課題は同様に autoDispatch で待機する。
+        autoDispatchWhitelist（config・既定無し=全課題人判断）:
+        [{kind, maxPriority}] のオプトイン式事前承認。
+        intake で kind 等値（"*"=任意）かつ priority&lt;=maxPriority
+        （既定1）かつ queued 自律対象の課題に autoDispatch
+        フラグを立て、drain が一括対応と同じ経路で起動する
+        （フラグは起動時に消費、verify 差し戻し後は人判断）。
+        gated（external・大規模）は対象外、whitelist 未命中は
+        従来通り人ゲート必須。
+    end note
+    note right of running
+        課題の処理方法 issueExecMode（設定システムタブで
+        直接/並列を切替・既定=並列）:
+        直接 direct = 従来の runner パイプラインで直接実行
+        （can_dispatch 完全ガード: 同一 repo 直列・
+        maxConcurrentRuns・planGate・stuck/予算制御。
+        一括の競合分は autoDispatch 待機）。
+        並列 parallel（既定）= 課題を chat セッションとして
+        起票し、通常のチャット起票と同じ流れで並列処理する
+        （can_dispatch_base のみ: 同一 repo 直列・
+        maxConcurrentRuns は課さない）。
+        chat は課題 key を保持し、課題は chatId を保持する
+        （課題行に chat #N リンク）。
+        chat 終了区分の写像: done→課題 done（GitHub 課題は
+        完了理由のコメント投稿 → issue クローズ）/
+        unverified→課題 queued /
+        ng・差し戻し上限→課題 running のまま（chat の
+        差し戻し・要人対応で進め、課題側は cancel で queued）。
+        cancel は chat のターン中断＋課題 queued、
+        再 dispatch は新規 chat を起票する（旧委譲 chat の
+        issue_key リンクは解除し、後続完了の誤写像を防ぐ）。
+        chatId 付き running は drain の孤児 run
+        failed 化の対象外（housekeep.mmd）
     end note
     note right of rejected
         分割起票（manual-0577d650）: assess が閾値超
@@ -71,7 +111,7 @@ stateDiagram-v2
         子課題群（source=split・splitFrom=親key）を起票し、
         親は rejected へ。子は通常 intake で queued へ進む
     end note
-    done --&gt; [*]
+    done --&gt; [*] : drain の sweep で課題レコード削除&lt;br/&gt;（完了行はこの枠に残さない。削除前に&lt;br/&gt;case/eval 学習へ同期。postPush 監視中は&lt;br/&gt;監視終了まで残存。GitHub 由来は&lt;br/&gt;理由コメント投稿+issue クローズ後に削除）
     rejected --&gt; [*]
     dropped --&gt; [*]
     [*] --&gt; done : GitHub closed Issue 取込&lt;br/&gt;（--import-github・COMPLETED）
@@ -89,6 +129,8 @@ flowchart LR
         D2[ci-failure]
         D3[local-health]
         D4[spec-drift]
+        D5[session-watch&lt;br/&gt;Devin セッション観測]
+        D6[unattributed-work&lt;br/&gt;帰属不明 git 変更]
     end
 
     subgraph Core[コア server/src/]
@@ -107,7 +149,7 @@ flowchart LR
     end
 
     C[control.rs&lt;br/&gt;HTTP :8586 + SSE] --&gt; P[panel/&lt;br/&gt;ブラウザUI]
-    D1 &amp; D2 &amp; D3 &amp; D4 --&gt; N --&gt; A --&gt; G --&gt; R --&gt; V --&gt; K
+    D1 &amp; D2 &amp; D3 &amp; D4 &amp; D5 &amp; D6 --&gt; N --&gt; A --&gt; G --&gt; R --&gt; V --&gt; K
     R --&gt; DV
     A &amp; R &amp; V --&gt; GH
     R &amp; V --&gt; RP
@@ -158,7 +200,46 @@ flowchart TD
     SAGG --&gt; INBOX
     Q --&gt; INBOX
     G --&gt; INBOX
-    INBOX[候補一覧 = 判断待ち inbox&lt;br/&gt;未起票・gated・queued・failed のみ表示&lt;br/&gt;（実行中・終端の課題行は出さない）&lt;br/&gt;全行 対応/却下ボタンで人が一括判断:&lt;br/&gt;対応=起票/承認/再実行を兼ねた即時 dispatch&lt;br/&gt;（未起票は rate-limit を人判断で bypass）&lt;br/&gt;却下=rejected（未起票は起票して即 rejected）]
+    INBOX[候補一覧 = 判断待ち inbox&lt;br/&gt;未起票・gated・queued・failed のみ表示&lt;br/&gt;（実行中・終端の課題行は出さない）&lt;br/&gt;全行 対応/却下ボタンで人が一括判断:&lt;br/&gt;対応=起票/承認/再実行を兼ねた即時 dispatch&lt;br/&gt;（未起票は rate-limit を人判断で bypass）&lt;br/&gt;却下=rejected（未起票は起票して即 rejected）&lt;br/&gt;「一括対応」ボタンは表示中の全候補を順次 dispatch&lt;br/&gt;（起動不可の課題は autoDispatch で待機。&lt;br/&gt;issueExecMode=direct は同一 repo 直列、&lt;br/&gt;parallel 既定は chat 起票で並列処理）]
+</pre>
+<h3>run 制御・安全（監視・予算・steering・リスク・cancel・保全・ループcap）</h3>
+<!-- diagram: run-control -->
+<pre class="mermaid">
+---
+title: run 制御・安全（監視・予算・steering・リスク・cancel・保全・ループcap）
+---
+flowchart TD
+    RUN[run 実行中&lt;br/&gt;runner.rs が child proc の&lt;br/&gt;stdout/stderr を行単位で監視&lt;br/&gt;stdin は steering 用に開放] --&gt; MON{出力行ごとに判定}
+    MON --&gt; STK{stuck.rs&lt;br/&gt;同一行4回 / 同一 error 行3回 /&lt;br/&gt;同一行3連続（独白相当） /&lt;br/&gt;2パターン交互6行 /&lt;br/&gt;context window error 連続&lt;br/&gt;stuckDetect=off で無効}
+    MON --&gt; BUD{実行予算 issue.budget&lt;br/&gt;maxSteps（出力行）/&lt;br/&gt;maxWallMinutes（壁時計）/&lt;br/&gt;maxCostUsd（累積費用）&lt;br/&gt;assess が課題ごとに設定}
+    MON --&gt; RSK{risk.rs&lt;br/&gt;行 → action リスク分類&lt;br/&gt;（外部通信・削除・設定変更等&lt;br/&gt;HIGH のみ人確認）}
+    STK --&gt;|検出| HALT
+    BUD --&gt;|上限到達&lt;br/&gt;LimitsExceeded| HALT
+    RSK --&gt;|HIGH 検出&lt;br/&gt;riskConfirm=on| HALT
+    HALT[run halt&lt;br/&gt;ctl.cancel → child kill&lt;br/&gt;構造化理由を lastStuck /&lt;br/&gt;budgetHold / riskHold に記録&lt;br/&gt;trajectory 終了理由=stuck/limit/&lt;br/&gt;halt] --&gt; PSV[部分成果保全&lt;br/&gt;manual-7df2ce2f&lt;br/&gt;未コミット＋未push 作業を&lt;br/&gt;kasugai/partial-* branch へ push&lt;br/&gt;lastBlocker に詰まり内容を記録]
+    PSV --&gt; BACK[running → queued&lt;br/&gt;run 制御差し戻し&lt;br/&gt;verifyBacks は消費しない]
+    BACK --&gt; HMN{人の判断&lt;br/&gt;issues 一覧・詳細のボタン}
+    HMN --&gt;|対応| DISP[再 dispatch&lt;br/&gt;stuck / lastBlocker /&lt;br/&gt;steer / riskRejected を&lt;br/&gt;prompt へ注入]
+    HMN --&gt;|extend| EXT[POST extend&lt;br/&gt;cycleCapExtend・budgetExtend&lt;br/&gt;引上げ → 即 dispatch]
+    HMN --&gt;|risk-ack allow| ACK[riskHold 解除&lt;br/&gt;riskAllowed 記録 → dispatch]
+    HMN --&gt;|risk-ack deny| DENY[riskRejected 記録&lt;br/&gt;queued で待機・次回 prompt に&lt;br/&gt;却下理由を注入し別アプローチへ]
+    STR[POST steer text&lt;br/&gt;run 中の方針修正入力] --&gt;|in-flight run| STDIN[child stdin へ注入&lt;br/&gt;best-effort]
+    STR --&gt;|常時| SQ[followUps kind=steer 記録&lt;br/&gt;次回 dispatch prompt へ注入]
+    RTR{同一 issue key の&lt;br/&gt;再 trigger&lt;br/&gt;dispatch / cancel} --&gt;|in-flight run あり| CXL[cancel_run&lt;br/&gt;RunCtl.cancel → child kill&lt;br/&gt;running・verifying → queued]
+    RTR --&gt;|chatId 付き課題&lt;br/&gt;（並列モード）| CXLC[委譲 chat を cancel&lt;br/&gt;課題 → queued・双方向リンク解除]
+    CXL --&gt;|課題 key の run は常に1つ| DISP
+    CXLC --&gt; DISP
+    DISP --&gt; CAP{runCycleCap&lt;br/&gt;既定3・0=無制限&lt;br/&gt;runs 累計で判定&lt;br/&gt;manual-175e7229}
+    CAP --&gt;|超過| ESC[can_dispatch Err&lt;br/&gt;人へエスカレーション&lt;br/&gt;extend で上限引上げ]
+    CAP --&gt;|以内| PAR{issueExecMode&lt;br/&gt;既定 parallel}
+    PAR --&gt;|direct 直列:&lt;br/&gt;同一 repo の active 課題あり| W8[can_dispatch Err&lt;br/&gt;blocked by。&lt;br/&gt;一括対応では autoDispatch&lt;br/&gt;待機 → drain が repo 解放時に起動]
+    PAR --&gt;|direct 直列:&lt;br/&gt;同一 repo 排他なし| GO[running へ&lt;br/&gt;runner run 起動]
+    PAR --&gt;|parallel 並列:&lt;br/&gt;can_dispatch_base のみ| CHAT[chat セッション起票で委譲&lt;br/&gt;課題 chatId・chat issueKey&lt;br/&gt;chat 終了区分を課題へ写像&lt;br/&gt;done→done（GitHub 由来は理由コメント+&lt;br/&gt;issue クローズ）&lt;br/&gt;※ done 課題は drain sweep が&lt;br/&gt;case/eval 同期後にレコード削除&lt;br/&gt;（postPush 監視中は残存）&lt;br/&gt;unverified→queued&lt;br/&gt;ng・要人対応は running 継続]
+    W8 -.-&gt;|maxConcurrentRuns&lt;br/&gt;クォーラムは direct で有効| GO
+    EXT --&gt; CAP
+    ACK --&gt; CAP
+    LOOP[verify NG の review↔fix&lt;br/&gt;自動反復] --&gt;|allowAutoLoop&lt;br/&gt;既定 OFF| DRN[drain が verify NG 差戻しの&lt;br/&gt;queued を自動 dispatch&lt;br/&gt;runCycleCap・retryAfter で上限]
+    DRN --&gt; CAP
 </pre>
 <h3>verify（L0〜L4 / push 統合）</h3>
 <!-- diagram: verify-levels -->
@@ -169,8 +250,9 @@ title: verify（L0〜L4）
 flowchart TD
     REPRO[L2+ は再現ファースト&lt;br/&gt;修正前に最小再現手順 repro.md&lt;br/&gt;症状の再現・ベースラインを記録] --&gt; IMPL[実装完了&lt;br/&gt;ローカルコミット]
     IMPL --&gt; VL{verifyLevel}
-    VL --&gt;|L0/L1| STATIC[静的・単体チェック&lt;br/&gt;構文・lint・テスト・ビルド]
-    VL --&gt;|L2以上| LAUNCH[実機で対象EXE自体を起動&lt;br/&gt;QGIS等・成果物バイナリ]
+    VL --&gt; VENV[verify-env.toml&lt;br/&gt;repo 別の宣言的 verify 環境&lt;br/&gt;env・setup・checks・probe]
+    VENV --&gt;|L0/L1| STATIC[静的・単体チェック&lt;br/&gt;構文・lint・テスト・ビルド&lt;br/&gt;checks 宣言で自動検出を上書き]
+    VENV --&gt;|L2以上| LAUNCH[実機で対象EXE自体を起動&lt;br/&gt;probe or verifyExe・成果物バイナリ]
     LAUNCH --&gt; DRIVE[実機駆動&lt;br/&gt;Playwright等でUI操作・応答確認]
     STATIC --&gt; EVID[証跡採取&lt;br/&gt;shots/logs/応答・L2+ は repro.md&lt;br/&gt;→ evidence/]
     DRIVE --&gt; EVID
@@ -198,9 +280,9 @@ title: learn（知見の還流）
 ---
 flowchart LR
     RUN[run 結果・証跡] --&gt; KN[生の知見を蓄積&lt;br/&gt;knowledge/&lt;br/&gt;課題key単位・無条件]
-    KN --&gt; SK[SKILL draft 組立&lt;br/&gt;.devin/skills/&lt;slug&gt;/SKILL.md&lt;br/&gt;slug = source+repo+kind&lt;br/&gt;揮発 id を含まない安定名&lt;br/&gt;mermaid 図必須・図 title = slug]
-    SK --&gt; DUP{同 slug path の proposal 既存？&lt;br/&gt;pending + decided/ を対象&lt;br/&gt;または同一内容&lt;br/&gt;（key/題名/知見名の揮発分を&lt;br/&gt;正規化比較）}
-    DUP --&gt;|なし| PROP[proposals 生成&lt;br/&gt;kind=skill・issueKey=課題key]
+    KN --&gt; SK[SKILL draft 組立&lt;br/&gt;&lt;skillDir&gt;/&lt;slug&gt;/SKILL.md&lt;br/&gt;既定 .agents/skills（skillDirs）&lt;br/&gt;slug = source+repo+kind&lt;br/&gt;揮発 id を含まない安定名&lt;br/&gt;mermaid 図必須・図 title = slug]
+    SK --&gt; DUP{同 slug の起票を抑止？&lt;br/&gt;・proposal 既存（pending+decided/&lt;br/&gt;  同 path または同一内容）&lt;br/&gt;・knowledge/skill-drafts.json&lt;br/&gt;  起票済み台帳に slug あり&lt;br/&gt;・適用済み SKILL.md が既存}
+    DUP --&gt;|なし| PROP[proposals 生成&lt;br/&gt;kind=skill・issueKey=課題key&lt;br/&gt;台帳に slug を記録]
     DUP --&gt;|あり| SKIP[起票しない&lt;br/&gt;同じ種別の再検出は抑止]
     PROP --&gt; VET[vet&lt;br/&gt;機械検査&lt;br/&gt;path許可 / secret混入 /&lt;br/&gt;構文 / frontmatter]
     VET --&gt;|fail| VF[vet 不合格&lt;br/&gt;accept 不能・要修正]
@@ -236,15 +318,16 @@ sequenceDiagram
         end
         C-&gt;&gt;A: 保留 prompt を session/prompt へ再送
     else 整合（または候補なし）
-        C-&gt;&gt;C: 競合判定: prompt 文中のパス ×&lt;br/&gt;他 busy chat のファイルクレーム
+        C-&gt;&gt;C: 競合判定: prompt 文中のパス ×&lt;br/&gt;他 busy chat のファイルクレーム&lt;br/&gt;（conflictWait=false の並列モードでは&lt;br/&gt;判定自体を skip）
         alt 同一ファイル競合あり
             C-&gt;&gt;C: waiting（実装待機）へ&lt;br/&gt;prompt は保留キューへ
             C--&gt;&gt;UI: SSE push（wait 表示）
         else 競合なし
+            C-&gt;&gt;C: 同時起動セッション枠チェック&lt;br/&gt;（maxConcurrentSessions・既定3・0=無制限。&lt;br/&gt;proc 保持 chat 数が上限未満なら通過。&lt;br/&gt;満杯なら最も古い idle proc を suspend——&lt;br/&gt;savedSessionId 保持で次回送信時に自動再開——&lt;br/&gt;して枠を空ける。busy または起動中&lt;br/&gt;（session 未確立）の proc は suspend 不可。&lt;br/&gt;全枠 busy なら waiting kind=capacity へ。&lt;br/&gt;blocker busy 解除で解放。&lt;br/&gt;idle suspend は送信経路のみ——resume/開始のみの&lt;br/&gt;再開要求は枠が無ければ spawn せず&lt;br/&gt;savedSessionId のまま残し、次回送信で lazy 再開。&lt;br/&gt;「resume が前の idle proc を逐次追い出す&lt;br/&gt;spawn→kill コンベア」を防ぐ）
             C-&gt;&gt;A: session/new or session/load → session/prompt
             Note over C,A: execMode=parallel の初回 prompt には&lt;br/&gt;分割指示プリアンブルを前置&lt;br/&gt;（セッション内で指示が残るため1回のみ）
             A--&gt;&gt;C: session/update stream (message/tool_call/plan/usage_update)
-            Note over C,A: 編集系 tool_call の対象パスは touched として記録し、&lt;br/&gt;turn 単位で変更前スナップショットを&lt;br/&gt;chat-snapshots/ へ採取。&lt;br/&gt;他 busy chat のクレームと重なったら&lt;br/&gt;session/cancel して waiting へ
+            Note over C,A: 編集系 tool_call の対象パスは touched として記録し、&lt;br/&gt;turn 単位で変更前スナップショットを&lt;br/&gt;chat-snapshots/ へ採取。&lt;br/&gt;他 busy chat のクレームと重なったら&lt;br/&gt;session/cancel して waiting へ&lt;br/&gt;（並列モードでは抑止しない）
             Note over C,A: usage_update {used,size,cost?} は chat 別の&lt;br/&gt;コンテキスト消費量として保持。&lt;br/&gt;type=openai は応答 usage.total_tokens から採取&lt;br/&gt;（size 不明のため使用数のみ）
             C--&gt;&gt;UI: SSE push (chat 更新通知・ctx 消費量も随時反映)
         end
@@ -255,12 +338,16 @@ sequenceDiagram
         Note over C: 子 chat の busy 解除 → 最終回答を&lt;br/&gt;ダイジェストとして親 chat へ投函。&lt;br/&gt;空いた枠で待機キューから順次起動。&lt;br/&gt;親は統合・さらなる分割を続けられる
     end
     Note over C: blocker chat の busy 解除 → 待機を解き&lt;br/&gt;保留 prompt を session/prompt へ再送
-    Note over C,A: acp spawn 時は WINDSURF_EXT_HOST_PID を&lt;br/&gt;env から除去（devin は実親でなくこの変数の pid を&lt;br/&gt;親監視するため、死んだ IDE ホストの値が残ると&lt;br/&gt;実行体が起動直後に自死する）
+    UI-&gt;&gt;C: POST /api/chat/parallel {on}
+    Note over C: on=true で conflictWait=false を config 永続化&lt;br/&gt;（並列モード）＋全ての実装待機を blocker 未完了&lt;br/&gt;でも解放し保留/続行 prompt を即時送信&lt;br/&gt;（repo 確認待ちは人ゲートのため対象外）。&lt;br/&gt;on=false で直列ガードへ復帰（実行中は継続）
+    Note over C,A: acp spawn 時は WINDSURF_EXT_HOST_PID を&lt;br/&gt;env から除去（devin は実親でなくこの変数の pid を&lt;br/&gt;親監視するため、死んだホストの値が残ると&lt;br/&gt;実行体が起動直後に自死する。他ホストでも無害な防御）
     Note over C,A: spawn した実行体の stderr・非JSON stdout と&lt;br/&gt;control 自身の stdio は conlog.rs の&lt;br/&gt;リングバッファへ集約 → コンソールタブへ SSE push
     UI-&gt;&gt;C: GET /api/chat?id=N
     C--&gt;&gt;UI: messages/busy/waiting/options/snapPoints スナップショット
     UI-&gt;&gt;C: POST /api/chat/resume {id}
     C-&gt;&gt;A: session/load（resumable chat の手動再接続）
+    UI-&gt;&gt;C: POST /api/chat/start-suspended
+    C-&gt;&gt;A: resumable 全件に session/load（prompt 無しの起動のみ。&lt;br/&gt;同時起動枠は idle 追い出しなしで確保、&lt;br/&gt;枠超過分はスリープのまま残す）
     UI-&gt;&gt;C: POST /api/chat/mode {id, mode}
     C-&gt;&gt;C: execMode を direct/parallel へ切替&lt;br/&gt;（chats.json へ永続化・SSE push。既定=parallel）
     UI-&gt;&gt;C: POST /api/chat/revise {id, text}
@@ -278,7 +365,7 @@ sequenceDiagram
 title: パネルレイアウト
 ---
 flowchart LR
-    L[左ペイン&lt;br/&gt;title + カレントrepo +&lt;br/&gt;縦並びナビ&lt;br/&gt;（処理状況/AIチャット/エディター/&lt;br/&gt;AGENTS/SKILL/マニュアル/設定の順。&lt;br/&gt;初期表示は処理状況）] --&gt; C[中央ペイン&lt;br/&gt;chat messages（chat/console タブ）/&lt;br/&gt;doc 本文（Viewer 単一オブジェクトに集約&lt;br/&gt;kind判定・原文/プレビュー切替・mermaid描画&lt;br/&gt;MD+mermaid・HTML・MMD 表示・MMD は縦横切替可&lt;br/&gt;mermaid 図は＋−ボタン/wheel で拡縮&lt;br/&gt;（カーソル位置を維持）&lt;br/&gt;中央配置・ドラッグで視野移動・ズーム率表示）]
+    L[左ペイン&lt;br/&gt;title + カレントrepo +&lt;br/&gt;縦並びナビ&lt;br/&gt;（セッション/メトリクス/AIチャット/エディター/&lt;br/&gt;AGENTS/SKILL/マニュアル/開発環境/設定の順。&lt;br/&gt;初期表示はセッション）] --&gt; C[中央ペイン&lt;br/&gt;chat messages（chat/console タブ）/&lt;br/&gt;doc 本文（Viewer 単一オブジェクトに集約&lt;br/&gt;kind判定・原文/プレビュー切替・mermaid描画&lt;br/&gt;MD+mermaid・HTML・MMD 表示・MMD は縦横切替可&lt;br/&gt;mermaid 図は＋−ボタン/wheel で拡縮&lt;br/&gt;（カーソル位置を維持）&lt;br/&gt;中央配置・ドラッグで視野移動・ズーム率表示）]
     C --&gt; R[右ペイン&lt;br/&gt;管理セクション / doc browser + 参照ファイル /&lt;br/&gt;フォルダツリー（エディター）&lt;br/&gt;（エディター/AGENTS/SKILL 選択時は doc browser。&lt;br/&gt;表示するものがない時は管理セクションを&lt;br/&gt;表示し、ペイン自体は常時表示。&lt;br/&gt;省略ラベルは data-tip&lt;br/&gt;ホバーポップアップで全文表示）]
     G[境界グリップ&lt;br/&gt;ドラッグで幅可変&lt;br/&gt;localStorage 永続化] --&gt; L
     G --&gt; R
@@ -288,12 +375,12 @@ flowchart LR
     C --&gt;|ヘッダレイアウト&lt;br/&gt;1行目=タイトル（概要）が全幅&lt;br/&gt;（タイトル前に処理状態ピル。&lt;br/&gt;削除ボタン表示時はタイトルと1行目を共有）&lt;br/&gt;2行目=plink/status/最新/◀▶ページング/&lt;br/&gt;options/言語select/操作ボタン| HD[flex-wrap で&lt;br/&gt;自然折返し]
     C --&gt;|タイトル前の状態ピル| CPILL[ボードの列区分と同じ色で&lt;br/&gt;現在の処理状態を表示&lt;br/&gt;（実行中/実行待機中/検証中/&lt;br/&gt;検証待ち/要対応など）&lt;br/&gt;SSE push で即時反映]
     C --&gt;|最新ボタン| NEW[updatedAt 最大の&lt;br/&gt;chat を選択]
-    C --&gt;|ヘッダの◀戻る/進む▶ボタン&lt;br/&gt;（新規画面からは 進む=先頭・戻る=末尾）| PAGE[処理状況ボードと同じ並びで&lt;br/&gt;前後の chat を選択&lt;br/&gt;（列順 idle→exec→verify→resume→&lt;br/&gt;unresolved→live。他repoのchatは&lt;br/&gt;カレントrepo切替を兼ねる）]
-    C --&gt;|ヘッダの＋新規チャットボタン /&lt;br/&gt;処理状況ボード上部の&lt;br/&gt;＋新規チャットボタン| NEWC[新規 chat 画面へ&lt;br/&gt;（chat の切替は処理状況ボードの&lt;br/&gt;カードで行う）]
+    C --&gt;|ヘッダの◀戻る/進む▶ボタン&lt;br/&gt;（新規画面からは 進む=先頭・戻る=末尾）| PAGE[status 順（旧処理状況の並び）で&lt;br/&gt;前後の chat を選択&lt;br/&gt;（列順 idle→exec→verify→resume→&lt;br/&gt;unresolved→live。他repoのchatは&lt;br/&gt;カレントrepo切替を兼ねる）]
+    C --&gt;|ヘッダの＋新規チャットボタン| NEWC[新規 chat 画面へ&lt;br/&gt;（chat の切替は左ペイン一覧で行う）]
     C --&gt;|言語 select&lt;br/&gt;localStorage 永続化| I18N[panel/i18n.js&lt;br/&gt;i18n/*.json 辞書&lt;br/&gt;en がフォールバック&lt;br/&gt;data-i18n 属性 + t()&lt;br/&gt;切替時は全ペイン再描画]
     C --&gt;|設定システムタブの&lt;br/&gt;タイムゾーン入力&lt;br/&gt;（IANA名・空欄=ブラウザ既定&lt;br/&gt;datalist に代表ゾーン）&lt;br/&gt;localStorage 永続化| TZ[表示タイムゾーン&lt;br/&gt;fmtTs/fmtTm が Intl で変換&lt;br/&gt;chat・console・一覧の時刻表示&lt;br/&gt;保存 ts は UTC のまま]
     R --&gt; M1[loop state&lt;br/&gt;version/port/repos/chats/candidates&lt;br/&gt;+ KPI（status別件数・done率・MTTR）&lt;br/&gt;行ラベルは i18n 辞書で言語化]
-    R --&gt; M2[candidates/issues/proposals&lt;br/&gt;candidates は人の判断待ちのみ表示&lt;br/&gt;（未起票・gated・queued・failed。&lt;br/&gt;起票は自動が既定で実行中・終端の&lt;br/&gt;課題行は出さない）&lt;br/&gt;candidate 行は起票済み課題の status を併記&lt;br/&gt;rate-limit 保留の candidate は&lt;br/&gt;deferred ピルで明示&lt;br/&gt;全行に 対応/却下ボタン:&lt;br/&gt;対応=起票/承認/再実行を兼ねた即時 dispatch&lt;br/&gt;（未起票は rate-limit を人判断で bypass）&lt;br/&gt;却下=rejected（未起票は起票して即 rejected）&lt;br/&gt;proposal カードはクリックで&lt;br/&gt;中央ペインへ詳細表示&lt;br/&gt;queued issue は対応ボタンで即時 dispatch&lt;br/&gt;issue 行は priority バッジ（P2/P3）を併記&lt;br/&gt;一覧は状態→priority→更新時刻順に整列&lt;br/&gt;status・source・kind の表示は&lt;br/&gt;i18n 辞書で言語化（未知の値は原文）&lt;br/&gt;各行の body/rationale は&lt;br/&gt;data-tip ホバーでポップアップ表示]
+    R --&gt; M2[candidates/issues/proposals&lt;br/&gt;candidates は人の判断待ちのみ表示&lt;br/&gt;（未起票・gated・queued・failed。&lt;br/&gt;起票は自動が既定で実行中・終端の&lt;br/&gt;課題行は出さない）&lt;br/&gt;candidate 行は起票済み課題の status を併記&lt;br/&gt;rate-limit 保留の candidate は&lt;br/&gt;deferred ピルで明示&lt;br/&gt;全行に 対応/却下ボタン:&lt;br/&gt;対応=起票/承認/再実行を兼ねた即時 dispatch&lt;br/&gt;（未起票は rate-limit を人判断で bypass）&lt;br/&gt;却下=rejected（未起票は起票して即 rejected）&lt;br/&gt;proposal カードはクリックで&lt;br/&gt;中央ペインへ詳細表示&lt;br/&gt;queued issue は対応ボタンで即時 dispatch&lt;br/&gt;candidates/issues 各セクションの&lt;br/&gt;「一括対応」ボタンは表示中の判断待ち行を&lt;br/&gt;一括 dispatch（起動不可は autoDispatch 待機）&lt;br/&gt;課題処理方法（issueExecMode・設定システムタブ。&lt;br/&gt;既定=並列）: 直接=runner パイプライン（同一repo直列）/&lt;br/&gt;並列=chat セッション起票で並列処理&lt;br/&gt;（課題は chatId を持ち行に chat #N リンクバッジ。&lt;br/&gt;chat は課題 key を持ち終了区分を課題へ写像。&lt;br/&gt;done 課題行は drain の sweep が issues.json から&lt;br/&gt;削除しこの枠に残さない（完了表示は委譲 chat&lt;br/&gt;カードが担う。postPush 監視中は監視終了まで残存。&lt;br/&gt;GitHub 由来は理由コメント+issue クローズ後に削除）&lt;br/&gt;issue 行は priority バッジ（P2/P3）を併記&lt;br/&gt;GitHub Issue 由来の行は GitHub #番号の&lt;br/&gt;リンクバッジを併記（dispatch 後は&lt;br/&gt;manual と同一パイプライン）&lt;br/&gt;一覧は状態→priority→更新時刻順に整列&lt;br/&gt;status・source・kind の表示は&lt;br/&gt;i18n 辞書で言語化（未知の値は原文）&lt;br/&gt;各行の body/rationale は&lt;br/&gt;data-tip ホバーでポップアップ表示]
     M2 --&gt;|proposal カードクリック&lt;br/&gt;詳細（vet 検査結果・changes 本文・&lt;br/&gt;採否ボタン）を中央ペインに表示| C
     L --&gt;|エディターナビ&lt;br/&gt;（AIチャットの直下）| FT[フォルダツリー&lt;br/&gt;右ペインに展開&lt;br/&gt;カレントrepo の path を根&lt;br/&gt;dir は lazy 展開&lt;br/&gt;GET /api/fs/tree&lt;br/&gt;.git/node_modules 等は除外&lt;br/&gt;秘匿系は 🔒 で選択不可]
     FT --&gt;|file 選択&lt;br/&gt;GET /api/fs/file&lt;br/&gt;（登録 repo 配下・非秘匿のみ&lt;br/&gt;binary は本文を返さない）| C
@@ -301,18 +388,21 @@ flowchart LR
     L --&gt;|縦並びナビ&lt;br/&gt;AGENTS/SKILL| R
     L --&gt;|マニュアルナビ&lt;br/&gt;中央ペインを iframe 表示| C
     C --&gt;|GET /docs/* 静的配信| MAN[docs/ マニュアルサイト&lt;br/&gt;正本=diagrams/docs/&lt;br/&gt;（1ページ1.md・frontmatter title&lt;br/&gt;nav.json=章立て&lt;br/&gt;template.html/style.css=書式&lt;br/&gt;Canvas docs 参考）&lt;br/&gt;tools/sync-docs.mjs が生成]
+    L --&gt;|セッションナビ&lt;br/&gt;（ナビ先頭・初期表示。1本に統合）&lt;br/&gt;中央ペインにエージェントタブ&lt;br/&gt;（Devin / Copilot）＋カンバン&lt;br/&gt;状況（turn 列・lastNote・failedTools）&lt;br/&gt;と統一ツールバー（維持操作）&lt;br/&gt;（共通テンプレ agent-sessions.mmd）| SESS["devinenv.rs + copilotenv.rs&lt;br/&gt;GET /api/&amp;lt;agent&amp;gt;-sessions&lt;br/&gt;POST delete / cleanup /&lt;br/&gt;vacuum・done / undone&lt;br/&gt;（詳細は devin-sessions.mmd・&lt;br/&gt;copilot-sessions.mmd）"]
+    SESS --&gt;|操作後は GET で再描画| C
     L --&gt;|git ナビ（設定下の区切り線以下・ナビ末尾）&lt;br/&gt;コミット=メッセージ入力→&lt;br/&gt;POST /api/git/commit&lt;br/&gt;（git add -A + commit・変更なしは noop）&lt;br/&gt;プッシュ=確認後&lt;br/&gt;POST /api/git/push（人ゲートの承認）| GIT[カレント repo で git を spawn&lt;br/&gt;60s timeout&lt;br/&gt;出力は conlog 集約&lt;br/&gt;→ console タブへ SSE push]
-    L --&gt;|設定ナビ&lt;br/&gt;タブ: 接続AI / リポジトリ / システム&lt;br/&gt;（登録済み + IDE管理下検出 + ユーザー検出:&lt;br/&gt;ワークスペース/repoScanDirs 直下の .git 無し dir・&lt;br/&gt;ユーザーディレクトリ/repoScanDirs 直下の .git dir&lt;br/&gt;※GitHub 非依存のローカル repo も対象）&lt;br/&gt;リポジトリタブ内はサブタブでグループ化&lt;br/&gt;（slug の GitHub owner ごと /&lt;br/&gt;ユーザー / (owner なし)。選択は永続化・&lt;br/&gt;グループ説明は data-tip ポップアップ）&lt;br/&gt;GET /api/chat-agents&lt;br/&gt;GET /api/repos| C
+    L --&gt;|設定ナビ&lt;br/&gt;タブ: 接続AI / リポジトリ / システム&lt;br/&gt;（登録済み + ワークスペース管理下検出 + ユーザー検出:&lt;br/&gt;ワークスペース/repoScanDirs 直下の .git 無し dir・&lt;br/&gt;ユーザーディレクトリ/repoScanDirs 直下の .git dir&lt;br/&gt;※GitHub 非依存のローカル repo も対象）&lt;br/&gt;リポジトリタブ内はサブタブでグループ化&lt;br/&gt;（slug の GitHub owner ごと /&lt;br/&gt;ユーザー / (owner なし)。選択は永続化・&lt;br/&gt;グループ説明は data-tip ポップアップ）&lt;br/&gt;GET /api/chat-agents&lt;br/&gt;GET /api/repos| C
     C --&gt;|接続AI 追加/更新/解除&lt;br/&gt;active 切替&lt;br/&gt;POST /api/chat-agents/*| AC[config.json の&lt;br/&gt;chatAgents + chatAgent&lt;br/&gt;SSE push で即時反映]
     AC --&gt;|新規 chat の実行体&lt;br/&gt;（chat 作成時に固定し&lt;br/&gt;chats.json へ永続化）| ACPX[接続AI 実行体&lt;br/&gt;acp=CLI spawn /&lt;br/&gt;agent=/agent HTTP /&lt;br/&gt;openai=chat/completions]
     ACPX --&gt;|stderr / 非JSON stdout&lt;br/&gt;（acp 型の spawn のみ）| CON[conlog.rs&lt;br/&gt;実行体出力 + control 自身の&lt;br/&gt;stdio をリングバッファ集約]
     C --&gt;|console タブ&lt;br/&gt;GET /api/console +&lt;br/&gt;SSE console push| CON
     C --&gt;|処理モード select&lt;br/&gt;（入力行の先頭・添付ボタンの左&lt;br/&gt;目立たせるため強調表示）&lt;br/&gt;POST /api/chat/mode| EM[execMode&lt;br/&gt;（既定=parallel）&lt;br/&gt;direct=逐次 /&lt;br/&gt;parallel=kasugai-split で&lt;br/&gt;子chat自動起動・結果を親へ集約&lt;br/&gt;同時実行上限超過分は&lt;br/&gt;pendingSplits待機キュー・&lt;br/&gt;子完了で順次起動&lt;br/&gt;ボードの子chatカードは↳印で識別]
     C --&gt;|repo設定 保存/登録解除&lt;br/&gt;POST /api/repos/update&lt;br/&gt;POST /api/repos/remove| RC[config.json の repos&lt;br/&gt;SSE push で即時反映]
-    C --&gt;|repo登録（設定ビューの&lt;br/&gt;path入力・参照ピッカー /&lt;br/&gt;IDE管理下の登録ボタン）&lt;br/&gt;POST /api/repos| RC
+    C --&gt;|設定システムタブの&lt;br/&gt;課題処理方法 select&lt;br/&gt;（直接=direct / 並列=parallel・既定並列）&lt;br/&gt;POST /api/control/issue-mode| IMD[issueExecMode&lt;br/&gt;config.json 永続化&lt;br/&gt;direct=runner パイプラインで直接実行&lt;br/&gt;（同一 repo の active 課題がある間&lt;br/&gt;dispatch 停止=直列・maxConcurrentRuns&lt;br/&gt;クォーラム有効） /&lt;br/&gt;parallel=chat 起票で並列処理&lt;br/&gt;（課題は chatId リンクを持ち&lt;br/&gt;chat 終了区分を課題へ写像）&lt;br/&gt;SSE push で即時反映]
+    C --&gt;|設定システムタブの&lt;br/&gt;同時起動セッション数 input&lt;br/&gt;POST /api/control/session-limit| SLM[maxConcurrentSessions&lt;br/&gt;既定3・0=無制限&lt;br/&gt;config.json 永続化&lt;br/&gt;proc 保持 chat 数の上限。&lt;br/&gt;超過起動は最古 idle proc を&lt;br/&gt;suspend（savedSessionId 保持で&lt;br/&gt;次回送信時に自動再開）して枠確保、&lt;br/&gt;全枠 busy なら capacity 待機&lt;br/&gt;SSE push で即時反映]
+    C --&gt;|repo登録（設定ビューの&lt;br/&gt;path入力・参照ピッカー /&lt;br/&gt;ワークスペース管理下の登録ボタン）&lt;br/&gt;POST /api/repos| RC
     C --&gt;|path 参照&lt;br/&gt;GET /api/fs/dirs| FS[ローカルFSブラウザ&lt;br/&gt;サブdir + .git 検出&lt;br/&gt;loopback 限定]
     RC --&gt;|選択肢へ追加し&lt;br/&gt;SSE即時反映| RS
-    L --&gt;|処理状況ナビ&lt;br/&gt;（起動時の初期表示）&lt;br/&gt;idle/exec/verify/resume/unresolved/live&lt;br/&gt;の順の状態別カンバン列&lt;br/&gt;（列幅は内容量で可変: 空列=半分幅 /&lt;br/&gt;2件以上=件数比例で広げ&lt;br/&gt;カードを多段グリッド表示）&lt;br/&gt;exec列は busy+waiting を統合&lt;br/&gt;カードに実行中/実行待機中ピル&lt;br/&gt;カードに ctx 消費量ピル（usage_update 由来。&lt;br/&gt;行は最小表示のため詳細は data-tip）&lt;br/&gt;verify列は実装ターン終了で自動遷移&lt;br/&gt;（touched あり → autoVerify で検証&lt;br/&gt;prompt 送信・検証中も列に留まる）&lt;br/&gt;idle列は proc無し・saved sid無しの chat&lt;br/&gt;（起動失敗時は prompt を保留し&lt;br/&gt;開始/処理再開で再送）&lt;br/&gt;完了は「人の操作が必要か」で分岐:&lt;br/&gt;live列=接続中の完了セッション全般&lt;br/&gt;（実装完了 doneKind=done と&lt;br/&gt;無印=実装ターンを経ずに終了したもの）&lt;br/&gt;unresolved列=要対応のみ&lt;br/&gt;（検証NG=ng / verdict未取得=unverified /&lt;br/&gt;差し戻し再送待ち・要人対応）を区分ピルで明示。&lt;br/&gt;検証NGの差し戻しは prompt を保留して&lt;br/&gt;同列で再送待ち（自動送信しない）とし、&lt;br/&gt;上限到達は「要人対応」ピルを付す。&lt;br/&gt;doneKind=done は終端: 新規ターンでも消さず&lt;br/&gt;live列に留まる。done の chat で変更が生じた&lt;br/&gt;ターンは派生課題として candidate intake へ&lt;br/&gt;起票（source=derived）し chat 側は done を維持| C
     C --&gt;|statusカードクリック| PICK[該当 chat を選択表示&lt;br/&gt;選択時は最終行へスクロール&lt;br/&gt;（SSE 更新の追尾は末尾付近のみ）]
     C --&gt;|検証列カードの検証ボタン&lt;br/&gt;POST /api/chat/verify| VR[検証ターン起動&lt;br/&gt;対象EXE起動+Playwright等の&lt;br/&gt;実機確認を指示&lt;br/&gt;SSE push で即時反映]
     C --&gt;|verify=running/pending| VSH[chat 画面にも検証中/検証待ちを明示&lt;br/&gt;ヘッダ status＋メッセージ末尾の&lt;br/&gt;インジケータ＋送信ボタン&lt;br/&gt;SSE push で即時反映]
@@ -323,6 +413,8 @@ flowchart LR
     C --&gt;|要対応列カードの差し戻しボタン&lt;br/&gt;POST /api/chat/rework| RWK[保留の差し戻しpromptがあればそれを、&lt;br/&gt;無ければ終了区分に応じた再作業promptを送信&lt;br/&gt;doneKind/verify系・要人対応をリセットし&lt;br/&gt;exec列へ戻す&lt;br/&gt;SSE push で即時反映]
     C --&gt;|再開可列カードの再開ボタン・&lt;br/&gt;未着手列カードの開始ボタン&lt;br/&gt;POST /api/chat/resume| RLOAD[session/load で再接続&lt;br/&gt;saved sid 無しは session/new で起動&lt;br/&gt;未送信の保留promptがあれば再送&lt;br/&gt;SSE push で即時反映]
     C --&gt;|ボード上部の「処理再開」ボタン&lt;br/&gt;（停止中の件数を併記・0件は無効）&lt;br/&gt;POST /api/chat/resume-all| RALL[止まった処理を一括再開&lt;br/&gt;差し戻し待ち→保留の差し戻しprompt再送&lt;br/&gt;再開可→session/load再接続+&lt;br/&gt;中断作業の続行prompt送信&lt;br/&gt;未着手→session/newで起動+&lt;br/&gt;起動失敗で保留のprompt再送&lt;br/&gt;検証待ち→検証ターン起動&lt;br/&gt;ブロッカー消失の実行待機→&lt;br/&gt;解放して保留prompt再送&lt;br/&gt;（busy中・repo確認待ち・要人対応は触らない）&lt;br/&gt;SSE push で即時反映]
+    C --&gt;|ボード上部の「スリープ起動」ボタン&lt;br/&gt;（スリープ中の件数を併記・0件は無効）&lt;br/&gt;POST /api/chat/start-suspended| SUSP[スリープ中セッションを一括起動&lt;br/&gt;resumable（acp・proc無・savedSessionId有）&lt;br/&gt;全件に ensure_session→session/load のみ&lt;br/&gt;prompt は送らない（busy化しない）。&lt;br/&gt;同時起動枠は idle追い出しなしで確保し&lt;br/&gt;枠超過分はスリープのまま残す&lt;br/&gt;（次回送信時に lazy 再開）&lt;br/&gt;SSE push で即時反映]
+    C --&gt;|実行状況列ヘッダの「並列」ボタン&lt;br/&gt;（待機件数を併記・ON中は強調）&lt;br/&gt;POST /api/chat/parallel {on}| PAR[並列モード切替&lt;br/&gt;on→conflictWait=false を config 永続化し&lt;br/&gt;全ての実装待機を blocker 未完了でも&lt;br/&gt;解放して即時送信（repo確認待ちは除く）&lt;br/&gt;以後の送信・FileTouch 競合も待機しない&lt;br/&gt;off→直列ガードへ復帰（実行中は継続）&lt;br/&gt;SSE push で即時反映]
     R --&gt;|doc一覧 GET /api/agents&lt;br/&gt;GET /api/skills&lt;br/&gt;SKILL は global scope を&lt;br/&gt;一覧から除外| REG[doc registry&lt;br/&gt;agents.rs /&lt;br/&gt;skills.rs]
     R --&gt;|doc/参照ファイル選択&lt;br/&gt;GET /api/doc| C
     R --&gt;|GET /api/refs&lt;br/&gt;AGENTS: 切替時に全doc分を&lt;br/&gt;マージして一覧化&lt;br/&gt;SKILL: doc選択時| RF[参照ファイル抽出&lt;br/&gt;registry/refs.rs&lt;br/&gt;秘匿・未作成は無効表示]
@@ -339,7 +431,7 @@ flowchart LR
     AR[agent registry&lt;br/&gt;server/src/registry/agents.rs]
     PR[proposals.rs&lt;br/&gt;skills/prompts/config 差分生成]
     HG{人の採否}
-    CONF[.devin/skills&lt;br/&gt;prompts/config]
+    CONF[.agents/skills&lt;br/&gt;prompts/config]
     PIPE[pipeline.rs&lt;br/&gt;状態遷移]
     RUN[runner/worker]
     VER[verify]
@@ -426,6 +518,43 @@ flowchart TD
         MANUAL[exe 直起動 / npm run dev&lt;br/&gt;（tools/dev.mjs: 対象ポートの占有を強制停止→cargo run。&lt;br/&gt;通常版・開発版とも :8586。検証の並走は PORT= で適宜指定）]
         PROTO2[kasugai-agent:// プロトコル&lt;br/&gt;（本図のフォールバック経路）]
     end
+</pre>
+<h3>Devin セッション管理（環境維持）</h3>
+<!-- diagram: devin-sessions -->
+<pre class="mermaid">
+---
+title: Devin セッション管理（環境維持）
+---
+flowchart LR
+    NAV[セッションナビ → Devin タブ] --&gt; VIEW[中央ペイン&lt;br/&gt;Devin セッション管理ビュー]
+    VIEW --&gt; GET[GET /api/devin-sessions&lt;br/&gt;sessions・live判定・&lt;br/&gt;孤立ファイル数・DBサイズ]
+    GET --&gt; DB[(Devin CLI&lt;br/&gt;%APPDATA%/Devin/cli/&lt;br/&gt;sessions.db)]
+    GET --&gt; LK[session_locks/&lt;br/&gt;&amp;lt;id&amp;gt;.lock&lt;br/&gt;LockFile バイトロック試行&lt;br/&gt;= live 判定]
+    GET --&gt; SM[summaries/&lt;br/&gt;&amp;lt;id&amp;gt;.md]
+    DB --&gt; TURN[ターン状態判定&lt;br/&gt;message_nodes 末尾を遡り最初の実ノードで判定&lt;br/&gt;（通知系 system ノードは読み飛ばし）:&lt;br/&gt;assistant+finish=stop → answered&lt;br/&gt;user/tool 末尾 or tool_calls 途中 → working&lt;br/&gt;割込マーカー or 非liveの途中 → interrupted&lt;br/&gt;※ answered は報告済みの意味。&lt;br/&gt;指示の実現性は lastNote で人が確認]
+    DB --&gt; NOTE[最終応答抜粋 lastNote&lt;br/&gt;最後の assistant ノード冒頭&lt;br/&gt;+ tool_call_state 失敗数 failedTools]
+    VIEW --&gt; DONE[POST /api/devin-sessions/done&lt;br/&gt;{ids} を完了化&lt;br/&gt;live 中は拒否&lt;br/&gt;sessions.db は触らない]
+    VIEW --&gt; UNDONE[POST /api/devin-sessions/undone&lt;br/&gt;{ids} を一覧へ戻す]
+    VIEW --&gt; DEL[POST /api/devin-sessions/delete&lt;br/&gt;{ids} 行削除&lt;br/&gt;live 中は拒否&lt;br/&gt;FTS は delete トリガーで連動]
+    VIEW --&gt; CLS[POST /api/devin-sessions/cleanup&lt;br/&gt;孤立 lock/summary を除去]
+    VIEW --&gt; VAC[POST /api/devin-sessions/vacuum&lt;br/&gt;sessions.db を VACUUM]
+    VIEW --&gt; ATT[POST /api/devin-sessions/attach&lt;br/&gt;{id} → saved_session_id 付き&lt;br/&gt;kasugai chat を作成&lt;br/&gt;（トランスクリプトを履歴に流し込み:&lt;br/&gt;user=本文/assistant=thinking→thought・&lt;br/&gt;本文→agent・tool_calls→tool 行&lt;br/&gt;※tool 結果行・system は除外）&lt;br/&gt;→ chatSelect で本格 AI チャット]
+    DONE --&gt; DF[devin-done.json&lt;br/&gt;kasugai_agent root&lt;br/&gt;done: id→ doneAt/title/wd]
+    UNDONE --&gt; DF
+    DF --&gt; GET2[GET 応答の各 session に&lt;br/&gt;done/doneAt を付与。&lt;br/&gt;DB 消滅 id は読み時に purge]
+    GET2 --&gt; VIEW
+    VIEW --&gt; TABS[タブ: 一覧（!done）/ 完了（done）&lt;br/&gt;完了タブは戻す・削除ボタン]
+    DEL --&gt; DB
+    CLS --&gt; LK
+    CLS --&gt; SM
+    VAC --&gt; DB
+    DEL --&gt; DF2[削除時は done エントリも除去]
+    DF2 --&gt; DF
+    DONE --&gt; REF[応答後に GET で再描画&lt;br/&gt;（状態と画面の乖離を残さない）]
+    UNDONE --&gt; REF
+    DEL --&gt; REF
+    CLS --&gt; REF
+    VAC --&gt; REF
 </pre>
     </main>
   </div>

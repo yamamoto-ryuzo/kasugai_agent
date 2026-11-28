@@ -4,14 +4,17 @@
 //     knowledge/<slug>.md が未作成の課題を拾い、run 結果・証跡・課題本文を
 //     要約した生の知見を無条件で生成する（採否不要）。
 // (b) SKILL draft 起票: 知見から再利用可能な手順・注意を
-//     .devin/skills/<slug>/SKILL.md（frontmatter: name/description/
+//     <skillDir>/<slug>/SKILL.md（frontmatter: name/description/
 //     status: draft、本文に mermaid 図必須）として組立、proposals::create
 //     （kind="skill"・issueKey=<key>）で起票する。採否は人ゲートで、vet が
 //     前提検査を行う。
 //     slug = source+repo+kind の安定名で mermaid 図の title と同名。
 //     key（run id 等の揮発 id）は含まないため、同じ種別の課題は同じ
 //     skill 名に収束する。同 path の proposal（pending/decided 問わず）
-//     または同一内容があれば再作成しない。
+//     または同一内容があれば再作成しない。proposal ファイルは消え得る
+//     （手動削除・状態リセット）ため、起票済み slug は
+//     knowledge/skill-drafts.json の台帳に永続記録し、適用済みの
+//     SKILL.md が存在する slug も起票しない。
 //
 // issue key は `source:repo:hash` 形式で `:` `/` を含みファイル名に使えない
 // ため、ファイル/ディレクトリ名には key_slug を用いる。
@@ -213,7 +216,23 @@ fn skill_slug(issue: &Value) -> String {
     key_slug(&base)
 }
 
-/// 知見 → .devin/skills/<slug>/SKILL.md の draft 案（mermaid 図必須・図 title = slug）
+/// SKILL draft の書込み先（config.skillDirs、既定 [".agents/skills"]）。
+/// .agents/skills は agentskills 共通規格で Devin・Copilot 双方の runner が
+/// 読む。複数 dir を指定すると同一内容を全 dir へ起票する（ホスト併用向け）
+fn skill_dirs(cfg: &Value) -> Vec<String> {
+    let dirs: Vec<String> = crate::config::cfg_arr(cfg, "skillDirs")
+        .iter()
+        .filter_map(|v| v.as_str().map(|s| s.trim().trim_end_matches('/').to_string()))
+        .filter(|s| !s.is_empty() && !s.contains(".."))
+        .collect();
+    if dirs.is_empty() {
+        vec![".agents/skills".to_string()]
+    } else {
+        dirs
+    }
+}
+
+/// 知見 → <skillDir>/<slug>/SKILL.md の draft 案（mermaid 図必須・図 title = slug）
 fn skill_md(issue: &Value, slug: &str, kslug: &str) -> String {
     let get = |k: &str| issue.get(k).and_then(|v| v.as_str()).unwrap_or("");
     let kind = get("kind");
@@ -249,7 +268,7 @@ status: draft
 ## 注意
 
 - 状態遷移は pipeline のみが行う。issues.json を直接編集しない
-- 知見の反映は proposals 経由（`.devin/skills` を直接編集しない）
+- 知見の反映は proposals 経由（skills ディレクトリを直接編集しない）
 
 ```mermaid
 ---
@@ -272,11 +291,14 @@ flowchart LR
     )
 }
 
-/// `.devin/skills/<slug>/SKILL.md` から slug を取り出す
+/// `<dir>/skills/<slug>/SKILL.md` から slug を取り出す
+/// （dir は .agents/.devin/.github 等のホスト別配置いずれでもよい）
 fn skill_slug_of(path: &str) -> &str {
-    path.strip_prefix(".devin/skills/")
-        .and_then(|s| s.strip_suffix("/SKILL.md"))
-        .unwrap_or("")
+    let p = path.strip_suffix("/SKILL.md").unwrap_or(path);
+    if let Some(i) = p.rfind("/skills/") {
+        return &p[i + "/skills/".len()..];
+    }
+    p.strip_prefix("skills/").unwrap_or("")
 }
 
 /// draft 本文の揮発部分（課題 key / skill slug / 知見ファイル名 / 課題題名）を
@@ -288,8 +310,11 @@ fn norm_draft(c: &str, key: &str, slug: &str) -> String {
     if !key.is_empty() {
         s = s.replace(key, "<key>");
         let ks = key_slug(key);
-        if !ks.is_empty() && ks != slug {
-            s = s.replace(&ks, "<kslug>");
+        // 知見ファイル名（kslug）も揮発名として <slug> へ畳む。
+        // 旧命名（課題 key 入り slug = kslug と同形）の草案と新命名
+        // （安定 slug）の草案が同一判定されるよう、プレースホルダは統一する
+        if !ks.is_empty() {
+            s = s.replace(&ks, "<slug>");
         }
     }
     if !slug.is_empty() {
@@ -328,6 +353,30 @@ fn has_same_draft(existing: &[Value], content: &str, key: &str, slug: &str) -> b
     })
 }
 
+/// 起票済み skill slug の台帳（knowledge/skill-drafts.json）。
+/// proposal ファイルは decided/ 退避後の削除・手動削除・状態リセットで
+/// 消え得るため、「一度起票した slug」は proposals とは別に永続記録する
+/// （learn-flow.mmd の抑止チェック）
+fn drafts_ledger_path(kdir: &Path) -> PathBuf {
+    kdir.join("skill-drafts.json")
+}
+
+fn load_drafts_ledger(kdir: &Path) -> serde_json::Map<String, Value> {
+    std::fs::read_to_string(drafts_ledger_path(kdir))
+        .ok()
+        .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+        .and_then(|v| v.as_object().cloned())
+        .unwrap_or_default()
+}
+
+fn save_drafts_ledger(kdir: &Path, ledger: &serde_json::Map<String, Value>) {
+    let _ = std::fs::create_dir_all(kdir);
+    let _ = std::fs::write(
+        drafts_ledger_path(kdir),
+        serde_json::to_string_pretty(&json!(ledger)).unwrap_or_default(),
+    );
+}
+
 /// learn の1回分。戻り値 (知見ファイル生成数, proposal 起票数)。
 /// control.rs の watcher から定期呼び出しされる。
 pub fn learn_pass(root: &Path) -> (usize, usize) {
@@ -337,8 +386,37 @@ pub fn learn_pass(root: &Path) -> (usize, usize) {
     }
     let kdir = dir(root);
     let pdir = proposals::dir(root);
+    let cfg = crate::config::load_config(root);
     let mut existing = proposals::list(&pdir);
     existing.extend(proposals::list(&proposals::decided_dir(&pdir)));
+    // 起票済み台帳: 既存 proposal（pending/decided）の skill slug を
+    // seed する。proposal ファイルが消えても「起票済み」は台帳が保持し、
+    // 同一内容の再起票を抑止する
+    let mut ledger = load_drafts_ledger(&kdir);
+    let mut ledger_dirty = false;
+    for p in &existing {
+        let pkey = p.get("issueKey").cloned().unwrap_or(Value::Null);
+        let filed = p
+            .get("createdAt")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        for c in p
+            .get("changes")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default()
+        {
+            let s = skill_slug_of(c.get("path").and_then(|v| v.as_str()).unwrap_or(""));
+            if !s.is_empty() && !ledger.contains_key(s) {
+                ledger.insert(
+                    s.to_string(),
+                    json!({"issueKey": pkey, "filedAt": filed}),
+                );
+                ledger_dirty = true;
+            }
+        }
+    }
     let mut kn = 0;
     let mut pn = 0;
     for issue in &issues {
@@ -358,27 +436,46 @@ pub fn learn_pass(root: &Path) -> (usize, usize) {
         if !has_runs && ev.is_none() {
             continue;
         }
-        // (a) 生の知見を無条件蓄積
+        // (a) 生の知見を無条件蓄積。secret redaction（manual-a3a60c51）:
+        //     知見は trajectory の写しなので生成段階でマスクする
         let _ = std::fs::create_dir_all(&kdir);
-        if std::fs::write(&kpath, knowledge_md(issue, &ev.unwrap_or_default())).is_err() {
+        let md = crate::redact::scrub(&knowledge_md(issue, &ev.unwrap_or_default()));
+        if std::fs::write(&kpath, md).is_err() {
             continue;
         }
         kn += 1;
-        // (b) SKILL draft 起票（同 slug path または同一内容の proposal があれば作らない）
+        // (b) SKILL draft 起票（同 slug path・同一内容の proposal、
+        //     起票済み台帳、適用済み SKILL.md があれば作らない）
         let sslug = skill_slug(issue);
-        let rel = format!(".devin/skills/{}/SKILL.md", sslug);
+        let rels: Vec<String> = skill_dirs(&cfg)
+            .iter()
+            .map(|d| format!("{}/{}/SKILL.md", d, sslug))
+            .collect();
         let draft = skill_md(issue, &sslug, &slug);
-        if has_same_path(&existing, &rel) || has_same_draft(&existing, &draft, key, &sslug) {
+        // 適用済み判定は書込み先 + 走査対象（SKILL_DIRS）の全 dir を見る
+        let applied = rels.iter().any(|r| root.join(r).is_file())
+            || crate::registry::skills::SKILL_DIRS.iter().any(|d| {
+                root.join(format!("{}/{}/SKILL.md", d, sslug)).is_file()
+            });
+        if ledger.contains_key(sslug.as_str())
+            || applied
+            || rels.iter().any(|r| has_same_path(&existing, r))
+            || has_same_draft(&existing, &draft, key, &sslug)
+        {
             continue;
         }
         // 同一パス内で後続課題が同じ skill 名を見られるよう、
         // 起票した proposal を existing に即時反映する
+        let changes: Vec<Value> = rels
+            .iter()
+            .map(|r| json!({"path": r, "content": draft}))
+            .collect();
         let created = proposals::create(
             &pdir,
             &json!({
                 "title": format!("skill draft: {}", sslug),
                 "kind": "skill",
-                "changes": [{"path": rel, "content": draft}],
+                "changes": changes,
                 "rationale": format!(
                     "課題 {} の対応知見（knowledge/{}.md）から再利用可能な手順を SKILL draft 化",
                     key, slug
@@ -387,7 +484,15 @@ pub fn learn_pass(root: &Path) -> (usize, usize) {
             }),
         );
         existing.push(created);
+        ledger.insert(
+            sslug.clone(),
+            json!({"issueKey": key, "filedAt": now_iso()}),
+        );
+        ledger_dirty = true;
         pn += 1;
+    }
+    if ledger_dirty {
+        save_drafts_ledger(&kdir, &ledger);
     }
     (kn, pn)
 }
@@ -437,7 +542,7 @@ mod tests {
         let path = props[0]["changes"][0].get("path").and_then(|v| v.as_str());
         // skill 名は課題 key ではなく source+repo（kind なし）由来の安定名
         let sslug = "github-me-repo";
-        assert_eq!(path, Some(format!(".devin/skills/{}/SKILL.md", sslug).as_str()));
+        assert_eq!(path, Some(format!(".agents/skills/{}/SKILL.md", sslug).as_str()));
         let content = props[0]["changes"][0]
             .get("content")
             .and_then(|v| v.as_str())
@@ -480,7 +585,7 @@ mod tests {
             &proposals::dir(&root),
             &json!({
                 "title": "既存", "kind": "skill",
-                "changes": [{"path": ".devin/skills/github-me-repo/SKILL.md", "content": "x"}],
+                "changes": [{"path": ".agents/skills/github-me-repo/SKILL.md", "content": "x"}],
             }),
         );
         save_j(
@@ -556,8 +661,8 @@ mod tests {
             .iter()
             .filter_map(|p| p["changes"][0].get("path").and_then(|v| v.as_str()))
             .collect();
-        assert!(paths.contains(&".devin/skills/ci-failure-me-repo-build/SKILL.md"));
-        assert!(paths.contains(&".devin/skills/ci-failure-me-repo-lint/SKILL.md"));
+        assert!(paths.contains(&".agents/skills/ci-failure-me-repo-build/SKILL.md"));
+        assert!(paths.contains(&".agents/skills/ci-failure-me-repo-lint/SKILL.md"));
 
         // 同じ kind の別 run は知見のみ蓄積し、同 skill 名の起票は抑止される
         let mut i3 = issue("ci-failure:me/repo:ci-3", json!(["run3"]));
@@ -594,9 +699,75 @@ mod tests {
         // has_same_draft 経由でも既存提案と一致する
         let existing = vec![json!({
             "issueKey": key1,
-            "changes": [{"path": format!(".devin/skills/{}/SKILL.md", slug), "content": d1}],
+            "changes": [{"path": format!(".agents/skills/{}/SKILL.md", slug), "content": d1}],
         })];
         assert!(has_same_draft(&existing, &d2, key2, slug));
+    }
+
+    #[test]
+    fn norm_draft_collapses_old_keyed_slug_format() {
+        // 旧命名（slug = 課題 key slug）と新命名（slug = source+repo+kind）の
+        // 草案は正規化後に一致し、同一 skill の再起票を抑止できる
+        let key = "manual:me/repo:manual-aaa";
+        let mut i = issue(key, json!([]));
+        i["source"] = json!("manual");
+        i["title"] = json!("ゲート追加");
+        let kslug = key_slug(key);
+        let old = skill_md(&i, &kslug, &kslug); // 旧: slug=kslug
+        let new = skill_md(&i, "manual-me-repo", &kslug); // 新: 安定 slug
+        assert_eq!(
+            norm_draft(&old, key, &kslug),
+            norm_draft(&new, key, "manual-me-repo")
+        );
+    }
+
+    #[test]
+    fn does_not_refile_after_proposals_wiped() {
+        let root = temp_root("g");
+        // source=manual の課題（kind なし → slug = manual-me-repo）
+        let key1 = "manual:me/repo:manual-aaa";
+        let mut i1 = issue(key1, json!(["run1"]));
+        i1["source"] = json!("manual");
+        save_j(&root.join("issues.json"), &json!([i1.clone()]));
+        assert_eq!(learn_pass(&root), (1, 1));
+        assert!(drafts_ledger_path(&dir(&root)).is_file());
+
+        // proposal ファイルを全削除（却下履歴ごと掃除）しても台帳は残る
+        let pdir = proposals::dir(&root);
+        for e in std::fs::read_dir(&pdir).unwrap().flatten() {
+            let _ = std::fs::remove_file(e.path());
+        }
+        let _ = std::fs::remove_dir_all(proposals::decided_dir(&pdir));
+        assert!(proposals::list(&pdir).is_empty());
+
+        // 別課題の知見ができても同じ skill draft は再起票されない
+        let key2 = "manual:me/repo:manual-bbb";
+        let mut i2 = issue(key2, json!(["run2"]));
+        i2["source"] = json!("manual");
+        save_j(&root.join("issues.json"), &json!([i1, i2]));
+        assert_eq!(learn_pass(&root), (1, 0));
+        assert!(proposals::list(&pdir).is_empty());
+        assert!(root
+            .join(format!("knowledge/{}.md", key_slug(key2)))
+            .is_file());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn does_not_refile_when_skill_file_exists() {
+        let root = temp_root("h");
+        let key = "github:me/repo:abc123";
+        // 採用済みで適用済み SKILL.md が残る（decided/ 掃除後）なら起票しない
+        let applied = root.join(".agents/skills/github-me-repo/SKILL.md");
+        std::fs::create_dir_all(applied.parent().unwrap()).unwrap();
+        std::fs::write(&applied, "x").unwrap();
+        save_j(
+            &root.join("issues.json"),
+            &json!([issue(key, json!(["run1"]))]),
+        );
+        assert_eq!(learn_pass(&root), (1, 0));
+        assert!(proposals::list(&proposals::dir(&root)).is_empty());
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

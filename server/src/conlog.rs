@@ -36,9 +36,12 @@ pub fn on_console_line(tx: UnboundedSender<Line>) {
 }
 
 /// stream: out=通常 / err=stderr / sys=spawn・exit 等の制御イベント
+/// 実行体出力・control stdio がここを通るため、生成段階の
+/// secret redaction（manual-a3a60c51・redact.rs）を行へ適用する
 pub fn conlog(src: &str, stream: &str, text: &str) {
     for raw in text.split('\n') {
-        let t = raw.trim_end_matches('\r');
+        let t = crate::redact::scrub(raw.trim_end_matches('\r'));
+        let t = t.as_str();
         if t.is_empty() {
             continue;
         }

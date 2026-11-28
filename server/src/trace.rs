@@ -179,7 +179,9 @@ impl Trace {
             .append(true)
             .open(&self.path)
         {
-            let _ = writeln!(f, "{}", span);
+            // secret redaction（manual-a3a60c51）: attributes/message は
+            // verify 理由等の出力由来文字列を含み得るため書き込み点でマスク
+            let _ = writeln!(f, "{}", crate::redact::scrub(&span.to_string()));
         }
     }
 }

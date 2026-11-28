@@ -1,0 +1,21 @@
+---
+title: モデルルーティング（深度別のモデル帯選択）
+---
+flowchart TD
+    ISS[新規課題] --> AS[assess<br/>pipeline.rs]
+    AS --> MT{rule_model_tier<br/>課題深度からモデル帯を決定<br/>modelTier で明示指定可}
+    MT -->|verifyLevel&gt;=3 または<br/>priority&gt;=3 または<br/>本文&gt;=4000B| DEEP[modelTier = deep]
+    MT -->|verifyLevel&lt;=1 かつ<br/>priority&lt;=1 かつ<br/>本文&lt;400B| LIGHT[modelTier = light]
+    MT -->|それ以外| STD[modelTier = standard]
+    DEEP --> REC[課題レコードへ記録<br/>一覧・詳細へ表示<br/>assess_preview の回帰対象]
+    LIGHT --> REC
+    STD --> REC
+    REC --> CALL{runner の実行体呼出}
+    CALL -->|実装 run<br/>start_run| TIER[課題の modelTier を解決]
+    CALL -->|計画生成 / planning critic /<br/>diff review（単発批評）| CRIT[criticTier（既定 light）を解決<br/>批評系は常に軽量帯]
+    TIER --> RES[resolve_agent_tier<br/>modelRouting.agents.&lt;tier&gt; に<br/>指名した chatAgents キー]
+    CRIT --> RES
+    RES -->|帯の agent が exe 持ち| EXE[その exe + promptArgs で<br/>spawn（-p 非対話）]
+    RES -->|帯未設定・exe 無し・<br/>modelRouting 自体が無い| FB[active chatAgent へ<br/>フォールバック（従来動作）]
+    EXE --> LOG[runs[].modelTier と agent exe を<br/>run 記録 / audit / trace span へ記録<br/>帯別の実行コスト母数になる]
+    FB --> LOG

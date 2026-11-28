@@ -13,9 +13,23 @@ title: 2-5 設定
 
 | type | 実行体 | 必須フィールド |
 |---|---|---|
-| `acp` | ACP 対応 CLI を spawn（stdio JSON-RPC） | `exe` / `args` / `auth` |
+| `acp` | ACP 対応 CLI を spawn（stdio JSON-RPC）。`devin acp`・`copilot --acp` 等 | `exe` / `args` / `auth` |
 | `agent` | `POST {endpoint}` 単発ターン | `endpoint` / `provider` |
 | `openai` | OpenAI 互換 `chat/completions` | `endpoint` / `model` |
+
+`acp` 型の `auth` 指定:
+
+| 値 | 動作 |
+|---|---|
+| `"none"` | `authenticate` を送らない（Copilot CLI 等、環境変数トークン運用） |
+| `"devin"` | `%APPDATA%/devin/credentials.toml` の `windsurf_api_key` で `methodId: devin-browser` |
+| その他の文字列 | そのまま ACP `authenticate` の `methodId` として送信 |
+| `{"methodId": "…", "tokenEnv"/"tokenSecret": "…"}` | 環境変数または secrets.json からキーを解決して送信 |
+
+`env` フィールド（オブジェクト）は spawn する子プロセスへ環境変数を注入します。
+値は `"リテラル"` / `"env:VAR"`（親環境から転写）/ `"secret:key"`（secrets.json
+`tokens[key]` から解決）が使えます。トークン等の秘匿値は `secret:` で引いてください
+（`config.json` に平文で書かない）。
 
 トークン・API キーは `secrets.json` の `tokens` へ保存し、
 `config.json` ・ログ・プロンプトには書きません。
@@ -24,7 +38,7 @@ title: 2-5 設定
 
 監視対象リポジトリ（`config.repos`）の登録・設定更新・解除を行います。
 `path` 入力は参照ピッカー（`GET /api/fs/dirs`）で選択できます。
-IDE ワークスペース直下の `.git` 付きディレクトリは「IDE管理下」として
+ワークスペース直下の `.git` 付きディレクトリは「ワークスペース管理下」として
 自動検出され、そのまま登録ボタンで追加できます。
 GitHub を利用していないユーザーリポジトリも「ユーザー」として検出します:
 

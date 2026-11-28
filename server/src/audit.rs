@@ -47,7 +47,9 @@ pub fn record(
         "detail": Value::Object(detail),
     });
     if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(&path) {
-        let _ = writeln!(f, "{}", ev);
+        // secret redaction（manual-a3a60c51）: detail は verify 理由等の
+        // 出力由来文字列を含み得るため、監査台帳への書き込み点でマスクする
+        let _ = writeln!(f, "{}", crate::redact::scrub(&ev.to_string()));
     }
 }
 
